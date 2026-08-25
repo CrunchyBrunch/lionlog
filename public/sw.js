@@ -1,6 +1,7 @@
 const CACHE_PREFIX = "lionlog-shell-";
 const CACHE_NAME = `${CACHE_PREFIX}v0.1.0-alpha.2`;
 const SCOPE_URL = new URL("./", self.registration.scope).href;
+const APPLICATION_DOCUMENT_MARKER = 'data-lionlog-shell="v0.1.0-alpha.2"';
 const CORE_ASSETS = [
   SCOPE_URL,
   new URL("./manifest.webmanifest", self.registration.scope).href,
@@ -9,11 +10,23 @@ const CORE_ASSETS = [
   new URL("./icons/apple-touch-icon.png", self.registration.scope).href,
 ];
 
+async function isExpectedApplicationDocument(response) {
+  if (!response.ok || response.redirected || response.type === "opaqueredirect") return false;
+
+  const responseUrl = new URL(response.url);
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  if (responseUrl.origin !== self.location.origin || !contentType.includes("text/html")) return false;
+
+  return (await response.clone().text()).includes(APPLICATION_DOCUMENT_MARKER);
+}
+
 async function cacheApplicationShell() {
   const cache = await caches.open(CACHE_NAME);
   const shellResponse = await fetch(SCOPE_URL, { cache: "reload" });
 
-  if (!shellResponse.ok) throw new Error("LionLog application shell was unavailable.");
+  if (!(await isExpectedApplicationDocument(shellResponse))) {
+    throw new Error("LionLog application shell was unavailable or unverified.");
+  }
 
   await cache.put(SCOPE_URL, shellResponse.clone());
   const html = await shellResponse.text();
@@ -64,8 +77,10 @@ self.addEventListener("fetch", (event) => {
         const response = await fetch(request);
         if (!response.ok) return (await caches.match(SCOPE_URL)) ?? response;
 
-        const cache = await caches.open(CACHE_NAME);
-        await cache.put(SCOPE_URL, response.clone());
+        if (await isExpectedApplicationDocument(response)) {
+          const cache = await caches.open(CACHE_NAME);
+          await cache.put(SCOPE_URL, response.clone());
+        }
         return response;
       } catch {
         return (await caches.match(SCOPE_URL)) ?? Response.error();
