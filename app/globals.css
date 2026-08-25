@@ -17,6 +17,8 @@ html { scroll-behavior: smooth; }
 
 body {
   margin: 0;
+  min-height: 100dvh;
+  padding-top: env(safe-area-inset-top);
   background:
     radial-gradient(circle at 90% 0%, rgba(232, 107, 53, 0.12), transparent 25rem),
     var(--paper);
@@ -29,7 +31,38 @@ button, select, input { font: inherit; }
 .site-shell {
   width: min(100%, 760px);
   margin: 0 auto;
-  padding: 0 18px 64px;
+  padding: 0 18px calc(64px + env(safe-area-inset-bottom));
+}
+
+.pwa-status {
+  position: sticky;
+  z-index: 10;
+  top: env(safe-area-inset-top);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 42px;
+  padding: 8px max(16px, env(safe-area-inset-right)) 8px max(16px, env(safe-area-inset-left));
+  background: var(--ink);
+  color: var(--paper);
+  box-shadow: 0 8px 28px rgba(19, 38, 31, 0.18);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.pwa-status p { margin: 0; }
+.pwa-status p span { color: var(--orange); margin-right: 5px; }
+.pwa-status button {
+  border: 0;
+  border-radius: 999px;
+  padding: 7px 11px;
+  background: var(--orange);
+  color: white;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .topbar {

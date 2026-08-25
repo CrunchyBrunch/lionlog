@@ -1,6 +1,7 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { headers } from "next/headers";
+import { PwaRegister } from "./pwa-register";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -12,6 +13,14 @@ const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
 });
+
+export const viewport: Viewport = {
+  // Vinext beta currently serializes the standard Viewport fields but omits
+  // viewportFit, so include the directive in its framework-rendered width value.
+  width: "device-width, viewport-fit=cover",
+  initialScale: 1,
+  themeColor: "#f7f5ee",
+};
 
 export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();
@@ -42,8 +51,18 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable}`}>{children}</body>
+    <html lang="en" data-lionlog-shell="v0.1.0-alpha.2">
+      <head>
+        <link rel="manifest" href="./manifest.webmanifest" />
+        <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-title" content="LionLog" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+      </head>
+      <body className={`${geistSans.variable} ${geistMono.variable}`}>
+        <PwaRegister />
+        {children}
+      </body>
     </html>
   );
 }
