@@ -1,0 +1,64 @@
+{
+  "fixtureVersion": "psu-sanitized-observation.v1",
+  "observedAt": "2026-08-25T20:17:14Z",
+  "source": {
+    "name": "Penn State Campus Dining",
+    "menuUrl": "https://www.absecom.psu.edu/menus/user-pages/daily-menu.cfm",
+    "method": "POST",
+    "form": {
+      "selMenuDate": "8/25/26",
+      "selMeal": "Lunch",
+      "selCampus": "11"
+    }
+  },
+  "context": {
+    "serviceDate": "2026-08-25",
+    "meal": "Lunch",
+    "campusId": "11",
+    "campusLabel": "UP: East Food District @ Findlay",
+    "category": "ITALIAN"
+  },
+  "items": [
+    {
+      "sourceHandle": "217886320",
+      "nutritionUrl": "https://www.absecom.psu.edu/menus/user-pages/nutrition-label.cfm?mid=217886320",
+      "name": "Margherita Pizza",
+      "serving": {
+        "quantity": 1,
+        "unit": "SERVG",
+        "label": "1 SERVG"
+      },
+      "nutrition": {
+        "calories": 323,
+        "fatG": 13.1,
+        "carbsG": 36.1,
+        "proteinG": 16.3
+      },
+      "dietaryTraits": ["meatless", "halal-friendly"],
+      "containsAllergens": ["dairy", "soy", "wheat-gluten"]
+    },
+    {
+      "sourceHandle": "217886321",
+      "nutritionUrl": "https://www.absecom.psu.edu/menus/user-pages/nutrition-label.cfm?mid=217886321",
+      "name": "Margherita Pizza",
+      "serving": {
+        "quantity": 1,
+        "unit": "SERVG",
+        "label": "1 SERVG"
+      },
+      "nutrition": {
+        "calories": 2587,
+        "fatG": 104.4,
+        "carbsG": 288.8,
+        "proteinG": 130
+      },
+      "dietaryTraits": ["meatless", "halal-friendly"],
+      "containsAllergens": ["dairy", "soy", "wheat-gluten"]
+    }
+  ],
+  "notes": [
+    "Sanitized plain-text and numeric evidence only; no upstream HTML is retained.",
+    "The two same-name, same-serving-label observations have different source handles and nutrition and must remain distinct.",
+    "Source handles are provenance, not documented canonical food identifiers."
+  ]
+}
