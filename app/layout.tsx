@@ -19,7 +19,7 @@ export const viewport: Viewport = {
   // viewportFit, so include the directive in its framework-rendered width value.
   width: "device-width, viewport-fit=cover",
   initialScale: 1,
-  themeColor: "#f7f5ee",
+  themeColor: "#001E44",
 };
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -51,13 +51,13 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" data-lionlog-shell="v0.1.0-alpha.2">
+    <html lang="en" data-lionlog-shell="v0.1.0-alpha.2.1">
       <head>
         <link rel="manifest" href="./manifest.webmanifest" />
         <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-title" content="LionLog" />
-        <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
       </head>
       <body className={`${geistSans.variable} ${geistMono.variable}`}>
         <PwaRegister />
