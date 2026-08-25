@@ -1,14 +1,16 @@
 @import "tailwindcss";
 
 :root {
-  --ink: #13261f;
-  --muted: #64716c;
-  --paper: #f7f5ee;
-  --card: #fffefa;
-  --line: #deded5;
-  --green: #255d49;
-  --green-pale: #deede3;
-  --orange: #e86b35;
+  --navy: #001E44;
+  --beaver: #1E407C;
+  --white: #FFFFFF;
+  --pugh: #96BEE6;
+  --ink: var(--navy);
+  --muted: #465B73;
+  --paper: var(--white);
+  --card: var(--white);
+  --line: #CFDBE8;
+  --accent-pale: #EAF3FB;
 }
 
 * { box-sizing: border-box; }
@@ -20,7 +22,7 @@ body {
   min-height: 100dvh;
   padding-top: env(safe-area-inset-top);
   background:
-    radial-gradient(circle at 90% 0%, rgba(232, 107, 53, 0.12), transparent 25rem),
+    radial-gradient(circle at 90% 0%, rgba(150, 190, 230, 0.28), transparent 25rem),
     var(--paper);
   color: var(--ink);
   font-family: Arial, Helvetica, sans-serif;
@@ -44,22 +46,22 @@ button, select, input { font: inherit; }
   gap: 12px;
   min-height: 42px;
   padding: 8px max(16px, env(safe-area-inset-right)) 8px max(16px, env(safe-area-inset-left));
-  background: var(--ink);
-  color: var(--paper);
-  box-shadow: 0 8px 28px rgba(19, 38, 31, 0.18);
+  background: var(--navy);
+  color: var(--white);
+  box-shadow: 0 8px 28px rgba(0, 30, 68, 0.2);
   font-size: 12px;
   font-weight: 700;
   text-align: center;
 }
 
 .pwa-status p { margin: 0; }
-.pwa-status p span { color: var(--orange); margin-right: 5px; }
+.pwa-status p span { color: var(--pugh); margin-right: 5px; }
 .pwa-status button {
   border: 0;
   border-radius: 999px;
   padding: 7px 11px;
-  background: var(--orange);
-  color: white;
+  background: var(--beaver);
+  color: var(--white);
   cursor: pointer;
   font-size: 12px;
   font-weight: 800;
@@ -88,8 +90,8 @@ button, select, input { font: inherit; }
   display: grid;
   place-items: center;
   border-radius: 10px 10px 10px 3px;
-  background: var(--orange);
-  color: #fff;
+  background: var(--beaver);
+  color: var(--white);
   font-size: 12px;
   letter-spacing: -0.08em;
 }
@@ -106,7 +108,7 @@ button, select, input { font: inherit; }
 
 .eyebrow, .section-kicker {
   margin: 0 0 9px;
-  color: var(--orange);
+  color: var(--beaver);
   font-size: 12px;
   font-weight: 800;
   text-transform: uppercase;
@@ -134,7 +136,7 @@ button, select, input { font: inherit; }
   border: 1px solid var(--line);
   border-radius: 24px;
   background: color-mix(in srgb, var(--card) 94%, transparent);
-  box-shadow: 0 18px 50px rgba(23, 48, 39, 0.06);
+  box-shadow: 0 18px 50px rgba(0, 30, 68, 0.08);
 }
 
 .builder-card { padding: 24px; }
@@ -156,8 +158,8 @@ button, select, input { font: inherit; }
 .date-chip {
   padding: 8px 10px;
   border-radius: 999px;
-  background: var(--green-pale);
-  color: var(--green);
+  background: var(--accent-pale);
+  color: var(--beaver);
 }
 
 .field-grid {
@@ -190,7 +192,13 @@ select, input[type="date"] {
 
 select { padding-right: 42px; }
 
-select:focus-visible, input:focus-visible { outline: 3px solid rgba(232, 107, 53, 0.35); outline-offset: 1px; }
+select:focus-visible,
+input:focus-visible,
+button:focus-visible,
+a:focus-visible {
+  outline: 3px solid var(--pugh);
+  outline-offset: 2px;
+}
 
 .venue-picker {
   margin: 24px 0 0;
@@ -204,17 +212,17 @@ select:focus-visible, input:focus-visible { outline: 3px solid rgba(232, 107, 53
   gap: 12px;
   min-height: 66px;
   padding: 12px 14px;
-  border: 1px solid #97b6a9;
+  border: 1px solid var(--pugh);
   border-radius: 14px;
-  background: #f3f9f5;
+  background: var(--accent-pale);
   cursor: pointer;
 }
 
-.choice-card input { accent-color: var(--green); }
+.choice-card input { accent-color: var(--beaver); }
 .choice-card > span:nth-child(2) { display: grid; gap: 4px; }
 .choice-card strong { font-size: 14px; }
 .choice-card small { color: var(--muted); font-size: 12px; }
-.check { margin-left: auto; color: var(--green); font-weight: 900; }
+.check { margin-left: auto; color: var(--beaver); font-weight: 900; }
 
 .venue-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
 
@@ -232,8 +240,8 @@ select:focus-visible, input:focus-visible { outline: 3px solid rgba(232, 107, 53
   cursor: pointer;
 }
 
-.venue-option.selected { border-color: #97b6a9; background: #f3f9f5; color: var(--green); }
-.venue-option input { accent-color: var(--green); }
+.venue-option.selected { border-color: var(--pugh); background: var(--accent-pale); color: var(--beaver); }
+.venue-option input { accent-color: var(--beaver); }
 
 .menu-section { margin-top: 18px; overflow: hidden; }
 .menu-heading-row { padding: 23px 24px 19px; }
@@ -257,8 +265,8 @@ select:focus-visible, input:focus-visible { outline: 3px solid rgba(232, 107, 53
   display: grid;
   place-items: center;
   border-radius: 12px;
-  background: var(--green-pale);
-  color: var(--green);
+  background: var(--accent-pale);
+  color: var(--beaver);
   font-family: Georgia, "Times New Roman", serif;
   font-size: 20px;
   font-weight: 800;
@@ -282,7 +290,7 @@ select:focus-visible, input:focus-visible { outline: 3px solid rgba(232, 107, 53
   line-height: 1.45;
 }
 
-.sample-note > span { color: var(--orange); font-size: 8px; line-height: 2; }
+.sample-note > span { color: var(--beaver); font-size: 8px; line-height: 2; }
 .sample-note p { margin: 0; }
 .sample-note strong { color: var(--ink); }
 
@@ -298,7 +306,7 @@ select:focus-visible, input:focus-visible { outline: 3px solid rgba(232, 107, 53
   font-size: 11px;
 }
 
-.milestone-note span { color: var(--green); font-family: var(--font-geist-mono), monospace; font-weight: 700; white-space: nowrap; }
+.milestone-note span { color: var(--beaver); font-family: var(--font-geist-mono), monospace; font-weight: 700; white-space: nowrap; }
 .milestone-note p { margin: 0; text-align: right; }
 
 @media (min-width: 620px) {

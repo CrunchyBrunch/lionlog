@@ -1,6 +1,6 @@
 {
   "name": "lionlog",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.2.1",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
