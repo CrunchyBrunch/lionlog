@@ -24,5 +24,9 @@ test("server-renders the LionLog sample menu experience", async () => {
   assert.match(html, /Whole dining hall/i);
   assert.match(html, /Sample menu — not live PSU data/i);
   assert.match(html, /Herb roasted chicken/i);
+  assert.match(html, /rel="manifest" href="\.\/manifest\.webmanifest"/i);
+  assert.match(html, /rel="apple-touch-icon"[^>]+href="\.\/icons\/apple-touch-icon\.png"/i);
+  assert.match(html, /name="theme-color" content="#f7f5ee"/i);
+  assert.match(html, /v0\.1\.0-alpha\.2/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
 });

@@ -213,8 +213,8 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
       </section>
 
       <footer className="milestone-note">
-        <span>v0.1.0-alpha.1</span>
-        <p>Foundation preview · meal recommendations arrive in the next milestone.</p>
+        <span>v0.1.0-alpha.2</span>
+        <p>Installable PWA preview · meal recommendations arrive in alpha.3.</p>
       </footer>
     </main>
   );

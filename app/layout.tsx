@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { headers } from "next/headers";
+import { PwaRegister } from "./pwa-register";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -43,7 +44,18 @@ export async function generateMetadata(): Promise<Metadata> {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable}`}>{children}</body>
+      <head>
+        <link rel="manifest" href="./manifest.webmanifest" />
+        <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png" />
+        <meta name="theme-color" content="#f7f5ee" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-title" content="LionLog" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+      </head>
+      <body className={`${geistSans.variable} ${geistMono.variable}`}>
+        <PwaRegister />
+        {children}
+      </body>
     </html>
   );
 }
