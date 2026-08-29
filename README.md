@@ -25,3 +25,7 @@ npm run lint
 ```
 
 The project is a React, Vite, and TypeScript site built with vinext for static-first Sites deployment. Domain contracts live in `domain/`, application coordination in `application/`, and the replaceable sample provider in `infrastructure/`.
+
+## Architecture audits
+
+- [`v0.2.0-alpha.1` PSU live-menu source and architecture audit](docs/psu-live-menu/README.md)
