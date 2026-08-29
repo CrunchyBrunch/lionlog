@@ -1,6 +1,6 @@
 # Caching, validation, attribution, and failure policy
 
-This policy applies only after the permission gate in ADR 001 is cleared. Penn State's approved terms and rate guidance override the provisional values below.
+Penn State Residential Dining approved LionLog's use of publicly available dining-menu information in August 2026. This policy governs the resulting bounded proof of concept. The approval did not grant official/private API access or scheduled production scraping; any later source-specific terms or rate guidance override the provisional values below.
 
 ## Fetch and cache policy
 
@@ -27,7 +27,7 @@ Provisional upstream limits for an authorized HTML source:
 - bounded response size (menu 1 MiB, nutrition 256 KiB unless observed authorized limits require less) and 10-second timeout;
 - circuit opens after three consecutive upstream/structural failures for a source route, then probes no more than once per 15 minutes.
 
-These are ceilings, not permission. If PSU specifies stricter limits, use them. If PSU does not authorize HTML automation, make zero automated requests.
+These are conservative ceilings for manually triggered proof-of-concept ingestion. If PSU specifies stricter limits or withdraws approval, use the stricter limit or stop retrieval.
 
 ## Provider states
 

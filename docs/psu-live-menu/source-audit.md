@@ -12,7 +12,13 @@ The official source is Penn State Campus Dining's [Daily Menu](https://www.absec
 
 No documented or page-discoverable structured menu API was found. The audited page is a server-rendered ColdFusion HTML form, and each item links to a server-rendered nutrition-label page. The response does not permit cross-origin browser reads. Direct client access is therefore not viable.
 
-There is also a material permission blocker: [`https://www.absecom.psu.edu/robots.txt`](https://www.absecom.psu.edu/robots.txt) returned `User-agent: *` and `Disallow: /`. LionLog must not begin automated production retrieval from this host until Penn State grants written permission or supplies an approved feed/API. The recommended architecture remains useful after that gate: a narrow same-origin adapter using an approved official source.
+At the time of the audit, [`https://www.absecom.psu.edu/robots.txt`](https://www.absecom.psu.edu/robots.txt) returned `User-agent: *` and `Disallow: /`. The audit therefore treated automated retrieval as blocked pending direct authorization. That was the correct August 25, 2026 conclusion based on the evidence then available.
+
+## Authorization update — August 2026
+
+Penn State Residential Dining subsequently approved LionLog's use of publicly available dining-menu information in August 2026. The approval clears the permission gate for the bounded public-HTML ingestion proof of concept described by this repository.
+
+The approval did **not** provide, promise, or endorse access to an official or private Penn State API. LionLog must continue to describe the source accurately as publicly available Penn State dining-menu HTML, use conservative centralized retrieval, and avoid implying that LionLog is official or endorsed. This repository records only the authorization outcome; it does not contain correspondence or personal contact information.
 
 ## Reproducible observations
 
@@ -113,14 +119,14 @@ The first request to Penn State should ask for one of the following, in order:
 2. a scheduled export or bulk endpoint that avoids one nutrition request per menu item; or
 3. written permission and explicit rate guidance for the public HTML endpoints.
 
-Contact links exposed by the official pages include `pennstatedining@psu.edu` and `foodallergies@psu.edu`. The Admin task should coordinate permission; no credentials are needed or requested.
+Public organizational contact links exposed by the official pages are not required by the ingestion pipeline. No credentials, correspondence, or personal contact information is stored in this repository.
 
 ## Permission, attribution, and safety risk
 
-- **Material permission risk:** root robots policy disallows all automated crawling. Public browser availability is not permission for production automation or republication.
+- **Dated permission history:** the root robots policy created a material uncertainty on August 25, 2026. Penn State Residential Dining's later August 2026 approval resolved that uncertainty for LionLog's use of publicly available dining-menu information, but did not grant private/API access.
 - **No express data license found:** the audited menu footer links Penn State's Web Privacy Statement and accessibility statement, but no menu-data reuse license or API terms were located.
 - **Load risk:** HTML-only access creates an N+1 pattern (one menu page plus a nutrition page per item). Do not run this at production scale without an approved bulk source or explicit rate limits.
 - **Accuracy risk:** menus, recipes, and on-site preparation can change. Penn State explicitly warns about shared-kitchen cross contact. LionLog must not present dietary markers as medical guarantees.
 - **Brand risk:** use plain-text source attribution and links only. Do not use Penn State marks, official-looking trade dress, or language implying affiliation or endorsement.
 
-Until the permission gate clears, LionLog should retain the clearly labeled `MockMenuProvider` and expose no automated PSU retrieval in production.
+The approval supports a manually triggered, conservative ingestion proof of concept. It does not authorize scheduled production scraping or change the requirement to retain the clearly labeled `MockMenuProvider`.

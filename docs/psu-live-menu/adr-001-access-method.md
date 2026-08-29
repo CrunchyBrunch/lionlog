@@ -1,16 +1,18 @@
-# ADR 001: Permission-gated same-origin PSU menu adapter
+# ADR 001: Same-origin PSU public-menu adapter
 
-- Status: accepted architecture; production data access blocked pending Penn State authorization
+- Status: accepted; public-menu proof of concept authorized in August 2026
 - Date: 2026-08-25
 - Decision scope: `v0.2.0-alpha.1` design only
 
 ## Context
 
-LionLog needs official menu and nutrition data without coupling UI code to an upstream page. The official daily menu uses a POSTed, server-rendered HTML form and item-specific HTML nutrition pages. The responses do not allow CORS reads from `lionlog.app`. No supported structured API was discovered. The source host's root `robots.txt` disallows all crawling.
+LionLog needs Penn State menu and nutrition data without coupling UI code to an upstream page. The public daily menu uses a POSTed, server-rendered HTML form and item-specific HTML nutrition pages. The responses do not allow CORS reads from `lionlog.app`. No supported structured API was discovered. The source host's root `robots.txt` disallows all crawling.
+
+On August 25, 2026, this combination was recorded as a permission blocker pending direct authorization. Later in August 2026, Penn State Residential Dining approved LionLog's use of publicly available dining-menu information. No official or private API access was granted. This dated update resolves the implementation gate without changing the technical findings or turning the integration into an official PSU API integration.
 
 ## Decision
 
-Retain `MenuProvider` as the application boundary. If and only if Penn State authorizes access or supplies a supported feed, implement a narrow same-origin route and a `PsuMenuProvider` that consumes validated LionLog JSON from that route.
+Retain `MenuProvider` as the application boundary. Implement a narrow same-origin ingestion boundary and a `PsuMenuProvider` that consumes validated LionLog JSON snapshots produced from the approved publicly available source.
 
 The adapter will prefer the approved source in this order:
 
@@ -18,7 +20,7 @@ The adapter will prefer the approved source in this order:
 2. approved scheduled/bulk export;
 3. authorized HTML retrieval with strict parsing, coalescing, caching, and rate limits.
 
-Direct browser scraping is rejected. An unofficial API is rejected as the production source. Automated HTML retrieval before permission is rejected.
+Direct browser scraping is rejected. An unofficial API is rejected as the production source. Scheduled production scraping remains outside the approved proof-of-concept scope.
 
 ## Proposed request flow
 
@@ -35,7 +37,7 @@ On any upstream or parse failure:
   -> unavailable state if no safe snapshot exists
 ```
 
-The route returns data only; it never forwards or embeds upstream HTML. `MockMenuProvider` remains available for deterministic tests, demonstrations, and the permission-blocked product state.
+The boundary returns data only; it never forwards or embeds upstream HTML. `MockMenuProvider` remains available for deterministic tests and demonstrations and must never be mixed silently with unavailable live data.
 
 ## Boundary contract shape
 
@@ -89,7 +91,7 @@ Before implementation, evolve the domain contracts identified in `field-mapping.
 - A server route is operationally more complex than a static mock provider.
 - Authorized HTML parsing is brittle and potentially request-heavy.
 - A structured/bulk official source may require coordination not controlled by this repository.
-- Live-provider work cannot start until the Admin task clears the permission gate and approves any resulting terms.
+- The approval is limited to publicly available dining-menu information and does not provide a supported API or private integration contract.
 
 ## Rejected alternatives
 
@@ -99,13 +101,13 @@ Before implementation, evolve the domain contracts identified in `field-mapping.
 - **Treating `mid` or normalized name as canonical food ID:** neither is documented; observed duplicate names have materially different nutrition.
 - **Inventing ounce/gram conversions:** the source serving units do not provide a supported conversion.
 
-## Permission gate acceptance
+## Authorization record
 
-The ADR can advance to implementation only when the Admin task records:
+The Admin record now establishes:
 
-- written Penn State permission or an approved feed/API;
-- permitted fields, attribution wording, cache duration, request rate, and redistribution scope;
-- a source owner/escalation contact; and
-- confirmation that the use does not imply Penn State sponsorship.
+- Penn State Residential Dining approved LionLog's use of publicly available dining-menu information in August 2026;
+- no official or private API access was granted;
+- the implementation remains an independent, conservative public-HTML ingestion proof of concept; and
+- no correspondence or personal contact information will be published in the repository.
 
-If Penn State declines or does not answer, the live-provider milestone remains blocked and LionLog continues with clearly labeled sample data.
+Any future private feed, scheduled production retrieval, expanded redistribution, or official relationship requires a separate approval. The current authorization does not imply Penn State sponsorship or endorsement.

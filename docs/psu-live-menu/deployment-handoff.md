@@ -11,10 +11,10 @@ This task is the post-prototype implementation/audit task, not the existing Site
 
 ## Admin actions required
 
-1. Contact Penn State Dining/Housing and Food Services for a supported feed/API or written permission covering automation, caching, fields, redistribution, attribution, rate limits, and support.
-2. Record the approval or denial and any terms in an Admin-controlled decision log; do not store credentials in this repository.
-3. Confirm whether ingredients are in `v0.2.0-alpha.2` scope or whether the next slice is limited to menu grouping, serving units, primary macros, dietary traits, and allergens.
-4. Confirm ownership/registration of `lionlog.app` through a user-controlled registrar account.
+1. Authorization completed: Penn State Residential Dining approved LionLog's use of publicly available dining-menu information in August 2026. No official/private API access was granted.
+2. Keep correspondence and personal contact information outside this repository; this documentation records only the authorization outcome.
+3. Keep scheduled production scraping outside the proof-of-concept scope unless separately approved.
+4. Confirm ownership/registration of `lionlog.app` through a user-controlled registrar account before any custom-domain work.
 5. Route custom-domain attachment and any later deployment through the existing Site-owning Prototype task for project `appgprj_6a8d8d0dad888191af93966368936653`.
 
 ## Proposed `v0.2.0-alpha.2` scope
@@ -45,7 +45,7 @@ The next milestone should implement the provider contract and same-origin adapte
 
 ## Proposed `v0.2.0-alpha.2` acceptance criteria
 
-- [ ] Admin records Penn State authorization or an approved feed. Without it, the milestone remains fixture-only and cannot claim live data.
+- [x] Admin records Penn State authorization for use of publicly available dining-menu information; no official/private API access is claimed.
 - [ ] Direct client scraping is absent; all live reads use a same-origin adapter.
 - [ ] Only allowlisted official HTTPS source URLs are contacted.
 - [ ] Raw upstream HTML never crosses the adapter boundary or reaches React rendering.

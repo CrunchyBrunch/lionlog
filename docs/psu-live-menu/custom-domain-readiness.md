@@ -31,7 +31,7 @@ No domain was purchased, no DNS was changed, no Sites project was created, and n
 - Confirm `/og.png`, the root document, manifest, icons, and service worker all return `200` at the custom origin over HTTPS.
 - Add an explicit manifest `id` such as `./` before public custom-domain launch so future path changes do not accidentally change the installed-app identity. The ID is still origin-bound.
 - Bump the application-shell cache/marker version with the release that changes metadata or PWA assets; rerun current redirect/cross-origin shell tests.
-- If the live adapter is approved later, expose it only same-origin and allowlist the deployed canonical origin in any request-origin/CSRF checks. Do not add `*` CORS.
+- If the proof-of-concept live adapter is deployed in a later approved release, expose it only same-origin and allowlist the deployed canonical origin in any request-origin/CSRF checks. Do not add `*` CORS.
 - Verify source attribution links, privacy/support links, and any application URL shown in copy use `lionlog.app` only after the domain is active.
 - Check search-engine ownership/canonicalization only after Admin approves; no analytics is required.
 

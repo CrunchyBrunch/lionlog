@@ -1,6 +1,6 @@
 # PSU source-to-LionLog field mapping
 
-This mapping describes a future authorized adapter. “Gap” means the current domain contract must change before `PsuMenuProvider` is implemented. Unknown or unavailable upstream values must not be guessed.
+This mapping describes the authorized public-menu proof-of-concept adapter. “Gap” means the current domain contract must change before `PsuMenuProvider` is implemented. Unknown or unavailable upstream values must not be guessed.
 
 ## Query and dining context
 
