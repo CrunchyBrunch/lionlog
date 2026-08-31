@@ -31,6 +31,10 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
     [venues],
   );
   const periodName = initial.periods.find((period) => period.id === periodId)?.displayName ?? "Meal";
+  const isSample = menu.source.mode === "sample";
+  const sourceStateLabel = menu.source.mode === "sample"
+    ? "Sample"
+    : menu.source.mode.charAt(0).toUpperCase() + menu.source.mode.slice(1);
 
   useEffect(() => {
     let current = true;
@@ -47,7 +51,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
         if (current) setMenu(nextMenu);
       })
       .catch(() => {
-        if (current) setError("The sample menu could not be loaded. Please try another selection.");
+        if (current) setError("The menu could not be loaded. Please try another selection.");
       })
       .finally(() => {
         if (current) setIsLoading(false);
@@ -85,7 +89,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
       </header>
 
       <section className="hero" id="top">
-        <p className="eyebrow">Sample dining data</p>
+        <p className="eyebrow">{isSample ? "Sample dining data" : "Penn State public menu data"}</p>
         <h1>A practical plate, built around your target.</h1>
         <p className="hero-copy">
           Pick where you’re eating. LionLog shows what’s available before building your meal.
@@ -98,7 +102,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
             <p className="section-kicker">Step 1</p>
             <h2 id="context-heading">Choose your dining context</h2>
           </div>
-          <span className="date-chip">Sample</span>
+          <span className="date-chip">{sourceStateLabel}</span>
         </div>
 
         <div className="field-grid">
@@ -146,7 +150,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
             />
             <span>
               <strong>Whole dining hall</strong>
-              <small>Browse every sample venue</small>
+              <small>Browse every station/category</small>
             </span>
             {selectedVenueIds.length === 0 && <span className="check" aria-hidden="true">✓</span>}
           </label>
@@ -171,7 +175,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
       <section className="menu-section" aria-labelledby="menu-heading" aria-busy={isLoading}>
         <div className="section-heading menu-heading-row">
           <div>
-            <p className="section-kicker">Available in this sample</p>
+            <p className="section-kicker">{isSample ? "Available in this sample" : `Source state: ${menu.source.mode}`}</p>
             <h2 id="menu-heading">{periodName} menu</h2>
           </div>
           <span className="item-count">{isLoading ? "Loading" : `${menu.items.length} foods`}</span>
@@ -180,7 +184,13 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
         {error ? (
           <div className="empty-state" role="alert">{error}</div>
         ) : menu.items.length === 0 && !isLoading ? (
-          <div className="empty-state">No sample foods match this context.</div>
+          <div className="empty-state">
+            {menu.source.mode === "unavailable"
+              ? "No validated live or saved menu is available for this context."
+              : isSample
+                ? "No sample foods match this context."
+                : "No foods are listed for this context."}
+          </div>
         ) : (
           <div className={`menu-list ${isLoading ? "is-loading" : ""}`}>
             {menu.items.map((item) => {
@@ -190,14 +200,14 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
                   <div className="food-icon" aria-hidden="true">{item.food.name.slice(0, 1)}</div>
                   <div className="food-copy">
                     <h3>{item.food.name}</h3>
-                    <p>{venueById.get(item.venueId)?.displayName ?? "Sample venue"} · {serving.displayLabel}</p>
+                    <p>{venueById.get(item.venueId)?.displayName ?? "Station/category"} · {serving.displayLabel}</p>
                   </div>
                   <div className="nutrition">
-                    <strong>{serving.nutrition.proteinG}g</strong>
+                    <strong>{formatNutrient(serving.nutrition.proteinG, "g")}</strong>
                     <span>protein</span>
                   </div>
                   <div className="nutrition calories">
-                    <strong>{serving.nutrition.calories}</strong>
+                    <strong>{formatNutrient(serving.nutrition.calories)}</strong>
                     <span>cal</span>
                   </div>
                 </article>
@@ -208,14 +218,35 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
 
         <div className="sample-note">
           <span aria-hidden="true">●</span>
-          <p><strong>{menu.source.label}.</strong> Names and nutrition are illustrative and do not represent today’s Penn State menu.</p>
+          {isSample ? (
+            <p><strong>{menu.source.label}.</strong> Names and nutrition are illustrative and do not represent today’s Penn State menu.</p>
+          ) : (
+            <p>
+              <strong>{menu.source.label}.</strong>{" "}
+              {menu.source.retrievedAt && `Retrieved ${formatRetrievedAt(menu.source.retrievedAt)}. `}
+              {menu.source.warning && `${menu.source.warning} `}
+              {menu.source.sourceUrl && (
+                <a href={menu.source.sourceUrl} target="_blank" rel="noreferrer">View the public source.</a>
+              )}{" "}
+              LionLog is independent and is not affiliated with or endorsed by Penn State.
+            </p>
+          )}
         </div>
       </section>
 
       <footer className="milestone-note">
-        <span>v0.1.0-alpha.2.1</span>
-        <p>Public field test · sample menu only.</p>
+        <span>v0.2.0-alpha.2</span>
+        <p>Public ingestion proof of concept · no official PSU API.</p>
       </footer>
     </main>
   );
+}
+
+function formatNutrient(value: number | null, suffix = ""): string {
+  return value === null ? "—" : `${value}${suffix}`;
+}
+
+function formatRetrievedAt(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "at an unknown time" : date.toLocaleString();
 }

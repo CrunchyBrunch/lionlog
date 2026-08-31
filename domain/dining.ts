@@ -35,10 +35,15 @@ export interface MenuQuery {
 }
 
 export interface MenuSource {
-  readonly mode: "sample" | "live";
+  readonly mode: MenuDataState;
   readonly label: string;
-  readonly retrievedAt?: string;
+  readonly retrievedAt?: string | null;
+  readonly sourceUrl?: string | null;
+  readonly snapshotVersion?: string;
+  readonly warning?: string;
 }
+
+export type MenuDataState = "live" | "cached" | "stale" | "sample" | "unavailable";
 
 export interface Menu {
   readonly query: MenuQuery;

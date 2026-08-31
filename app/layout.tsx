@@ -51,7 +51,7 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" data-lionlog-shell="v0.1.0-alpha.2.1">
+    <html lang="en" data-lionlog-shell="v0.2.0-alpha.2">
       <head>
         <link rel="manifest" href="./manifest.webmanifest" />
         <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png" />
