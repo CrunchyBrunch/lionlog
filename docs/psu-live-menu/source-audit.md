@@ -20,6 +20,12 @@ Penn State Residential Dining subsequently approved LionLog's use of publicly av
 
 The approval did **not** provide, promise, or endorse access to an official or private Penn State API. LionLog must continue to describe the source accurately as publicly available Penn State dining-menu HTML, use conservative centralized retrieval, and avoid implying that LionLog is official or endorsed. This repository records only the authorization outcome; it does not contain correspondence or personal contact information.
 
+## Independent implementation reconciliation — August 31, 2026
+
+An independent working implementation corroborated the ColdFusion POST-and-parse approach as an implementation lead. A bounded manual check on August 31 confirmed that LionLog's existing adapter sends `selMenuDate` in `M/D/YY` form, `selCampus`, and the selected `#selMeal` option value, and that the response echoes the selected date, campus, and meal. The populated East/Lunch response still exposed `.menu-category-section`, `.daily-menu-item`, `a.daily-menu-item__link`, and `.daily-menu-item__icons img[alt]`. The representative nutrition page did not expose the suggested `.nutrition-category-title`; it retained the existing `.recipe-title` sentinel, so LionLog did not tighten its parser to that presentation-only lead.
+
+The independent report's once-or-twice-daily refresh suggestion is recorded only as a provisional future operational cadence. This reconciliation adds no cron, scheduled Action, deployment, or production retrieval. LionLog does not use an official PSU API: its architecture centralizes conservative retrieval and validation into cached snapshots rather than contacting PSU from the frontend, intentionally differing from frontend-only implementations.
+
 ## Reproducible observations
 
 The observations below were made with isolated GET, POST, and OPTIONS requests on 2026-08-25. They are a point-in-time audit; upstream behavior can change.
