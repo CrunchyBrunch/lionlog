@@ -36,6 +36,8 @@ export class MockMenuProvider implements MenuProvider {
       source: {
         mode: "sample",
         label: "Sample menu — not live PSU data",
+        retrievedAt: null,
+        sourceUrl: null,
       },
     };
   }

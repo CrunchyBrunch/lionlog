@@ -1,6 +1,6 @@
 {
   "name": "lionlog",
-  "version": "0.1.0-alpha.2.1",
+  "version": "0.2.0-alpha.2",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -9,12 +9,15 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
+    "ingest:psu": "node --experimental-strip-types scripts/ingest-psu.ts",
     "test": "vinext build && node --test --experimental-strip-types tests/*.test.ts && node --test tests/*.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },
   "dependencies": {
+    "parse5": "^8.0.1",
     "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "react-dom": "19.2.6",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",

@@ -1,7 +1,7 @@
 {
   "name": "LionLog — Dining Hall Meal Builder",
   "short_name": "LionLog",
-  "description": "Build a practical dining hall meal from a clearly labeled sample menu.",
+  "description": "Build a practical dining hall meal from validated menu snapshots or clearly labeled sample data.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

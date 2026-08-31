@@ -10,5 +10,7 @@ Authorization update: in August 2026, Penn State Residential Dining approved Lio
 - [Caching, validation, attribution, and failure policy](operating-policy.md)
 - [Custom-domain readiness](custom-domain-readiness.md)
 - [Deployment and Admin handoff](deployment-handoff.md)
+- [`v0.2.0-alpha.2` implementation notes](implementation-alpha-2.md)
+- [`v0.2.0-alpha.2` verification report](verification-alpha-2.md)
 
 The representative fixture at `tests/fixtures/psu/sanitized-menu-observation.v1.json` contains parsed plain text and numeric observations only. No upstream HTML is stored or rendered.

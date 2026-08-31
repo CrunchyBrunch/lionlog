@@ -5,7 +5,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
-const releaseVersion = "0.1.0-alpha.2.1";
+const releaseVersion = "0.2.0-alpha.2";
 
 async function pngDimensions(relativePath) {
   const data = await readFile(path.join(projectRoot, relativePath));
@@ -41,7 +41,7 @@ test("service worker versions the shell and supports safe activation", async () 
   const source = await readFile(path.join(projectRoot, "public/sw.js"), "utf8");
 
   assert.match(source, /lionlog-shell-/);
-  assert.match(source, /v0\.1\.0-alpha\.2\.1/);
+  assert.match(source, /v0\.2\.0-alpha\.2/);
   assert.match(source, /caches\.delete/);
   assert.match(source, /request\.mode === "navigate"/);
   assert.match(source, /caches\.match\(SCOPE_URL\)/);
@@ -56,7 +56,7 @@ test("service worker refuses redirected, cross-origin, or unmarked navigation do
   assert.match(source, /response\.type === "opaqueredirect"/);
   assert.match(source, /responseUrl\.origin !== self\.location\.origin/);
   assert.match(source, /contentType\.includes\("text\/html"\)/);
-  assert.match(source, /data-lionlog-shell="v0\.1\.0-alpha\.2\.1"/);
+  assert.match(source, /data-lionlog-shell="v0\.2\.0-alpha\.2"/);
   assert.match(source, /if \(await isExpectedApplicationDocument\(response\)\)/);
 });
 
@@ -73,7 +73,7 @@ test("application-document verification accepts only the marked LionLog response
   vm.runInNewContext(source, context);
 
   function documentResponse({
-    body = '<html data-lionlog-shell="v0.1.0-alpha.2.1"></html>',
+    body = '<html data-lionlog-shell="v0.2.0-alpha.2"></html>',
     contentType = "text/html; charset=utf-8",
     redirected = false,
     type = "basic",
