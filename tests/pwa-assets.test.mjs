@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import vm from "node:vm";
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
-const releaseVersion = "0.2.0-alpha.2";
+const releaseVersion = "0.2.0-alpha.3";
 
 async function pngDimensions(relativePath) {
   const data = await readFile(path.join(projectRoot, relativePath));
@@ -41,11 +41,12 @@ test("service worker versions the shell and supports safe activation", async () 
   const source = await readFile(path.join(projectRoot, "public/sw.js"), "utf8");
 
   assert.match(source, /lionlog-shell-/);
-  assert.match(source, /v0\.2\.0-alpha\.2/);
+  assert.match(source, /v0\.2\.0-alpha\.3/);
   assert.match(source, /caches\.delete/);
   assert.match(source, /request\.mode === "navigate"/);
   assert.match(source, /caches\.match\(SCOPE_URL\)/);
   assert.match(source, /SKIP_WAITING/);
+  assert.match(source, /menu-data/);
 });
 
 test("service worker refuses redirected, cross-origin, or unmarked navigation documents", async () => {
@@ -56,7 +57,7 @@ test("service worker refuses redirected, cross-origin, or unmarked navigation do
   assert.match(source, /response\.type === "opaqueredirect"/);
   assert.match(source, /responseUrl\.origin !== self\.location\.origin/);
   assert.match(source, /contentType\.includes\("text\/html"\)/);
-  assert.match(source, /data-lionlog-shell="v0\.2\.0-alpha\.2"/);
+  assert.match(source, /data-lionlog-shell="v0\.2\.0-alpha\.3"/);
   assert.match(source, /if \(await isExpectedApplicationDocument\(response\)\)/);
 });
 
@@ -73,7 +74,7 @@ test("application-document verification accepts only the marked LionLog response
   vm.runInNewContext(source, context);
 
   function documentResponse({
-    body = '<html data-lionlog-shell="v0.2.0-alpha.2"></html>',
+    body = '<html data-lionlog-shell="v0.2.0-alpha.3"></html>',
     contentType = "text/html; charset=utf-8",
     redirected = false,
     type = "basic",
@@ -120,3 +121,39 @@ test("release version and brand colors stay consistent across the PWA surface", 
     assert.doesNotMatch(styles, new RegExp(retiredColor, "i"));
   }
 });
+
+test("browser bundle contains static delivery but no PSU retrieval or Node-only ingestion code", async () => {
+  const clientDirectory = path.join(projectRoot, "dist", "client");
+  const files = await javascriptFiles(clientDirectory);
+  const source = (await Promise.all(files.map((file) => readFile(file, "utf8")))).join("\n");
+  assert.match(source, /lionlog-menu-data-v1/);
+  for (const forbidden of [
+    "PsuHttpRetriever",
+    "parsePsuMenuHtml",
+    "retrieveNutrition",
+    "minimumIntervalMs",
+    "node:fs",
+    "node:crypto",
+  ]) assert.doesNotMatch(source, new RegExp(forbidden));
+});
+
+test("live artifact workflow is manual-only and ordinary CI cannot invoke ingestion", async () => {
+  const [manualWorkflow, ciWorkflow] = await Promise.all([
+    readFile(path.join(projectRoot, ".github/workflows/build-live-menu-artifact.yml"), "utf8"),
+    readFile(path.join(projectRoot, ".github/workflows/ci.yml"), "utf8"),
+  ]);
+  assert.match(manualWorkflow, /workflow_dispatch:/);
+  assert.match(manualWorkflow, /LIVE_PSU_INGESTION/);
+  assert.match(manualWorkflow, /actions\/upload-artifact@/);
+  assert.doesNotMatch(manualWorkflow, /^\s*(?:schedule|push|pull_request):/m);
+  assert.doesNotMatch(ciWorkflow, /ingest:psu|LIONLOG_ALLOW_PSU_NETWORK/);
+});
+
+async function javascriptFiles(directory) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const nested = await Promise.all(entries.map((entry) => {
+    const filePath = path.join(directory, entry.name);
+    return entry.isDirectory() ? javascriptFiles(filePath) : entry.name.endsWith(".js") ? [filePath] : [];
+  }));
+  return nested.flat();
+}

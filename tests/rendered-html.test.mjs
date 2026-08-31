@@ -13,7 +13,7 @@ async function render() {
   );
 }
 
-test("server-renders the LionLog sample menu experience", async () => {
+test("server-renders the unavailable live shell without a sample fallback", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
@@ -22,17 +22,18 @@ test("server-renders the LionLog sample menu experience", async () => {
   assert.match(html, /<title>Build a meal \| LionLog<\/title>/i);
   assert.match(html, /A practical plate, built around your target/i);
   assert.match(html, /Whole dining hall/i);
-  assert.match(html, /Sample menu — not live PSU data/i);
-  assert.match(html, /Herb roasted chicken/i);
+  assert.match(html, /PSU snapshots/i);
+  assert.match(html, /No validated live or saved menu is available/i);
+  assert.doesNotMatch(html, /Herb roasted chicken/i);
   assert.match(html, /rel="manifest" href="\.\/manifest\.webmanifest"/i);
   assert.match(html, /rel="apple-touch-icon"[^>]+href="\.\/icons\/apple-touch-icon\.png"/i);
   assert.match(html, /name="theme-color" content="#001E44"/i);
-  assert.match(html, /<html[^>]+data-lionlog-shell="v0\.2\.0-alpha\.2"/i);
+  assert.match(html, /<html[^>]+data-lionlog-shell="v0\.2\.0-alpha\.3"/i);
   const viewportTag = html.match(/<meta[^>]+name="viewport"[^>]*>/i)?.[0] ?? "";
   assert.match(viewportTag, /width=device-width/i);
   assert.match(viewportTag, /initial-scale=1/i);
   assert.match(viewportTag, /viewport-fit=cover/i);
-  assert.match(html, /v0\.2\.0-alpha\.2/i);
+  assert.match(html, /v0\.2\.0-alpha\.3/i);
   assert.match(html, /apple-mobile-web-app-status-bar-style" content="black-translucent"/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
 });

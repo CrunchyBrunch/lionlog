@@ -11,8 +11,8 @@ import {
 } from "./html-tree.ts";
 
 export interface ParsedPsuNutrition {
-  readonly name: string;
-  readonly servingLabel: string;
+  readonly name: string | null;
+  readonly servingLabel: string | null;
   readonly sourceQuantity: number | null;
   readonly sourceUnit: string | null;
   readonly calories: number | null;
@@ -41,7 +41,13 @@ const allergenMap = new Map<string, Allergen>([
 export function parsePsuNutritionHtml(html: string): ParsedPsuNutrition {
   const document = parseHtml(html);
   const title = firstDescendant(document, (element) => hasClass(element, "recipe-title"));
-  if (!title) throw new PsuStructuralError("PSU nutrition response is missing the recipe title.");
+  if (!title) {
+    const unavailable = descendants(document, (element) => hasClass(element, "alert-primary"))
+      .map(normalizedText)
+      .some((text) => text === "Nutrition information is not available for the selected item. Go back to previous page.");
+    if (unavailable) return unavailableNutrition();
+    throw new PsuStructuralError("PSU nutrition response is missing the recipe title.");
+  }
 
   const summaryValues = descendants(document, (element) => hasClass(element, "summary-value"));
   const servingText = summaryValues.map(normalizedText).find((value) => /^Serving Size\b/i.test(value));
@@ -103,6 +109,34 @@ export function parsePsuNutritionHtml(html: string): ParsedPsuNutrition {
     },
     ingredients: ingredients ? boundedText(ingredients, "ingredients", 20_000) : null,
     allergens: [...new Set(allergens)],
+  };
+}
+
+function unavailableNutrition(): ParsedPsuNutrition {
+  return {
+    name: null,
+    servingLabel: null,
+    sourceQuantity: null,
+    sourceUnit: null,
+    calories: null,
+    proteinG: null,
+    carbsG: null,
+    fatG: null,
+    additional: {
+      saturatedFatG: null,
+      transFatG: null,
+      cholesterolMg: null,
+      sodiumMg: null,
+      fiberG: null,
+      sugarsG: null,
+      addedSugarsG: null,
+      vitaminDMcg: null,
+      calciumMg: null,
+      ironMg: null,
+      potassiumMg: null,
+    },
+    ingredients: null,
+    allergens: [],
   };
 }
 

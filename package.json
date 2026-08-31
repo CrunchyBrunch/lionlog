@@ -1,6 +1,6 @@
 {
   "name": "lionlog",
-  "version": "0.2.0-alpha.2",
+  "version": "0.2.0-alpha.3",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -10,6 +10,7 @@
     "build": "vinext build",
     "start": "vinext start",
     "ingest:psu": "node --experimental-strip-types scripts/ingest-psu.ts",
+    "export:psu-static": "node --experimental-strip-types scripts/export-psu-static.ts",
     "test": "vinext build && node --test --experimental-strip-types tests/*.test.ts && node --test tests/*.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },

@@ -141,7 +141,7 @@ export class PsuHttpRetriever {
       return {
         html: decodeUtf8(bytes),
         sourceUrl: finalUrl,
-        retrievedAt: new Date(),
+        retrievedAt: new Date(this.now()),
       };
     } catch (error) {
       if (error instanceof PsuRetrievalError) throw error;

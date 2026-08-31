@@ -56,8 +56,8 @@ export const psuNutritionSchema = z.object({
 }).strict();
 
 export const psuNutritionDetailSchema = z.object({
-  name: z.string().min(1).max(160),
-  servingLabel: z.string().min(1).max(80),
+  name: z.string().min(1).max(160).nullable(),
+  servingLabel: z.string().min(1).max(80).nullable(),
   sourceQuantity: z.number().finite().nonnegative().nullable(),
   sourceUnit: z.string().min(1).max(60).nullable(),
   nutrition: psuNutritionSchema,
@@ -73,7 +73,7 @@ export const psuSnapshotItemSchema = z.object({
   name: z.string().min(1).max(160),
   stationId: z.string().regex(/^psu:station:v1:[a-f0-9]{64}$/),
   serving: z.object({
-    label: z.string().min(1).max(80),
+    label: z.string().min(1).max(80).nullable(),
     quantity: z.number().finite().nonnegative().nullable(),
     unit: z.string().min(1).max(60).nullable(),
   }).strict(),
@@ -234,7 +234,7 @@ export function buildPsuSnapshot(
         occurrencesByHandle.set(item.sourceHandle, occurrenceIndex + 1);
         const detail = nutritionByHandle.get(item.sourceHandle);
         if (!detail) throw new PsuStructuralError(`Missing PSU nutrition detail for ${item.sourceHandle}.`);
-        if (detail.name !== item.name) {
+        if (detail.name !== null && detail.name !== item.name) {
           throw new PsuStructuralError(`PSU menu and nutrition names disagree for ${item.sourceHandle}.`);
         }
         return {

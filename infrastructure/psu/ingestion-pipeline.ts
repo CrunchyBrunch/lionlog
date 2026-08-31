@@ -141,7 +141,10 @@ export class PsuIngestionPipeline {
       nutritionRequests += 1;
     }
 
-    const cachedAt = this.now();
+    const pipelineNow = this.now();
+    const cachedAt = pipelineNow.getTime() < menuResponse.retrievedAt.getTime()
+      ? menuResponse.retrievedAt
+      : pipelineNow;
     const snapshot = buildPsuSnapshot(query, parsedMenu, nutritionByHandle, {
       retrievedAt: menuResponse.retrievedAt,
       cachedAt,
