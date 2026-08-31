@@ -7,6 +7,8 @@ import {
   buildPsuSnapshot,
   nutritionFromCacheEntry,
   toNutritionCacheEntry,
+  validatePsuNutritionCacheEntry,
+  validatePsuSnapshot,
   type PsuMenuSnapshot,
 } from "./snapshot-schema.ts";
 import type { PsuSnapshotStore } from "./snapshot-store.ts";
@@ -76,7 +78,18 @@ export class PsuIngestionPipeline {
       return { state: "live", ...snapshotResult };
     } catch (error) {
       const normalizedError = error instanceof Error ? error : new Error(String(error));
-      const lastKnownGood = await this.store.readMenu(query);
+      let lastKnownGood: PsuMenuSnapshot | null;
+      try {
+        const storedSnapshot = await this.store.readMenu(query);
+        lastKnownGood = storedSnapshot ? validatePsuSnapshot(storedSnapshot) : null;
+      } catch (cacheError) {
+        const cacheMessage = cacheError instanceof Error ? cacheError.message : String(cacheError);
+        return {
+          state: "unavailable",
+          snapshot: null,
+          error: new Error(`${normalizedError.message} Saved snapshot validation also failed: ${cacheMessage}`),
+        };
+      }
       if (lastKnownGood && this.now().getTime() <= Date.parse(lastKnownGood.retainUntil)) {
         return { state: "stale", snapshot: lastKnownGood, error: normalizedError };
       }
@@ -109,7 +122,8 @@ export class PsuIngestionPipeline {
       station.items.map((item) => item.sourceHandle)
     ))];
     for (const sourceHandle of uniqueHandles) {
-      const cached = await this.store.readNutrition(sourceHandle);
+      const storedNutrition = await this.store.readNutrition(sourceHandle);
+      const cached = storedNutrition ? validatePsuNutritionCacheEntry(storedNutrition) : null;
       if (cached && this.now().getTime() <= Date.parse(cached.freshUntil)) {
         nutritionByHandle.set(sourceHandle, nutritionFromCacheEntry(cached));
         nutritionCacheHits += 1;

@@ -40,10 +40,10 @@ export class PsuHttpRetriever {
       throw new Error("PSU network access is disabled unless a manual caller explicitly enables it.");
     }
     this.fetchImpl = options.fetchImpl ?? fetch;
-    this.minimumIntervalMs = options.minimumIntervalMs ?? 1_000;
-    this.timeoutMs = options.timeoutMs ?? 10_000;
-    this.maximumAttempts = options.maximumAttempts ?? 3;
-    this.baseBackoffMs = options.baseBackoffMs ?? 1_000;
+    this.minimumIntervalMs = boundedInteger(options.minimumIntervalMs ?? 1_000, "minimum interval", 0, 60_000);
+    this.timeoutMs = boundedInteger(options.timeoutMs ?? 10_000, "timeout", 1, 60_000);
+    this.maximumAttempts = boundedInteger(options.maximumAttempts ?? 3, "maximum attempts", 1, 5);
+    this.baseBackoffMs = boundedInteger(options.baseBackoffMs ?? 1_000, "base backoff", 0, 60_000);
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.now = options.now ?? Date.now;
   }
@@ -115,7 +115,7 @@ export class PsuHttpRetriever {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const response = await this.fetchImpl(url, { ...init, redirect: "follow", signal: controller.signal });
+      const response = await this.fetchImpl(url, { ...init, redirect: "manual", signal: controller.signal });
 
       if (!response.ok) {
         const retryable = response.status === 429 || response.status >= 500;
@@ -127,16 +127,19 @@ export class PsuHttpRetriever {
       if (!contentType.startsWith("text/html")) {
         throw new PsuRetrievalError(`PSU returned unexpected content type: ${contentType || "missing"}.`, false);
       }
-      const contentLength = Number(response.headers.get("content-length"));
-      if (Number.isFinite(contentLength) && contentLength > maximumBytes) {
-        throw new PsuRetrievalError("PSU response exceeded the configured size limit.", false);
+      const contentLengthHeader = response.headers.get("content-length");
+      if (contentLengthHeader !== null) {
+        if (!/^\d+$/.test(contentLengthHeader)) {
+          throw new PsuRetrievalError("PSU returned an invalid content length.", false);
+        }
+        const contentLength = Number(contentLengthHeader);
+        if (!Number.isSafeInteger(contentLength) || contentLength > maximumBytes) {
+          throw new PsuRetrievalError("PSU response exceeded the configured size limit.", false);
+        }
       }
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.byteLength > maximumBytes) {
-        throw new PsuRetrievalError("PSU response exceeded the configured size limit.", false);
-      }
+      const bytes = await readBoundedBody(response, maximumBytes);
       return {
-        html: new TextDecoder("utf-8", { fatal: false }).decode(bytes),
+        html: decodeUtf8(bytes),
         sourceUrl: finalUrl,
         retrievedAt: new Date(),
       };
@@ -147,6 +150,50 @@ export class PsuHttpRetriever {
     } finally {
       clearTimeout(timeout);
     }
+  }
+}
+
+function boundedInteger(value: number, field: string, minimum: number, maximum: number): number {
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`PSU retriever ${field} must be an integer from ${minimum} through ${maximum}.`);
+  }
+  return value;
+}
+
+async function readBoundedBody(response: Response, maximumBytes: number): Promise<Uint8Array> {
+  if (!response.body) return new Uint8Array();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maximumBytes) {
+        await reader.cancel("PSU response exceeded the configured size limit.").catch(() => undefined);
+        throw new PsuRetrievalError("PSU response exceeded the configured size limit.", false);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const combined = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return combined;
+}
+
+function decodeUtf8(bytes: Uint8Array): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new PsuRetrievalError("PSU response was not valid UTF-8 HTML.", false);
   }
 }
 

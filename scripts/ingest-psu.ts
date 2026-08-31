@@ -1,6 +1,7 @@
 import path from "node:path";
 import { getPsuHall, getPsuMealPeriod, psuHalls, psuMealPeriods } from "../infrastructure/psu/constants.ts";
 import { PsuIngestionPipeline } from "../infrastructure/psu/ingestion-pipeline.ts";
+import { assertManualIngestionEnvironment } from "../infrastructure/psu/manual-ingestion-guard.ts";
 import { PsuHttpRetriever } from "../infrastructure/psu/retriever.ts";
 import { FilePsuSnapshotStore } from "../infrastructure/psu/snapshot-store.ts";
 
@@ -9,6 +10,8 @@ if (argumentsByName.has("help")) {
   printHelp();
   process.exit(0);
 }
+
+assertManualIngestionEnvironment();
 
 const serviceDate = requireArgument(argumentsByName, "date");
 const hallId = resolveHall(requireArgument(argumentsByName, "hall"));

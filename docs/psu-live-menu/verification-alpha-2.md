@@ -33,12 +33,18 @@ Frozen sanitized fixtures verify:
 ## Automated verification
 
 - TypeScript: `tsc --noEmit` — passed.
-- Production build plus tests: `npm test` — passed, 28 tests total (19 TypeScript ingestion/domain tests and 9 built-PWA tests).
+- Production build plus tests: `npm test` — passed, 39 tests total (30 TypeScript ingestion/domain tests and 9 built-PWA tests).
 - ESLint: `npm run lint` — passed.
 - Production Vinext build — passed as part of `npm test`.
-- Clean install: `npm ci --ignore-scripts` — passed; `npm audit --omit=dev` reported zero production dependency vulnerabilities.
+- Clean install: `npm ci --ignore-scripts` — passed.
+- Dependency tree: `npm ls --all` — passed; `parse5@8.0.1` and `zod@4.5.4` resolved as direct production dependencies.
+- Production dependency audit: `npm audit --omit=dev --audit-level=low` — zero vulnerabilities.
+- Registry verification: `npm audit signatures` — 458 packages have verified registry signatures and 83 have verified attestations.
+- Full-tree audit: 17 development/build-tool findings (2 low, 15 high) remain in the pre-existing Vinext/Vite/Cloudflare toolchain. They are absent from the production-dependency audit; upgrading that toolchain is outside this ingestion milestone.
 - Sanitization guard — every committed PSU HTML fixture is explicitly marked `SANITIZED DETERMINISTIC`; no upstream scripts, styles, correspondence, or contact information are present.
 - CI guard — `.github/workflows/ci.yml` runs `npm ci --ignore-scripts`, `npm test`, and `npm run lint`; it never invokes `ingest:psu`.
+
+The final boundary review additionally verifies no-follow redirect handling, streaming response-size enforcement, body-read timeouts, bounded retriever configuration, required nutrition-fact sentinels, stable context-scoped observation IDs, semantic cache provenance, atomic file-cache writes, invalid-cache rejection, provider revalidation, and a CI-environment live-ingestion guard.
 
 ## Scope confirmation
 

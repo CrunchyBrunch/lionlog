@@ -1,7 +1,8 @@
-import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { MenuQuery } from "../../domain/dining.ts";
+import { PsuStructuralError } from "./errors.ts";
 import type { PsuMenuSnapshot, PsuNutritionCacheEntry } from "./snapshot-schema.ts";
 import { validatePsuNutritionCacheEntry, validatePsuSnapshot } from "./snapshot-schema.ts";
 
@@ -49,8 +50,15 @@ export class FilePsuSnapshotStore implements PsuSnapshotStore {
     this.nutritionDirectory = path.join(rootDirectory, "lionlog.psu-nutrition.v1");
   }
 
-  readMenu(query: MenuQuery): Promise<PsuMenuSnapshot | null> {
-    return readJson(path.join(this.menuDirectory, `${fileHash(menuKey(query))}.json`), validatePsuSnapshot);
+  async readMenu(query: MenuQuery): Promise<PsuMenuSnapshot | null> {
+    const snapshot = await readJson(
+      path.join(this.menuDirectory, `${fileHash(menuKey(query))}.json`),
+      validatePsuSnapshot,
+    );
+    if (snapshot && menuKey(snapshot.query) !== menuKey(query)) {
+      throw new PsuStructuralError("PSU menu cache entry does not match its lookup key.");
+    }
+    return snapshot;
   }
 
   async writeMenu(snapshot: PsuMenuSnapshot): Promise<void> {
@@ -62,12 +70,16 @@ export class FilePsuSnapshotStore implements PsuSnapshotStore {
     );
   }
 
-  readNutrition(sourceHandle: string): Promise<PsuNutritionCacheEntry | null> {
+  async readNutrition(sourceHandle: string): Promise<PsuNutritionCacheEntry | null> {
     if (!/^\d+$/.test(sourceHandle)) throw new Error("PSU nutrition handle must contain digits only.");
-    return readJson(
+    const entry = await readJson(
       path.join(this.nutritionDirectory, `${sourceHandle}.json`),
       validatePsuNutritionCacheEntry,
     );
+    if (entry && entry.sourceHandle !== sourceHandle) {
+      throw new PsuStructuralError("PSU nutrition cache entry does not match its lookup key.");
+    }
+    return entry;
   }
 
   async writeNutrition(entry: PsuNutritionCacheEntry): Promise<void> {
@@ -112,9 +124,15 @@ async function readJson<T>(filePath: string, validate: (value: unknown) => T): P
 async function writeJsonAtomically(directory: string, fileName: string, value: unknown): Promise<void> {
   await mkdir(directory, { recursive: true });
   const finalPath = path.join(directory, fileName);
-  const temporaryPath = path.join(directory, `${fileName}.${process.pid}.tmp`);
-  await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
-  await rename(temporaryPath, finalPath);
+  const temporaryPath = path.join(directory, `${fileName}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+    await rename(temporaryPath, finalPath);
+  } finally {
+    await unlink(temporaryPath).catch((error: unknown) => {
+      if (!isMissingFile(error)) throw error;
+    });
+  }
 }
 
 function isMissingFile(error: unknown): boolean {

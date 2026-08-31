@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { MenuQuery } from "../../domain/dining.ts";
-import { getPsuHall, getPsuMealPeriod, nutritionUrlForHandle, PSU_MENU_URL, PSU_PARSER_VERSION, PSU_SNAPSHOT_VERSION } from "./constants.ts";
+import {
+  getPsuHall,
+  getPsuMealPeriod,
+  nutritionUrlForHandle,
+  PSU_MENU_URL,
+  PSU_PARSER_VERSION,
+  PSU_SNAPSHOT_VERSION,
+  sourceDateFromIso,
+} from "./constants.ts";
 import { PsuStructuralError } from "./errors.ts";
 import type { ParsedPsuMenu } from "./menu-parser.ts";
 import type { ParsedPsuNutrition } from "./nutrition-parser.ts";
@@ -99,11 +107,33 @@ export const psuSnapshotSchema = z.object({
 }).strict().superRefine((snapshot, context) => {
   const stationIds = new Set<string>();
   const observationIds = new Set<string>();
+  try {
+    const hall = getPsuHall(snapshot.query.hallId);
+    if (snapshot.query.sourceCampusId !== hall.sourceCampusId) {
+      context.addIssue({ code: "custom", message: "Snapshot campus selector does not match its hall." });
+    }
+    const period = getPsuMealPeriod(snapshot.query.mealPeriodId);
+    if (snapshot.query.sourceMeal !== period.sourceValue) {
+      context.addIssue({ code: "custom", message: "Snapshot source meal does not match its meal period." });
+    }
+    sourceDateFromIso(snapshot.query.serviceDate);
+  } catch (error) {
+    context.addIssue({
+      code: "custom",
+      message: error instanceof Error ? error.message : "Snapshot query context is invalid.",
+    });
+  }
+
   for (const station of snapshot.stations) {
     if (stationIds.has(station.id)) {
       context.addIssue({ code: "custom", message: `Duplicate station ID: ${station.id}` });
     }
     stationIds.add(station.id);
+    const expectedStationId = `psu:station:v1:${hash([snapshot.query.hallId, station.displayName])}`;
+    if (station.id !== expectedStationId) {
+      context.addIssue({ code: "custom", message: `Station ${station.displayName} has an invalid deterministic ID.` });
+    }
+    const occurrencesByHandle = new Map<string, number>();
     for (const item of station.items) {
       if (item.stationId !== station.id) {
         context.addIssue({ code: "custom", message: `Item ${item.observationId} references the wrong station.` });
@@ -112,7 +142,40 @@ export const psuSnapshotSchema = z.object({
         context.addIssue({ code: "custom", message: `Duplicate observation ID: ${item.observationId}` });
       }
       observationIds.add(item.observationId);
+      if (nutritionHandleFromUrl(item.sourceUrl) !== item.sourceHandle) {
+        context.addIssue({ code: "custom", message: `Item ${item.observationId} has a mismatched source URL.` });
+      }
+      const occurrence = occurrencesByHandle.get(item.sourceHandle) ?? 0;
+      occurrencesByHandle.set(item.sourceHandle, occurrence + 1);
+      const expectedObservationId = `psu:observation:v1:${hash([
+        snapshot.query.serviceDate,
+        snapshot.query.hallId,
+        snapshot.query.mealPeriodId,
+        station.displayName,
+        item.sourceHandle,
+        String(occurrence),
+      ])}`;
+      if (item.observationId !== expectedObservationId) {
+        context.addIssue({ code: "custom", message: `Item ${item.observationId} has an invalid deterministic ID.` });
+      }
     }
+  }
+  const retrievedAt = Date.parse(snapshot.retrievedAt);
+  const cachedAt = Date.parse(snapshot.cachedAt);
+  const freshUntil = Date.parse(snapshot.freshUntil);
+  const retainUntil = Date.parse(snapshot.retainUntil);
+  if (!(retrievedAt <= cachedAt && cachedAt <= freshUntil && freshUntil <= retainUntil)) {
+    context.addIssue({ code: "custom", message: "Snapshot timestamps are out of order." });
+  }
+  const expectedSnapshotId = `psu:snapshot:v1:${hash([
+    snapshot.query.serviceDate,
+    snapshot.query.hallId,
+    snapshot.query.mealPeriodId,
+    snapshot.retrievedAt,
+    JSON.stringify(snapshot.stations),
+  ])}`;
+  if (snapshot.snapshotId !== expectedSnapshotId) {
+    context.addIssue({ code: "custom", message: "Snapshot content does not match its deterministic ID." });
   }
 });
 
@@ -124,7 +187,14 @@ export const psuNutritionCacheSchema = z.object({
   retrievedAt: z.string().datetime({ offset: true }),
   freshUntil: z.string().datetime({ offset: true }),
   detail: psuNutritionDetailSchema,
-}).strict();
+}).strict().superRefine((entry, context) => {
+  if (nutritionHandleFromUrl(entry.sourceUrl) !== entry.sourceHandle) {
+    context.addIssue({ code: "custom", message: "Nutrition cache source URL does not match its handle." });
+  }
+  if (Date.parse(entry.retrievedAt) > Date.parse(entry.freshUntil)) {
+    context.addIssue({ code: "custom", message: "Nutrition cache timestamps are out of order." });
+  }
+});
 
 export type PsuMenuSnapshot = z.infer<typeof psuSnapshotSchema>;
 export type PsuNutritionCacheEntry = z.infer<typeof psuNutritionCacheSchema>;
@@ -147,6 +217,7 @@ export function buildPsuSnapshot(
   const period = getPsuMealPeriod(query.mealPeriodId);
   if (
     menu.context.sourceCampusId !== hall.sourceCampusId
+    || menu.context.sourceDate !== sourceDateFromIso(query.serviceDate)
     || menu.context.sourceMeal !== period.sourceValue
   ) {
     throw new PsuStructuralError("Parsed PSU menu context does not match the LionLog query.");
@@ -154,10 +225,13 @@ export function buildPsuSnapshot(
 
   const stations = menu.stations.map((station) => {
     const stationId = `psu:station:v1:${hash([hall.id, station.displayName])}`;
+    const occurrencesByHandle = new Map<string, number>();
     return {
       id: stationId,
       displayName: station.displayName,
-      items: station.items.map((item, occurrenceIndex) => {
+      items: station.items.map((item) => {
+        const occurrenceIndex = occurrencesByHandle.get(item.sourceHandle) ?? 0;
+        occurrencesByHandle.set(item.sourceHandle, occurrenceIndex + 1);
         const detail = nutritionByHandle.get(item.sourceHandle);
         if (!detail) throw new PsuStructuralError(`Missing PSU nutrition detail for ${item.sourceHandle}.`);
         if (detail.name !== item.name) {
@@ -301,5 +375,13 @@ function isAllowedNutritionUrl(value: string): boolean {
       && [...url.searchParams.keys()].length === 1;
   } catch {
     return false;
+  }
+}
+
+function nutritionHandleFromUrl(value: string): string | null {
+  try {
+    return new URL(value).searchParams.get("mid");
+  } catch {
+    return null;
   }
 }

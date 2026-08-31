@@ -32,14 +32,15 @@ The default cache directory is `work/psu-ingestion`, which is ignored by Git. Th
 ## Retrieval controls
 
 - exact HTTPS origin and path allowlists for the menu and nutrition pages;
-- response status, final URL, content type, byte limit, and timeout validation;
+- redirects are not followed; response status, URL, content type, and UTF-8 encoding are validated;
+- streaming byte limits (1 MiB menu, 256 KiB nutrition) and a timeout that remains active through body consumption;
 - one in-flight upstream request for the entire retriever instance;
 - minimum one-second interval between upstream request starts;
 - at most three attempts for network failures, `429`, and `5xx` responses;
 - exponential backoff; and
 - no retriever retry for parser/schema structural failures.
 
-The constructor disables real network access by default. Only the manual CLI explicitly enables it; tests inject a local fake fetch implementation.
+The constructor disables real network access by default. Only the manual CLI explicitly enables it; tests inject a local fake fetch implementation. The CLI refuses to run live ingestion when a CI environment is detected.
 
 ## Snapshot contract
 
@@ -54,7 +55,7 @@ The constructor disables real network access by default. Only the manual CLI exp
 - dietary traits, ingredients, and allergens;
 - allowlisted source URLs and retrieval/cache timestamps.
 
-Unavailable nutrients are `null`, never zero. No ounce/gram conversion, inferred precision, or cross-date canonical food identity is created. Observation IDs include menu context and the source handle.
+Unavailable nutrients are `null`, never zero. The exact serving label is retained; a quantity is parsed only when it is an unambiguous source decimal, and a source unit is retained without converting it. No ounce/gram conversion, inferred precision, or cross-date canonical food identity is created. Observation IDs include menu context, station, source handle, and the occurrence number for that handle, so unrelated item reordering does not change identity.
 
 ## Cache and provider states
 
@@ -64,13 +65,13 @@ Unavailable nutrients are `null`, never zero. No ounce/gram conversion, inferred
 - `sample`: deterministic `MockMenuProvider` content; and
 - `unavailable`: no valid live/cached/retained snapshot.
 
-The live provider never substitutes or mixes sample items when unavailable. Nutrition observations are cached for 24 hours. A repeated manual ingestion refreshes the menu page but reuses matching still-fresh nutrition cache entries.
+The live provider never substitutes or mixes sample items when unavailable. Nutrition observations are cached for 24 hours. A repeated manual ingestion refreshes the menu page but reuses matching still-fresh nutrition cache entries. Snapshot IDs, station/item IDs, source-handle URLs, query context, lookup keys, and timestamp ordering are revalidated before cached data reaches the provider; invalid saved data fails closed to `unavailable`.
 
 ## Test and CI policy
 
 All automated parsing, caching, failure, and provider tests use committed files whose names end in `.sanitized.html` or the existing sanitized JSON observation. Each HTML fixture is marked as sanitized and contains no upstream scripts, styles, correspondence, or personal contact details.
 
-CI runs `npm ci`, the production build plus Node test suite, and ESLint. It does not run the manual ingestion command. Real PSU access requires the retriever's explicit manual-network flag, which fixture tests never set.
+CI runs `npm ci`, the production build plus Node test suite, and ESLint. It does not run the manual ingestion command. Real PSU access requires the retriever's explicit manual-network flag, which fixture tests never set, and the manual CLI rejects recognized CI environments.
 
 ## Operational limits
 

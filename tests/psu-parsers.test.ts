@@ -75,6 +75,12 @@ test("source-unavailable nutrient values remain null rather than zero", async ()
   assert.deepEqual(detail.allergens, ["dairy", "soy", "wheat-gluten"]);
 });
 
+test("nutrition parser fails closed when a required fact label disappears", async () => {
+  const changed = (await fixture("nutrition-900000001.sanitized.html"))
+    .replace("<div class=\"fact-name\">Protein</div>", "<div class=\"fact-name\">Protein Changed</div>");
+  assert.throws(() => parsePsuNutritionHtml(changed), /missing the Protein field/i);
+});
+
 test("every committed PSU HTML fixture is explicitly sanitized and deterministic", async () => {
   const names = (await readdir(fixtureDirectory)).filter((name) => name.endsWith(".html"));
   assert.ok(names.length >= 7);

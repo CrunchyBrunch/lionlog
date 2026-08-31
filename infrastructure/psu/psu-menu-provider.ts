@@ -6,7 +6,7 @@ import type {
   MenuQuery,
 } from "../../domain/dining.ts";
 import { psuHalls, psuMealPeriods, PSU_MENU_URL } from "./constants.ts";
-import type { PsuMenuSnapshot } from "./snapshot-schema.ts";
+import { validatePsuSnapshot, type PsuMenuSnapshot } from "./snapshot-schema.ts";
 import type { PsuSnapshotStore } from "./snapshot-store.ts";
 
 export interface PsuSnapshotSelection {
@@ -42,20 +42,34 @@ export class PsuMenuProvider implements MenuProvider {
   }
 
   async getVenues(hallId: string): Promise<readonly DiningVenue[]> {
-    const active = this.options.activeSnapshot?.snapshot;
-    const snapshots = active?.query.hallId === hallId
-      ? [active]
-      : (await this.store.listMenus()).filter((snapshot) => snapshot.query.hallId === hallId);
-    const latest = snapshots.sort((left, right) => right.retrievedAt.localeCompare(left.retrievedAt))[0];
-    return latest?.stations.map((station) => ({
-      id: station.id,
-      hallId,
-      displayName: station.displayName,
-    })) ?? [];
+    try {
+      const active = this.options.activeSnapshot
+        ? validatePsuSnapshot(this.options.activeSnapshot.snapshot)
+        : undefined;
+      const snapshots = active?.query.hallId === hallId
+        ? [active]
+        : (await this.store.listMenus()).filter((snapshot) => snapshot.query.hallId === hallId);
+      const now = this.now().getTime();
+      const latest = snapshots
+        .filter((snapshot) => now <= Date.parse(snapshot.retainUntil))
+        .sort((left, right) => right.retrievedAt.localeCompare(left.retrievedAt))[0];
+      return latest?.stations.map((station) => ({
+        id: station.id,
+        hallId,
+        displayName: station.displayName,
+      })) ?? [];
+    } catch {
+      return [];
+    }
   }
 
   async getMenu(query: MenuQuery): Promise<Menu> {
-    const selection = await this.selectSnapshot(query);
+    let selection: PsuSnapshotSelection | null;
+    try {
+      selection = await this.selectSnapshot(query);
+    } catch {
+      return unavailableMenu(query, "The saved PSU snapshot failed validation. Sample data was not substituted.");
+    }
     if (!selection) return unavailableMenu(query);
     const selectedVenueIds = new Set(query.venueIds);
     const items = selection.snapshot.stations.flatMap((station) => station.items)
@@ -103,9 +117,18 @@ export class PsuMenuProvider implements MenuProvider {
 
   private async selectSnapshot(query: MenuQuery): Promise<PsuSnapshotSelection | null> {
     const active = this.options.activeSnapshot;
-    if (active && sameQuery(active.snapshot, query)) return active;
-    const snapshot = await this.store.readMenu(query);
-    if (!snapshot) return null;
+    if (active && sameQuery(active.snapshot, query)) {
+      const snapshot = validatePsuSnapshot(active.snapshot);
+      const now = this.now().getTime();
+      if (now > Date.parse(snapshot.retainUntil)) return null;
+      if (active.state === "stale" || now > Date.parse(snapshot.freshUntil)) {
+        return { state: "stale", snapshot };
+      }
+      return { state: active.state, snapshot };
+    }
+    const storedSnapshot = await this.store.readMenu(query);
+    if (!storedSnapshot) return null;
+    const snapshot = validatePsuSnapshot(storedSnapshot);
     const now = this.now().getTime();
     if (now <= Date.parse(snapshot.freshUntil)) return { state: "cached", snapshot };
     if (now <= Date.parse(snapshot.retainUntil)) return { state: "stale", snapshot };
@@ -125,7 +148,10 @@ function sourceLabel(mode: PsuSnapshotSelection["state"]): string {
   return "Penn State public menu — stale saved copy";
 }
 
-function unavailableMenu(query: MenuQuery): Menu {
+function unavailableMenu(
+  query: MenuQuery,
+  warning = "No validated live or retained snapshot is available. Sample data was not substituted.",
+): Menu {
   return {
     query: { ...query, venueIds: [...query.venueIds] },
     items: [],
@@ -134,7 +160,7 @@ function unavailableMenu(query: MenuQuery): Menu {
       label: "Penn State menu unavailable",
       retrievedAt: null,
       sourceUrl: PSU_MENU_URL,
-      warning: "No validated live or retained snapshot is available. Sample data was not substituted.",
+      warning,
     },
   };
 }

@@ -59,7 +59,18 @@ export function parsePsuNutritionHtml(html: string): ParsedPsuNutrition {
   for (const row of descendants(document, (element) => hasClass(element, "fact-row"))) {
     const name = firstDescendant(row, (element) => hasClass(element, "fact-name"));
     const amount = firstDescendant(row, (element) => hasClass(element, "fact-amount"));
-    if (name && amount) facts.set(normalizedText(name), normalizedText(amount));
+    if (name && amount) {
+      const factName = normalizedText(name);
+      if (facts.has(factName)) {
+        throw new PsuStructuralError(`PSU nutrition response repeated the ${factName} field.`);
+      }
+      facts.set(factName, normalizedText(amount));
+    }
+  }
+  for (const requiredFact of ["Total Fat", "Total Carbohydrate", "Protein"]) {
+    if (!facts.has(requiredFact)) {
+      throw new PsuStructuralError(`PSU nutrition response is missing the ${requiredFact} field.`);
+    }
   }
 
   const ingredients = paragraphAfterHeading(document, "ingredientsHeading");

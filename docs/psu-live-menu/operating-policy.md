@@ -2,6 +2,8 @@
 
 Penn State Residential Dining approved LionLog's use of publicly available dining-menu information in August 2026. This policy governs the resulting bounded proof of concept. The approval did not grant official/private API access or scheduled production scraping; any later source-specific terms or rate guidance override the provisional values below.
 
+Implementation note (August 31, 2026): this file preserves the broader `v0.2.0-alpha.1` operating design. The narrower manual `v0.2.0-alpha.2` proof of concept is described in [`implementation-alpha-2.md`](implementation-alpha-2.md). Alpha.2 uses one in-flight request, fixed minimum one-second pacing, at most three bounded exponential-backoff attempts, all-or-nothing structural validation, and no scheduler, circuit breaker, browser cache, or production adapter route. The remaining recommendations below are future design constraints, not claims about features implemented by alpha.2.
+
 ## Fetch and cache policy
 
 Use one adapter cache key per `schemaVersion + campus + ISO service date + meal`. Coalesce concurrent misses for the same key. Never fetch upstream directly from the client.
