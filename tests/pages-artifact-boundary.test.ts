@@ -79,7 +79,7 @@ test("Pages artifact validation requires an empty .nojekyll and rejects obsolete
   }
 });
 
-test("Pages root-reference validation rejects same-origin roots without rejecting external absolute URLs", async () => {
+test("Pages root-reference validation rejects same-origin roots in every generated payload without rejecting external URLs", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "lionlog-pages-root-reference-"));
   try {
     await writeSiteFixture(root);
@@ -88,11 +88,21 @@ test("Pages root-reference validation rejects same-origin roots without rejectin
     await writeFile(path.join(root, "index.html"), validIndex);
     await validatePagesArtifact(root);
 
-    await writeFile(path.join(root, "index.html"), `${validIndex}<script src="/_next/root.js"></script>`);
-    await assert.rejects(
-      validatePagesArtifact(root),
-      /root-hosted framework URL: src="\/_next\/root\.js/,
-    );
+    for (const [relativePath, content] of [
+      ["index.html", `${validIndex}<script src="/_next/root.js"></script>`],
+      ["404.html", '<link href="/manifest.webmanifest">'],
+      ["_next/static/app.css", "@font-face{src:url('/_next/static/font.woff2')}"],
+      ["_next/static/app.js", 'const chunks=["/_next/static/root.js"]'],
+      ["index.rsc", String.raw`{\"href\":\"/_next/static/root.css\"}`],
+      ["sw.js", "const SHELL = '/icons/icon-192.png'; const CACHE = 'lionlog-shell-v1'; const EXCLUDED = 'menu-data';"],
+    ] as const) {
+      await writeSiteFixture(root);
+      const target = path.join(root, ...relativePath.split("/"));
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, content);
+      await assert.rejects(validatePagesArtifact(root), new RegExp(`root-hosted application URL in ${relativePath.replaceAll(".", "\\.")}`));
+      await rm(target, { force: true });
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

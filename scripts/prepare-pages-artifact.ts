@@ -32,6 +32,7 @@ const FORBIDDEN_BROWSER_CODE = [
   /node:fs/,
   /node:crypto/,
 ] as const;
+const ROOT_HOSTED_APPLICATION_PATH = String.raw`(?:_next(?:\/|\\u002[fF])|manifest\.webmanifest(?=[?#"'\\)\s]|$)|sw\.js(?=[?#"'\\)\s]|$)|icons\/|og\.png(?=[?#"'\\)\s]|$)|menu-data\/)`;
 
 export async function preparePagesArtifact(sourceDirectory: string, outputDirectory: string): Promise<void> {
   const source = path.resolve(sourceDirectory);
@@ -62,10 +63,6 @@ export async function validatePagesArtifact(directory: string): Promise<string[]
   const index = await readFile(path.join(root, "index.html"), "utf8");
   if (!index.includes("/lionlog/_next/")) throw new Error("Pages index does not use the /lionlog/ framework base path.");
   if (!index.includes('href="./manifest.webmanifest"')) throw new Error("Pages index does not link the relative manifest.");
-  const rootHostedFrameworkReference = index.match(/\b(?:src|href)=["']\/_next\/[^"'\s<>]*/);
-  if (rootHostedFrameworkReference) {
-    throw new Error(`Pages index contains a root-hosted framework URL: ${rootHostedFrameworkReference[0]}`);
-  }
 
   const manifest = JSON.parse(await readFile(path.join(root, "manifest.webmanifest"), "utf8")) as {
     id?: unknown;
@@ -94,6 +91,10 @@ export async function validatePagesArtifact(directory: string): Promise<string[]
     const extension = path.extname(relativePath).toLowerCase();
     if (!TEXT_EXTENSIONS.has(extension) && path.basename(relativePath) !== "_headers") continue;
     const text = await readFile(path.join(root, relativePath), "utf8");
+    const rootHostedReference = findRootHostedApplicationReference(relativePath, text);
+    if (rootHostedReference) {
+      throw new Error(`Pages artifact contains a root-hosted application URL in ${relativePath}: ${rootHostedReference}`);
+    }
     for (const pattern of FORBIDDEN_TEXT) {
       if (pattern.test(text)) throw new Error(`Forbidden publication text in ${relativePath}: ${pattern.source}`);
     }
@@ -105,6 +106,29 @@ export async function validatePagesArtifact(directory: string): Promise<string[]
   }
 
   return files;
+}
+
+function findRootHostedApplicationReference(relativePath: string, text: string): string | null {
+  const extension = path.extname(relativePath).toLowerCase();
+  const patterns: RegExp[] = [];
+
+  if (extension === ".html") {
+    patterns.push(new RegExp(String.raw`\b(?:src|href|action|poster|data-rsc-css-href)\s*=\s*["']\/(?:${ROOT_HOSTED_APPLICATION_PATH})`, "i"));
+  }
+  if (extension === ".css") {
+    patterns.push(new RegExp(String.raw`url\(\s*["']?\/(?:${ROOT_HOSTED_APPLICATION_PATH})`, "i"));
+  }
+  if ([".html", ".js", ".json", ".rsc", ".webmanifest"].includes(extension)) {
+    // Covers generated JS string tables and both plain and JSON-escaped RSC
+    // bootstrap strings without treating external absolute URLs as same-origin.
+    patterns.push(new RegExp(String.raw`(?:["'\x60]|\\["'])\/(?:${ROOT_HOSTED_APPLICATION_PATH})`, "i"));
+  }
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) return match[0];
+  }
+  return null;
 }
 
 async function copyPublicationTree(source: string, output: string, relativeDirectory = ""): Promise<void> {

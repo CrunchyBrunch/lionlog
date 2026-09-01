@@ -135,17 +135,16 @@ test("production builds are static and accept only a bounded root or single-segm
     readFile(path.join(projectRoot, "worker/index.ts"), "utf8"),
   ]);
   assert.match(nextConfig, /process\.env\.LIONLOG_BASE_PATH/);
+  assert.match(nextConfig, /assetPrefix: publicBasePath/);
   assert.match(nextConfig, /output: "export"/);
   assert.doesNotMatch(nextConfig, /\n\s*basePath[,\s:]/);
-
-  const viteConfig = await readFile(path.join(projectRoot, "vite.config.ts"), "utf8");
-  assert.match(viteConfig, /base: publicBasePath === "" \? "\/" : `\$\{publicBasePath\}\//);
   assert.match(nextConfig, /absolute single path segment/);
   assert.match(layout, /process\.env\.LIONLOG_PUBLIC_ORIGIN/);
   assert.match(layout, /metadataBase/);
   assert.doesNotMatch(layout, /next\/headers|x-forwarded-host|requestHeaders/);
   assert.match(packageJson.scripts.build, /normalize-build-base-path/);
-  assert.match(normalizer, /applicationDocument/);
+  assert.match(normalizer, /nestedFrameworkAssets/);
+  assert.match(normalizer, /rename\(nestedFrameworkAssets, frameworkAssets\)/);
   assert.match(normalizer, /html\.includes\(`\$\{basePath\}\/_next\//);
   assert.match(worker, /APPLICATION_BASE_PATH/);
   assert.match(worker, /\/_next\//);
