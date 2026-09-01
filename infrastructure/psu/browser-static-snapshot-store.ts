@@ -54,7 +54,11 @@ export class BrowserStaticPsuSnapshotStore implements PsuMenuDeliveryStore {
         const snapshotUrl = resolveSameOriginMenuUrl(entry.snapshotUrl, catalogUrl);
         const snapshot = await this.fetchSnapshot(snapshotUrl, entry);
         if (!this.isRetained(snapshot)) return null;
-        await this.applicationStore.writeSnapshot(snapshot);
+        try {
+          await this.applicationStore.writeSnapshot(snapshot);
+        } catch {
+          // Valid remote data remains usable when persistent browser storage is unavailable.
+        }
         return { state: this.isFresh(snapshot) ? "live" : "stale", snapshot };
       } catch {
         // A failed or invalid publication must not replace a previously validated snapshot.
@@ -83,7 +87,11 @@ export class BrowserStaticPsuSnapshotStore implements PsuMenuDeliveryStore {
       try {
         const url = resolveSameOriginMenuUrl(PSU_MENU_DATA_PATH, this.baseUrl());
         const remote = validatePsuPublicationCatalog(await fetchJson(this.fetchImpl, url, MAX_CATALOG_BYTES));
-        await this.applicationStore.writeCatalog(remote);
+        try {
+          await this.applicationStore.writeCatalog(remote);
+        } catch {
+          // A persistence failure must not invalidate an otherwise valid remote catalog.
+        }
         return remote;
       } catch {
         try {

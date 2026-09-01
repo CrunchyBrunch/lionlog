@@ -1,7 +1,7 @@
 import { sites } from "@openai/sites-vite-plugin";
 import vinext from "vinext";
 import { defineConfig } from "vite";
-import hostingConfig from "./.openai/hosting.json";
+import hostingConfig from "./.openai/hosting.json" with { type: "json" };
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   "00000000-0000-4000-8000-000000000000";
@@ -34,6 +34,11 @@ const localBindingConfig = {
 };
 
 export default defineConfig(async () => {
+  const publicBasePath = process.env.LIONLOG_BASE_PATH ?? "";
+  if (publicBasePath !== "" && !/^\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(publicBasePath)) {
+    throw new Error("LIONLOG_BASE_PATH must be empty or one absolute single path segment such as /lionlog.");
+  }
+
   // Keep Wrangler and Miniflare state project-local. These are non-secret tool
   // settings; application environment belongs in ignored `.env*` files.
   process.env.WRANGLER_WRITE_LOGS ??= "false";
@@ -44,8 +49,13 @@ export default defineConfig(async () => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
+    // Vinext currently skips static prerendering when Next's basePath and
+    // output: "export" are combined. Vite's public base prefixes framework
+    // assets while keeping the generated static document at the artifact root,
+    // which is exactly what a Pages project-site artifact requires.
+    base: publicBasePath === "" ? "/" : `${publicBasePath}/`,
     define: {
-      __LIONLOG_BASE_PATH__: JSON.stringify(process.env.LIONLOG_BASE_PATH ?? ""),
+      __LIONLOG_BASE_PATH__: JSON.stringify(publicBasePath),
     },
     server: isCodexSeatbeltSandbox
       ? { watch: { useFsEvents: false, usePolling: true } }

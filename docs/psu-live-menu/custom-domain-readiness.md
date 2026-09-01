@@ -2,7 +2,7 @@
 
 Audit date: 2026-08-25
 
-Status: source-ready with metadata follow-up; domain ownership not confirmed in this task
+Status update (September 1, 2026): trusted configured metadata and an explicit manifest ID are implemented for Alpha 3 static export. Domain ownership remains unconfirmed, and no domain, DNS, hosting, or deployment setting was changed.
 
 No domain was purchased, no DNS was changed, no Sites project was created, and no Sites access/domain configuration was mutated. `.openai/hosting.json` still identifies the existing project `appgprj_6a8d8d0dad888191af93966368936653`.
 
@@ -26,10 +26,10 @@ No domain was purchased, no DNS was changed, no Sites project was created, and n
 - Admin confirms `lionlog.app` is registered in an account the user controls. Never request registrar credentials or store DNS/publishing credentials in the repository.
 - The existing Site-owning Prototype task follows the Sites custom-domain process for the existing project. Do not initialize or deploy a new Sites project.
 - Configure both apex and chosen `www` behavior deliberately; redirect the non-canonical host to the canonical HTTPS origin if Sites supports it.
-- Replace request-header-derived social origin construction with a trusted configured public origin (`https://lionlog.app`) for production metadata. The current `generateMetadata` trusts `x-forwarded-host`/`host`; that is unsuitable as the canonical authority.
-- Add framework-native canonical metadata (`metadataBase`/canonical URL and Open Graph `url`) using the trusted origin, while retaining local-preview behavior without publishing localhost metadata.
+- Set `LIONLOG_PUBLIC_ORIGIN=https://lionlog.app` for a future authorized custom-domain build. Metadata uses this trusted configured origin and never derives canonical authority from request headers.
+- Validate the existing framework-native `metadataBase`, canonical URL, Open Graph URL, and social image on the final origin.
 - Confirm `/og.png`, the root document, manifest, icons, and service worker all return `200` at the custom origin over HTTPS.
-- Add an explicit manifest `id` such as `./` before public custom-domain launch so future path changes do not accidentally change the installed-app identity. The ID is still origin-bound.
+- Preserve the explicit relative manifest `id` (`./`), `start_url`, and `scope`. Installed identity remains origin-bound.
 - Bump the application-shell cache/marker version with the release that changes metadata or PWA assets; rerun current redirect/cross-origin shell tests.
 - If the proof-of-concept live adapter is deployed in a later approved release, expose it only same-origin and allowlist the deployed canonical origin in any request-origin/CSRF checks. Do not add `*` CORS.
 - Verify source attribution links, privacy/support links, and any application URL shown in copy use `lionlog.app` only after the domain is active.

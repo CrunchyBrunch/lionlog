@@ -52,7 +52,7 @@ After the validated East snapshot had been saved, each production server was sto
 
 The August 31 final review found and corrected two concrete Alpha 3 issues before marking the pull request ready:
 
-- Vinext's generated framework tree did not initially serve a compiled `/lionlog/` mount end to end. The build now accepts only an empty or single-segment `LIONLOG_BASE_PATH`, normalizes the mounted framework tree without overwriting existing output, and maps prefixed framework requests to that validated tree.
+- Vinext's generated framework tree did not initially serve a compiled `/lionlog/` mount end to end. The build accepts only an empty or single-segment `LIONLOG_BASE_PATH`, keeps the exported document and framework tree at the artifact root, prefixes framework URLs for the project-site mount, and verifies that output before publication.
 - The offline banner previously referred only to an installed sample menu. It now states that retained validated menus remain available when saved and makes no claim of sample fallback.
 
 Post-fix verification repeated the clean install, TypeScript, production builds, all tests, ESLint, dependency-tree validation, production audit, root and `/lionlog/` mobile browser checks, server-stop reloads, artifact inspection, and browser-bundle scan. The dependency lockfile remained unchanged. The browser bundle contains the allowlisted public source URL needed for attribution and source validation, but no PSU POST fields, retriever, parser, pacing, Node filesystem/crypto imports, or nutrition retrieval code.

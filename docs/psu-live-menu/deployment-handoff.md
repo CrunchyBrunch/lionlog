@@ -1,5 +1,7 @@
 # LionLog Admin and Site-owner handoff
 
+> Historical status note (September 1, 2026): this handoff records the Alpha 1 plan. Alpha 2 ingestion and Alpha 3 cached static delivery are now implemented on `main`; use `implementation-alpha-2.md`, `implementation-alpha-3.md`, and the public-release readiness report for current behavior. No deployment or scheduled retrieval has been enabled.
+
 ## Current milestone
 
 - Audit branch: `feature/psu-live-menu-alpha-1`
@@ -17,9 +19,9 @@ This task is the post-prototype implementation/audit task, not the existing Site
 4. Confirm ownership/registration of `lionlog.app` through a user-controlled registrar account before any custom-domain work.
 5. Route custom-domain attachment and any later deployment through the existing Site-owning Prototype task for project `appgprj_6a8d8d0dad888191af93966368936653`.
 
-## Proposed `v0.2.0-alpha.2` scope
+## Historical proposed `v0.2.0-alpha.2` scope
 
-The next milestone should implement the provider contract and same-origin adapter against a permissioned fixture/source, not expand product scope.
+This section preserves the acceptance plan used before Alpha 2 and Alpha 3 were implemented; it is not the current implementation status.
 
 ### In scope
 

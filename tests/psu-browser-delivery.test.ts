@@ -68,6 +68,25 @@ test("remote validated data is live and an offline reload uses the saved validat
   assert.deepEqual(cachedMenu.items, liveMenu.items);
 });
 
+test("validated remote data remains usable when browser persistence is unavailable", async () => {
+  const snapshot = await fixtureSnapshot();
+  const catalog = fixtureCatalog(snapshot);
+  const applicationStore = new class extends MemoryBrowserMenuApplicationStore {
+    override async writeCatalog(): Promise<void> { throw new Error("storage unavailable"); }
+    override async writeSnapshot(): Promise<void> { throw new Error("storage unavailable"); }
+  }();
+  const store = new BrowserStaticPsuSnapshotStore({
+    baseUrl: () => "https://example.test/lionlog/",
+    fetchImpl: publishedFetch(catalog, snapshot),
+    applicationStore,
+    now: () => new Date("2026-08-31T16:02:00.000Z"),
+  });
+
+  const result = await store.readMenuSelection(query);
+  assert.equal(result?.state, "live");
+  assert.equal(result?.snapshot.snapshotId, snapshot.snapshotId);
+});
+
 test("tampered remote data is rejected without replacing last-known-good", async () => {
   const snapshot = await fixtureSnapshot();
   const catalog = fixtureCatalog(snapshot);
