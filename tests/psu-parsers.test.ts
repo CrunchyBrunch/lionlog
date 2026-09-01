@@ -46,6 +46,44 @@ test("pure menu parser distinguishes a validated empty menu from structural fail
   );
 });
 
+test("menu parser validates the returned selected meal value instead of the requested label", async () => {
+  const html = await fixture("menu-east-lunch.sanitized.html");
+  assert.throws(
+    () => parsePsuMenuHtml(html, {
+      sourceCampusId: "11",
+      sourceDate: "8/31/26",
+      sourceMeal: "Dinner",
+    }),
+    /did not echo the requested selMeal/i,
+  );
+});
+
+test("menu fixture changes fail closed at category, item, link, and dietary boundaries", async () => {
+  const html = await fixture("menu-east-lunch.sanitized.html");
+  const expected = {
+    sourceCampusId: "11",
+    sourceDate: "8/31/26",
+    sourceMeal: "Lunch",
+  };
+
+  assert.throws(
+    () => parsePsuMenuHtml(html.replaceAll("menu-category-section", "menu-category-changed"), expected),
+    /neither validated items nor a recognized empty state/i,
+  );
+  assert.throws(
+    () => parsePsuMenuHtml(html.replaceAll("menu-items daily-menu-item", "menu-items daily-menu-changed"), expected),
+    /neither validated items nor a recognized empty state/i,
+  );
+  assert.throws(
+    () => parsePsuMenuHtml(html.replaceAll("daily-menu-item__link", "daily-menu-item__link-changed"), expected),
+    /missing its nutrition link/i,
+  );
+  assert.throws(
+    () => parsePsuMenuHtml(html.replace("alt=\"Halal Friendly\"", "alt=\"Dietary Marker Changed\""), expected),
+    /unknown PSU dietary marker/i,
+  );
+});
+
 test("pure nutrition parser preserves source precision, units, ingredients, and allergens", async () => {
   const detail = parsePsuNutritionHtml(await fixture("nutrition-900000001.sanitized.html"));
 
@@ -73,6 +111,18 @@ test("source-unavailable nutrient values remain null rather than zero", async ()
   assert.equal(detail.fatG, null);
   assert.equal(detail.additional.sodiumMg, 610.5);
   assert.deepEqual(detail.allergens, ["dairy", "soy", "wheat-gluten"]);
+});
+
+test("an explicit PSU unavailable-nutrition page preserves null source fields", async () => {
+  const parsed = parsePsuNutritionHtml(await fixture("nutrition-unavailable.sanitized.html"));
+  assert.equal(parsed.name, null);
+  assert.equal(parsed.servingLabel, null);
+  assert.equal(parsed.sourceQuantity, null);
+  assert.equal(parsed.sourceUnit, null);
+  assert.equal(parsed.calories, null);
+  assert.equal(parsed.proteinG, null);
+  assert.equal(parsed.ingredients, null);
+  assert.deepEqual(parsed.allergens, []);
 });
 
 test("nutrition parser fails closed when a required fact label disappears", async () => {

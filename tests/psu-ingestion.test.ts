@@ -154,6 +154,7 @@ test("failure without retained data returns unavailable rather than sample", asy
 test("observation IDs remain stable when unrelated station items are reordered", async () => {
   const chicken = parsePsuNutritionHtml(await fixture("nutrition-900000001.sanitized.html"));
   const rice = parsePsuNutritionHtml(await fixture("nutrition-900000002.sanitized.html"));
+  if (!chicken.name || !rice.name) throw new Error("Named nutrition fixtures are incomplete.");
   const nutrition = new Map([
     ["900000001", chicken],
     ["900000002", rice],
@@ -233,6 +234,7 @@ function pipelineFor(fetchImpl: typeof fetch, store: MemoryPsuSnapshotStore): Ps
     minimumIntervalMs: 0,
     maximumAttempts: 2,
     sleep: () => Promise.resolve(),
+    now: () => now.getTime(),
   });
   return new PsuIngestionPipeline(retriever, store, { now: () => now });
 }

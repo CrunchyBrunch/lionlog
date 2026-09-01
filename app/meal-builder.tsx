@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { menuBrowser } from "../application/browser-container.ts";
+import { liveMenuBrowser, sampleMenuBrowser } from "../application/browser-container.ts";
 import { todayInTimeZone } from "../application/service-date.ts";
 import type { DiningHall, DiningVenue, MealPeriod, Menu } from "../domain/dining.ts";
 
@@ -13,6 +13,9 @@ export interface MealBuilderInitialData {
 }
 
 export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialData }) {
+  const [dataMode, setDataMode] = useState<"live" | "sample">("live");
+  const [halls, setHalls] = useState(initial.halls);
+  const [periods, setPeriods] = useState(initial.periods);
   const [hallId, setHallId] = useState(initial.menu.query.hallId);
   const [periodId, setPeriodId] = useState(initial.menu.query.mealPeriodId);
   const [serviceDate, setServiceDate] = useState(initial.menu.query.serviceDate);
@@ -21,16 +24,17 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
   const [menu, setMenu] = useState(initial.menu);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const menuBrowser = dataMode === "live" ? liveMenuBrowser : sampleMenuBrowser;
 
   const hallById = useMemo(
-    () => new Map(initial.halls.map((hall) => [hall.id, hall])),
-    [initial.halls],
+    () => new Map(halls.map((hall) => [hall.id, hall])),
+    [halls],
   );
   const venueById = useMemo(
     () => new Map(venues.map((venue) => [venue.id, venue])),
     [venues],
   );
-  const periodName = initial.periods.find((period) => period.id === periodId)?.displayName ?? "Meal";
+  const periodName = periods.find((period) => period.id === periodId)?.displayName ?? "Meal";
   const isSample = menu.source.mode === "sample";
   const sourceStateLabel = menu.source.mode === "sample"
     ? "Sample"
@@ -42,13 +46,17 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
       if (current) setVenues(nextVenues);
     });
     return () => { current = false; };
-  }, [hallId]);
+  }, [hallId, menuBrowser]);
 
   useEffect(() => {
     let current = true;
     menuBrowser.loadMenu({ hallId, mealPeriodId: periodId, serviceDate, venueIds: selectedVenueIds })
-      .then((nextMenu) => {
-        if (current) setMenu(nextMenu);
+      .then(async (nextMenu) => {
+        const nextVenues = await menuBrowser.loadVenues(hallId);
+        if (current) {
+          setMenu(nextMenu);
+          setVenues(nextVenues);
+        }
       })
       .catch(() => {
         if (current) setError("The menu could not be loaded. Please try another selection.");
@@ -57,7 +65,26 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
         if (current) setIsLoading(false);
       });
     return () => { current = false; };
-  }, [hallId, periodId, selectedVenueIds, serviceDate]);
+  }, [hallId, menuBrowser, periodId, selectedVenueIds, serviceDate]);
+
+  async function chooseDataMode(nextMode: "live" | "sample") {
+    if (nextMode === dataMode) return;
+    setIsLoading(true);
+    setError(null);
+    setDataMode(nextMode);
+    setSelectedVenueIds([]);
+    const browser = nextMode === "live" ? liveMenuBrowser : sampleMenuBrowser;
+    const context = await browser.loadContext();
+    const nextHall = context.halls[0];
+    const nextPeriod = context.periods.find((period) => period.id === "dinner") ?? context.periods[0];
+    setHalls(context.halls);
+    setPeriods(context.periods);
+    if (nextHall && nextPeriod) {
+      setHallId(nextHall.id);
+      setPeriodId(nextPeriod.id);
+      setServiceDate(todayInTimeZone(nextHall.timeZone));
+    }
+  }
 
   function chooseHall(nextHallId: string) {
     setIsLoading(true);
@@ -96,6 +123,17 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
         </p>
       </section>
 
+      <section className="data-mode" aria-label="Menu data mode">
+        <div>
+          <strong>Menu source</strong>
+          <span>Live delivery never falls back to sample foods.</span>
+        </div>
+        <div className="mode-options">
+          <button type="button" aria-pressed={dataMode === "live"} onClick={() => void chooseDataMode("live")}>PSU snapshots</button>
+          <button type="button" aria-pressed={dataMode === "sample"} onClick={() => void chooseDataMode("sample")}>Sample demo</button>
+        </div>
+      </section>
+
       <section className="builder-card" aria-labelledby="context-heading">
         <div className="section-heading">
           <div>
@@ -109,7 +147,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
           <label>
             <span>Dining hall</span>
             <select value={hallId} onChange={(event) => chooseHall(event.target.value)}>
-              {initial.halls.map((hall) => (
+              {halls.map((hall) => (
                 <option value={hall.id} key={hall.id}>{hall.displayName}</option>
               ))}
             </select>
@@ -121,7 +159,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
               setError(null);
               setPeriodId(event.target.value);
             }}>
-              {initial.periods.map((period) => (
+              {periods.map((period) => (
                 <option value={period.id} key={period.id}>{period.displayName}</option>
               ))}
             </select>
@@ -223,7 +261,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
           ) : (
             <p>
               <strong>{menu.source.label}.</strong>{" "}
-              {menu.source.retrievedAt && `Retrieved ${formatRetrievedAt(menu.source.retrievedAt)}. `}
+              {menu.source.retrievedAt && `Retrieved ${formatRetrievedAt(menu.source.retrievedAt)} (${formatAge(menu.source.retrievedAt)}). `}
               {menu.source.warning && `${menu.source.warning} `}
               {menu.source.sourceUrl && (
                 <a href={menu.source.sourceUrl} target="_blank" rel="noreferrer">View the public source.</a>
@@ -235,8 +273,8 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
       </section>
 
       <footer className="milestone-note">
-        <span>v0.2.0-alpha.2</span>
-        <p>Public ingestion proof of concept · no official PSU API.</p>
+        <span>v0.2.0-alpha.3</span>
+        <p>Cached public-menu delivery · no official PSU API.</p>
       </footer>
     </main>
   );
@@ -249,4 +287,14 @@ function formatNutrient(value: number | null, suffix = ""): string {
 function formatRetrievedAt(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "at an unknown time" : date.toLocaleString();
+}
+
+function formatAge(value: string): string {
+  const elapsed = Date.now() - Date.parse(value);
+  if (!Number.isFinite(elapsed) || elapsed < 0) return "age unavailable";
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 60) return `${minutes} min old`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours} hr old`;
+  return `${Math.floor(hours / 24)} days old`;
 }

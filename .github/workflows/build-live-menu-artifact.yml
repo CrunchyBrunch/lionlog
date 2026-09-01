@@ -1,0 +1,61 @@
+name: Build reviewable live-menu artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_date:
+        description: PSU service date (YYYY-MM-DD)
+        required: true
+        type: string
+      queries:
+        description: Space-separated hall:meal pairs (for example 11:Lunch 14:Dinner)
+        required: true
+        default: "11:Lunch 14:Dinner"
+        type: string
+      confirmation:
+        description: Type LIVE_PSU_INGESTION to authorize public PSU requests
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-artifact:
+    if: inputs.confirmation == 'LIVE_PSU_INGESTION'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Validate query input
+        env:
+          SERVICE_DATE: ${{ inputs.service_date }}
+          QUERIES: ${{ inputs.queries }}
+        run: |
+          [[ "$SERVICE_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+          [[ "$QUERIES" =~ ^([0-9]+:(Breakfast|Lunch|Dinner|Late_Night))(\ [0-9]+:(Breakfast|Lunch|Dinner|Late_Night))*$ ]]
+      - name: Run explicitly authorized ingestion
+        env:
+          LIONLOG_ALLOW_PSU_NETWORK: "I_UNDERSTAND_THIS_CONTACTS_PSU"
+          SERVICE_DATE: ${{ inputs.service_date }}
+          QUERIES: ${{ inputs.queries }}
+        run: |
+          for query in $QUERIES; do
+            hall="${query%%:*}"
+            meal="${query#*:}"
+            npm run ingest:psu -- --date="$SERVICE_DATE" --hall="$hall" --meal="${meal//_/ }" --cache-dir=work/psu-ingestion
+          done
+      - run: npm run export:psu-static -- --cache-dir=work/psu-ingestion --output-dir=public
+      - run: npm run build
+      - name: Retain reviewable static site
+        uses: actions/upload-artifact@v7
+        with:
+          name: lionlog-alpha-3-${{ inputs.service_date }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14

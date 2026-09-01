@@ -87,7 +87,7 @@ function printHelp(): void {
     "Manually ingest one Penn State public dining-menu snapshot.",
     "",
     "Usage:",
-    "  npm run ingest:psu -- --date=YYYY-MM-DD --hall=<campus-id> --meal=<meal>",
+    "  LIONLOG_ALLOW_PSU_NETWORK=I_UNDERSTAND_THIS_CONTACTS_PSU npm run ingest:psu -- --date=YYYY-MM-DD --hall=<campus-id> --meal=<meal>",
     "",
     "Examples:",
     "  npm run ingest:psu -- --date=2026-08-31 --hall=11 --meal=Lunch",

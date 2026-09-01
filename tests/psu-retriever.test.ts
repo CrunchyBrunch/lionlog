@@ -133,8 +133,22 @@ test("default retriever cannot contact PSU without explicit manual authorization
 });
 
 test("manual ingestion is disabled when a CI environment is detected", () => {
-  assert.throws(() => assertManualIngestionEnvironment({ CI: "true" }), /disabled in CI/i);
-  assert.doesNotThrow(() => assertManualIngestionEnvironment({ CI: "false" }));
+  const authorization = { LIONLOG_ALLOW_PSU_NETWORK: "I_UNDERSTAND_THIS_CONTACTS_PSU" };
+  assert.throws(() => assertManualIngestionEnvironment({ ...authorization, CI: "true" }), /workflow_dispatch/i);
+  assert.doesNotThrow(() => assertManualIngestionEnvironment({ ...authorization, CI: "false" }));
+  assert.doesNotThrow(() => assertManualIngestionEnvironment({
+    ...authorization,
+    CI: "true",
+    GITHUB_EVENT_NAME: "workflow_dispatch",
+  }));
+});
+
+test("manual ingestion requires the exact explicit authorization phrase", () => {
+  assert.throws(() => assertManualIngestionEnvironment({}), /explicit manual authorization/i);
+  assert.throws(
+    () => assertManualIngestionEnvironment({ LIONLOG_ALLOW_PSU_NETWORK: "true" }),
+    /explicit manual authorization/i,
+  );
 });
 
 test("retriever rejects unbounded retry and timeout configuration", () => {

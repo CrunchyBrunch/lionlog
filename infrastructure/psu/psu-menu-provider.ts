@@ -6,8 +6,11 @@ import type {
   MenuQuery,
 } from "../../domain/dining.ts";
 import { psuHalls, psuMealPeriods, PSU_MENU_URL } from "./constants.ts";
-import { validatePsuSnapshot, type PsuMenuSnapshot } from "./snapshot-schema.ts";
-import type { PsuSnapshotStore } from "./snapshot-store.ts";
+import type { PsuMenuDeliveryStore } from "./menu-delivery-store.ts";
+import {
+  validatePsuSnapshotStructure,
+  type BrowserPsuMenuSnapshot as PsuMenuSnapshot,
+} from "./snapshot-contract.ts";
 
 export interface PsuSnapshotSelection {
   readonly state: Exclude<MenuDataState, "sample" | "unavailable">;
@@ -20,12 +23,12 @@ export interface PsuMenuProviderOptions {
 }
 
 export class PsuMenuProvider implements MenuProvider {
-  private readonly store: PsuSnapshotStore;
+  private readonly store: PsuMenuDeliveryStore;
   private readonly options: PsuMenuProviderOptions;
   private readonly now: () => Date;
 
   constructor(
-    store: PsuSnapshotStore,
+    store: PsuMenuDeliveryStore,
     options: PsuMenuProviderOptions = {},
   ) {
     this.store = store;
@@ -44,7 +47,7 @@ export class PsuMenuProvider implements MenuProvider {
   async getVenues(hallId: string): Promise<readonly DiningVenue[]> {
     try {
       const active = this.options.activeSnapshot
-        ? validatePsuSnapshot(this.options.activeSnapshot.snapshot)
+        ? validatePsuSnapshotStructure(this.options.activeSnapshot.snapshot)
         : undefined;
       const snapshots = active?.query.hallId === hallId
         ? [active]
@@ -93,7 +96,7 @@ export class PsuMenuProvider implements MenuProvider {
             id: `${item.observationId}:serving`,
             sourceQuantity: item.serving.quantity,
             sourceUnit: item.serving.unit,
-            displayLabel: item.serving.label,
+            displayLabel: item.serving.label ?? "Serving information unavailable",
             nutrition: item.nutrition,
           }],
         },
@@ -118,7 +121,7 @@ export class PsuMenuProvider implements MenuProvider {
   private async selectSnapshot(query: MenuQuery): Promise<PsuSnapshotSelection | null> {
     const active = this.options.activeSnapshot;
     if (active && sameQuery(active.snapshot, query)) {
-      const snapshot = validatePsuSnapshot(active.snapshot);
+      const snapshot = validatePsuSnapshotStructure(active.snapshot);
       const now = this.now().getTime();
       if (now > Date.parse(snapshot.retainUntil)) return null;
       if (active.state === "stale" || now > Date.parse(snapshot.freshUntil)) {
@@ -126,9 +129,19 @@ export class PsuMenuProvider implements MenuProvider {
       }
       return { state: active.state, snapshot };
     }
+    if (this.store.readMenuSelection) {
+      const delivered = await this.store.readMenuSelection(query);
+      if (!delivered) return null;
+      const snapshot = validatePsuSnapshotStructure(delivered.snapshot);
+      const now = this.now().getTime();
+      if (now > Date.parse(snapshot.retainUntil)) return null;
+      return now > Date.parse(snapshot.freshUntil)
+        ? { state: "stale", snapshot }
+        : { state: delivered.state, snapshot };
+    }
     const storedSnapshot = await this.store.readMenu(query);
     if (!storedSnapshot) return null;
-    const snapshot = validatePsuSnapshot(storedSnapshot);
+    const snapshot = validatePsuSnapshotStructure(storedSnapshot);
     const now = this.now().getTime();
     if (now <= Date.parse(snapshot.freshUntil)) return { state: "cached", snapshot };
     if (now <= Date.parse(snapshot.retainUntil)) return { state: "stale", snapshot };

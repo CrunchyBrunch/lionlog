@@ -1,7 +1,7 @@
 const CACHE_PREFIX = "lionlog-shell-";
-const CACHE_NAME = `${CACHE_PREFIX}v0.2.0-alpha.2`;
+const CACHE_NAME = `${CACHE_PREFIX}v0.2.0-alpha.3`;
 const SCOPE_URL = new URL("./", self.registration.scope).href;
-const APPLICATION_DOCUMENT_MARKER = 'data-lionlog-shell="v0.2.0-alpha.2"';
+const APPLICATION_DOCUMENT_MARKER = 'data-lionlog-shell="v0.2.0-alpha.3"';
 const CORE_ASSETS = [
   SCOPE_URL,
   new URL("./manifest.webmanifest", self.registration.scope).href,
@@ -67,7 +67,12 @@ self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
 
-  if (request.method !== "GET" || url.origin !== self.location.origin || url.pathname.startsWith("/api/")) {
+  if (
+    request.method !== "GET"
+    || url.origin !== self.location.origin
+    || url.pathname.startsWith("/api/")
+    || /(^|\/)menu-data\//.test(url.pathname)
+  ) {
     return;
   }
 
