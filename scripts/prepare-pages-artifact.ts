@@ -62,7 +62,10 @@ export async function validatePagesArtifact(directory: string): Promise<string[]
   const index = await readFile(path.join(root, "index.html"), "utf8");
   if (!index.includes("/lionlog/_next/")) throw new Error("Pages index does not use the /lionlog/ framework base path.");
   if (!index.includes('href="./manifest.webmanifest"')) throw new Error("Pages index does not link the relative manifest.");
-  if (/\b(?:src|href)=["']\/_next\//.test(index)) throw new Error("Pages index contains a root-hosted framework URL.");
+  const rootHostedFrameworkReference = index.match(/\b(?:src|href)=["']\/_next\/[^"'\s<>]*/);
+  if (rootHostedFrameworkReference) {
+    throw new Error(`Pages index contains a root-hosted framework URL: ${rootHostedFrameworkReference[0]}`);
+  }
 
   const manifest = JSON.parse(await readFile(path.join(root, "manifest.webmanifest"), "utf8")) as {
     id?: unknown;

@@ -79,6 +79,25 @@ test("Pages artifact validation requires an empty .nojekyll and rejects obsolete
   }
 });
 
+test("Pages root-reference validation rejects same-origin roots without rejecting external absolute URLs", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "lionlog-pages-root-reference-"));
+  try {
+    await writeSiteFixture(root);
+    const externalReference = '<script src="https://cdn.example.test/_next/external.js"></script>';
+    const validIndex = `${await readFile(path.join(root, "index.html"), "utf8")}${externalReference}`;
+    await writeFile(path.join(root, "index.html"), validIndex);
+    await validatePagesArtifact(root);
+
+    await writeFile(path.join(root, "index.html"), `${validIndex}<script src="/_next/root.js"></script>`);
+    await assert.rejects(
+      validatePagesArtifact(root),
+      /root-hosted framework URL: src="\/_next\/root\.js/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 async function writeSiteFixture(root: string): Promise<void> {
   await mkdir(path.join(root, "_next", "static"), { recursive: true });
   await mkdir(path.join(root, "icons"), { recursive: true });
