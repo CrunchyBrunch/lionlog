@@ -4,10 +4,10 @@ Verification date: August 31, 2026. The review artifact and live ingestion cache
 
 ## Automated and build verification
 
-- clean install: `npm ci --ignore-scripts` installed 458 packages and audited 459;
+- clean install: `npm ci --ignore-scripts` installed 562 packages and audited 569;
 - TypeScript: `tsc --noEmit` passed;
-- production build: all five Vinext build environments passed;
-- tests: 40 TypeScript fixture/integration tests and 11 JavaScript build/PWA tests passed;
+- production builds: all five Vinext build environments passed for both the default root artifact and `LIONLOG_BASE_PATH=/lionlog`;
+- tests: 42 TypeScript fixture/integration tests and 12 JavaScript build/PWA tests passed;
 - ESLint: passed with no findings;
 - dependency tree: `npm ls --all` exited successfully;
 - production dependency audit: 0 vulnerabilities;
@@ -36,13 +36,23 @@ The catalog and both snapshots passed publication validation and read-back valid
 
 ## Mobile and offline verification
 
-The production build was checked at a 390×844 iPhone-sized viewport:
+The root-hosted production build and a separately compiled `/lionlog/` build were checked at a 390×844 iPhone-sized viewport (375 CSS pixels wide):
 
-- East lunch loaded 76 real published observations as `live`;
+- East lunch loaded 76 real published observations as `stale`, accurately reflecting the age of the retained August 31 snapshot at review time;
 - whole-hall and station selection worked; selecting `ENTREES (0)` reduced the list to 2 items;
 - sample mode was available only through its explicit control and displayed its own `sample` state;
 - source retrieval time, age, public source link, and independent/not-endorsed disclaimer were visible;
-- document scroll width and client width were both 375 CSS pixels, so no horizontal overflow was present;
-- console warnings/errors: 0.
+- document scroll width and client width were both 375 CSS pixels in both hosting modes, so no horizontal overflow was present;
+- the `/lionlog/` page, prefixed framework asset, and catalog each returned HTTP 200 without an asset redirect;
+- console warnings/errors: 0 in both hosting modes.
 
-After the validated East snapshot had been saved, the production server was stopped and the same browser tab was reloaded. The service worker restored the application shell, IndexedDB supplied the still-retained validated snapshot, all 76 items remained available, and the state changed honestly from `live` to `cached`; console warnings/errors remained 0.
+After the validated East snapshot had been saved, each production server was stopped and its browser tab was reloaded. The service worker restored the application shell, IndexedDB supplied the still-retained validated snapshot, all 76 items remained available as `stale`, and console warnings/errors remained 0.
+
+## Final pre-merge review
+
+The August 31 final review found and corrected two concrete Alpha 3 issues before marking the pull request ready:
+
+- Vinext's generated framework tree did not initially serve a compiled `/lionlog/` mount end to end. The build now accepts only an empty or single-segment `LIONLOG_BASE_PATH`, normalizes the mounted framework tree without overwriting existing output, and maps prefixed framework requests to that validated tree.
+- The offline banner previously referred only to an installed sample menu. It now states that retained validated menus remain available when saved and makes no claim of sample fallback.
+
+Post-fix verification repeated the clean install, TypeScript, production builds, all tests, ESLint, dependency-tree validation, production audit, root and `/lionlog/` mobile browser checks, server-stop reloads, artifact inspection, and browser-bundle scan. The dependency lockfile remained unchanged. The browser bundle contains the allowlisted public source URL needed for attribution and source validation, but no PSU POST fields, retriever, parser, pacing, Node filesystem/crypto imports, or nutrition retrieval code.

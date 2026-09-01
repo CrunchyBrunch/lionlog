@@ -99,11 +99,12 @@ test("application-document verification accepts only the marked LionLog response
 });
 
 test("release version and brand colors stay consistent across the PWA surface", async () => {
-  const [packageJson, manifest, layout, mealBuilder, serviceWorker, styles] = await Promise.all([
+  const [packageJson, manifest, layout, mealBuilder, pwaRegister, serviceWorker, styles] = await Promise.all([
     readFile(path.join(projectRoot, "package.json"), "utf8").then(JSON.parse),
     readFile(path.join(projectRoot, "public/manifest.webmanifest"), "utf8").then(JSON.parse),
     readFile(path.join(projectRoot, "app/layout.tsx"), "utf8"),
     readFile(path.join(projectRoot, "app/meal-builder.tsx"), "utf8"),
+    readFile(path.join(projectRoot, "app/pwa-register.tsx"), "utf8"),
     readFile(path.join(projectRoot, "public/sw.js"), "utf8"),
     readFile(path.join(projectRoot, "app/globals.css"), "utf8"),
   ]);
@@ -112,6 +113,8 @@ test("release version and brand colors stay consistent across the PWA surface", 
   assert.match(layout, new RegExp(`data-lionlog-shell="v${releaseVersion.replaceAll(".", "\\.")}"`));
   assert.match(mealBuilder, new RegExp(`v${releaseVersion.replaceAll(".", "\\.")}`));
   assert.match(serviceWorker, new RegExp(`CACHE_NAME = .*v${releaseVersion.replaceAll(".", "\\.")}`));
+  assert.match(pwaRegister, /retained validated menus remain available when saved/i);
+  assert.doesNotMatch(pwaRegister, /installed sample menu remains available/i);
   assert.equal(manifest.theme_color, "#001E44");
   assert.equal(manifest.background_color, "#FFFFFF");
   for (const color of ["#001E44", "#1E407C", "#FFFFFF", "#96BEE6"]) {
@@ -120,6 +123,22 @@ test("release version and brand colors stay consistent across the PWA surface", 
   for (const retiredColor of ["#255d49", "#e86b35", "#deede3", "#97b6a9", "#f3f9f5"]) {
     assert.doesNotMatch(styles, new RegExp(retiredColor, "i"));
   }
+});
+
+test("production builds accept only a bounded root or single-segment application base path", async () => {
+  const [nextConfig, packageJson, normalizer, worker] = await Promise.all([
+    readFile(path.join(projectRoot, "next.config.ts"), "utf8"),
+    readFile(path.join(projectRoot, "package.json"), "utf8").then(JSON.parse),
+    readFile(path.join(projectRoot, "scripts/normalize-build-base-path.ts"), "utf8"),
+    readFile(path.join(projectRoot, "worker/index.ts"), "utf8"),
+  ]);
+  assert.match(nextConfig, /process\.env\.LIONLOG_BASE_PATH/);
+  assert.match(nextConfig, /basePath,/);
+  assert.match(nextConfig, /absolute single path segment/);
+  assert.match(packageJson.scripts.build, /normalize-build-base-path/);
+  assert.match(normalizer, /nestedFrameworkAssets/);
+  assert.match(worker, /APPLICATION_BASE_PATH/);
+  assert.match(worker, /\/_next\//);
 });
 
 test("browser bundle contains static delivery but no PSU retrieval or Node-only ingestion code", async () => {

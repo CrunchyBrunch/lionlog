@@ -67,7 +67,7 @@ export function PwaRegister() {
       {isOffline && (
         <p>
           <span aria-hidden="true">●</span>
-          Offline · the installed sample menu remains available
+          Offline · retained validated menus remain available when saved
         </p>
       )}
       {waitingWorker && (

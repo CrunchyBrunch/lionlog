@@ -2,6 +2,9 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 
+declare const __LIONLOG_BASE_PATH__: string;
+const APPLICATION_BASE_PATH = __LIONLOG_BASE_PATH__;
+
 interface Env {
   ASSETS: Fetcher;
   IMAGES: {
@@ -25,10 +28,21 @@ interface ExecutionContext {
 // const imageConfig: ImageConfig = { dangerouslyAllowSVG: true };
 
 const worker = {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env | undefined, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
+    if (
+      request.method === "GET"
+      && APPLICATION_BASE_PATH
+      && url.pathname.startsWith(`${APPLICATION_BASE_PATH}/_next/`)
+    ) {
+      url.pathname = url.pathname.slice(APPLICATION_BASE_PATH.length);
+      if (env?.ASSETS) return env.ASSETS.fetch(new Request(url, request));
+      return fetch(new Request(url, request));
+    }
+
     if (url.pathname === "/_vinext/image") {
+      if (!env) return new Response("Image service unavailable", { status: 503 });
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
       return handleImageOptimization(request, {
         fetchAsset: (path) => env.ASSETS.fetch(new Request(new URL(path, request.url))),
@@ -39,7 +53,7 @@ const worker = {
       }, allowedWidths);
     }
 
-    return handler.fetch(request, env, ctx);
+    return handler.fetch(request, env as Env, ctx);
   },
 };
 

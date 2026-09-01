@@ -7,7 +7,7 @@
   },
   "scripts": {
     "dev": "vinext dev",
-    "build": "vinext build",
+    "build": "vinext build && node --experimental-strip-types scripts/normalize-build-base-path.ts",
     "start": "vinext start",
     "ingest:psu": "node --experimental-strip-types scripts/ingest-psu.ts",
     "export:psu-static": "node --experimental-strip-types scripts/export-psu-static.ts",
