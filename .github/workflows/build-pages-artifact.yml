@@ -1,0 +1,39 @@
+name: Build reviewable GitHub Pages artifact
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-pages-artifact:
+    if: github.repository == 'CrunchyBrunch/lionlog'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm exec tsc -- --noEmit
+      - run: npm test
+      - run: npm run lint
+      - name: Build static project-site artifact
+        env:
+          LIONLOG_BASE_PATH: /lionlog
+          LIONLOG_PUBLIC_ORIGIN: https://crunchybrunch.github.io
+        run: npm run build
+      - name: Verify static Pages boundary
+        run: |
+          test -f dist/client/index.html
+          test -f dist/client/.nojekyll
+          test ! -e public/menu-data
+          test ! -e dist/client/menu-data
+      - name: Retain reviewable Pages artifact
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: dist/client
+          retention-days: 7

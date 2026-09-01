@@ -16,6 +16,7 @@ async function pngDimensions(relativePath) {
 test("manifest defines a relative standalone application shell", async () => {
   const manifest = JSON.parse(await readFile(path.join(projectRoot, "public/manifest.webmanifest"), "utf8"));
 
+  assert.equal(manifest.id, "./");
   assert.equal(manifest.start_url, "./");
   assert.equal(manifest.scope, "./");
   assert.equal(manifest.display, "standalone");
@@ -125,18 +126,27 @@ test("release version and brand colors stay consistent across the PWA surface", 
   }
 });
 
-test("production builds accept only a bounded root or single-segment application base path", async () => {
-  const [nextConfig, packageJson, normalizer, worker] = await Promise.all([
+test("production builds are static and accept only a bounded root or single-segment application base path", async () => {
+  const [layout, nextConfig, packageJson, normalizer, worker] = await Promise.all([
+    readFile(path.join(projectRoot, "app/layout.tsx"), "utf8"),
     readFile(path.join(projectRoot, "next.config.ts"), "utf8"),
     readFile(path.join(projectRoot, "package.json"), "utf8").then(JSON.parse),
     readFile(path.join(projectRoot, "scripts/normalize-build-base-path.ts"), "utf8"),
     readFile(path.join(projectRoot, "worker/index.ts"), "utf8"),
   ]);
   assert.match(nextConfig, /process\.env\.LIONLOG_BASE_PATH/);
-  assert.match(nextConfig, /basePath,/);
+  assert.match(nextConfig, /output: "export"/);
+  assert.doesNotMatch(nextConfig, /\n\s*basePath[,\s:]/);
+
+  const viteConfig = await readFile(path.join(projectRoot, "vite.config.ts"), "utf8");
+  assert.match(viteConfig, /base: publicBasePath === "" \? "\/" : `\$\{publicBasePath\}\//);
   assert.match(nextConfig, /absolute single path segment/);
+  assert.match(layout, /process\.env\.LIONLOG_PUBLIC_ORIGIN/);
+  assert.match(layout, /metadataBase/);
+  assert.doesNotMatch(layout, /next\/headers|x-forwarded-host|requestHeaders/);
   assert.match(packageJson.scripts.build, /normalize-build-base-path/);
-  assert.match(normalizer, /nestedFrameworkAssets/);
+  assert.match(normalizer, /applicationDocument/);
+  assert.match(normalizer, /html\.includes\(`\$\{basePath\}\/_next\//);
   assert.match(worker, /APPLICATION_BASE_PATH/);
   assert.match(worker, /\/_next\//);
 });
@@ -157,8 +167,9 @@ test("browser bundle contains static delivery but no PSU retrieval or Node-only 
 });
 
 test("live artifact workflow is manual-only and ordinary CI cannot invoke ingestion", async () => {
-  const [manualWorkflow, ciWorkflow] = await Promise.all([
+  const [manualWorkflow, pagesWorkflow, ciWorkflow] = await Promise.all([
     readFile(path.join(projectRoot, ".github/workflows/build-live-menu-artifact.yml"), "utf8"),
+    readFile(path.join(projectRoot, ".github/workflows/build-pages-artifact.yml"), "utf8"),
     readFile(path.join(projectRoot, ".github/workflows/ci.yml"), "utf8"),
   ]);
   assert.match(manualWorkflow, /workflow_dispatch:/);
@@ -166,6 +177,12 @@ test("live artifact workflow is manual-only and ordinary CI cannot invoke ingest
   assert.match(manualWorkflow, /actions\/upload-artifact@/);
   assert.doesNotMatch(manualWorkflow, /^\s*(?:schedule|push|pull_request):/m);
   assert.doesNotMatch(ciWorkflow, /ingest:psu|LIONLOG_ALLOW_PSU_NETWORK/);
+  assert.match(pagesWorkflow, /workflow_dispatch:/);
+  assert.match(pagesWorkflow, /LIONLOG_BASE_PATH: \/lionlog/);
+  assert.match(pagesWorkflow, /LIONLOG_PUBLIC_ORIGIN: https:\/\/crunchybrunch\.github\.io/);
+  assert.match(pagesWorkflow, /actions\/upload-pages-artifact@[0-9a-f]{40}/);
+  assert.doesNotMatch(pagesWorkflow, /ingest:psu|LIONLOG_ALLOW_PSU_NETWORK|deploy-pages|pages:\s*write|id-token:\s*write/);
+  assert.doesNotMatch(pagesWorkflow, /^\s*(?:schedule|push|pull_request):/m);
 });
 
 async function javascriptFiles(directory) {
