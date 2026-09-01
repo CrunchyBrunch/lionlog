@@ -32,8 +32,25 @@ jobs:
           test -f dist/client/.nojekyll
           test ! -e public/menu-data
           test ! -e dist/client/menu-data
+      - name: Prepare isolated Pages artifact
+        run: >-
+          node --experimental-strip-types scripts/prepare-pages-artifact.ts
+          --source=dist/client
+          --output=work/pages-artifact/site
+      - name: Package and round-trip validate Pages artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --directory work/pages-artifact/site --dereference --hard-dereference -cf work/pages-artifact/artifact.tar .
+          mkdir work/pages-artifact/round-trip
+          tar -xf work/pages-artifact/artifact.tar -C work/pages-artifact/round-trip
+          node --experimental-strip-types scripts/prepare-pages-artifact.ts --validate=work/pages-artifact/round-trip
+          diff -qr work/pages-artifact/site work/pages-artifact/round-trip
+          test "$(tar -tf work/pages-artifact/artifact.tar | grep -c '^./.nojekyll$')" -eq 1
       - name: Retain reviewable Pages artifact
-        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          path: dist/client
+          name: github-pages-review
+          path: work/pages-artifact/artifact.tar
           retention-days: 7
+          if-no-files-found: error

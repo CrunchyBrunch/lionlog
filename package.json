@@ -12,7 +12,7 @@
     "ingest:psu": "node --experimental-strip-types scripts/ingest-psu.ts",
     "export:psu-static": "node --experimental-strip-types scripts/export-psu-static.ts",
     "test": "vinext build && node --test --experimental-strip-types tests/*.test.ts && node --test tests/*.test.mjs",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern work"
   },
   "dependencies": {
     "parse5": "^8.0.1",

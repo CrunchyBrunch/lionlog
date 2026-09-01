@@ -180,7 +180,12 @@ test("live artifact workflow is manual-only and ordinary CI cannot invoke ingest
   assert.match(pagesWorkflow, /workflow_dispatch:/);
   assert.match(pagesWorkflow, /LIONLOG_BASE_PATH: \/lionlog/);
   assert.match(pagesWorkflow, /LIONLOG_PUBLIC_ORIGIN: https:\/\/crunchybrunch\.github\.io/);
-  assert.match(pagesWorkflow, /actions\/upload-pages-artifact@[0-9a-f]{40}/);
+  assert.match(pagesWorkflow, /actions\/upload-artifact@[0-9a-f]{40}/);
+  assert.match(pagesWorkflow, /name: github-pages-review/);
+  assert.match(pagesWorkflow, /prepare-pages-artifact\.ts/);
+  assert.match(pagesWorkflow, /round-trip/);
+  assert.match(pagesWorkflow, /grep -c '\^\.\/\.nojekyll\$'/);
+  assert.doesNotMatch(pagesWorkflow, /actions\/upload-pages-artifact/);
   assert.doesNotMatch(pagesWorkflow, /ingest:psu|LIONLOG_ALLOW_PSU_NETWORK|deploy-pages|pages:\s*write|id-token:\s*write/);
   assert.doesNotMatch(pagesWorkflow, /^\s*(?:schedule|push|pull_request):/m);
 });
