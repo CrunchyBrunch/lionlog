@@ -14,6 +14,9 @@ export interface PsuRetrieverOptions {
   readonly timeoutMs?: number;
   readonly maximumAttempts?: number;
   readonly baseBackoffMs?: number;
+  readonly maximumRequests?: number;
+  readonly jitterMs?: number;
+  readonly random?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly now?: () => number;
 }
@@ -30,10 +33,14 @@ export class PsuHttpRetriever {
   private readonly timeoutMs: number;
   private readonly maximumAttempts: number;
   private readonly baseBackoffMs: number;
+  private readonly maximumRequests: number;
+  private readonly jitterMs: number;
+  private readonly random: () => number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly now: () => number;
   private serialTail: Promise<void> = Promise.resolve();
   private lastRequestStartedAt = Number.NEGATIVE_INFINITY;
+  private requestCountValue = 0;
 
   constructor(options: PsuRetrieverOptions = {}) {
     if (!options.fetchImpl && !options.allowNetwork) {
@@ -44,8 +51,29 @@ export class PsuHttpRetriever {
     this.timeoutMs = boundedInteger(options.timeoutMs ?? 10_000, "timeout", 1, 60_000);
     this.maximumAttempts = boundedInteger(options.maximumAttempts ?? 3, "maximum attempts", 1, 5);
     this.baseBackoffMs = boundedInteger(options.baseBackoffMs ?? 1_000, "base backoff", 0, 60_000);
+    this.maximumRequests = boundedInteger(options.maximumRequests ?? 1_000, "maximum requests", 1, 2_000);
+    this.jitterMs = boundedInteger(options.jitterMs ?? 250, "jitter", 0, 5_000);
+    this.random = options.random ?? Math.random;
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.now = options.now ?? Date.now;
+  }
+
+  get requestCount(): number { return this.requestCountValue; }
+
+  retrieveMealOptions(form: {
+    readonly sourceDate: string;
+    readonly sourceCampusId: string;
+  }): Promise<RetrievedHtml> {
+    const body = new URLSearchParams({
+      selMenuDate: form.sourceDate,
+      selMeal: "",
+      selCampus: form.sourceCampusId,
+    });
+    return this.enqueue(() => this.retrieveWithRetry(PSU_MENU_URL, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded;charset=UTF-8" },
+      body,
+    }, 1_048_576));
   }
 
   retrieveMenu(form: {
@@ -94,15 +122,16 @@ export class PsuHttpRetriever {
         if (!(error instanceof PsuRetrievalError) || !error.retryable || attempt === this.maximumAttempts) {
           throw error;
         }
-        const retryAfterMs = error.status === 429 ? this.baseBackoffMs * 2 ** attempt : 0;
-        await this.sleep(Math.max(retryAfterMs, this.baseBackoffMs * 2 ** (attempt - 1)));
+        const exponentialMs = this.baseBackoffMs * 2 ** (attempt - 1);
+        await this.sleep(Math.max(error.retryAfterMs ?? 0, exponentialMs));
       }
     }
     throw lastError;
   }
 
   private async pace(): Promise<void> {
-    const waitMs = Math.max(0, this.minimumIntervalMs - (this.now() - this.lastRequestStartedAt));
+    const jitter = Math.floor(validateRandom(this.random()) * (this.jitterMs + 1));
+    const waitMs = Math.max(0, this.minimumIntervalMs + jitter - (this.now() - this.lastRequestStartedAt));
     if (waitMs > 0) await this.sleep(waitMs);
     this.lastRequestStartedAt = this.now();
   }
@@ -115,11 +144,16 @@ export class PsuHttpRetriever {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
+      if (this.requestCountValue >= this.maximumRequests) {
+        throw new PsuRetrievalError("PSU release request limit was reached.", false);
+      }
+      this.requestCountValue += 1;
       const response = await this.fetchImpl(url, { ...init, redirect: "manual", signal: controller.signal });
 
       if (!response.ok) {
         const retryable = response.status === 429 || response.status >= 500;
-        throw new PsuRetrievalError(`PSU returned HTTP ${response.status}.`, retryable, response.status);
+        const retryAfterMs = retryable ? parseRetryAfter(response.headers.get("retry-after"), this.now()) : undefined;
+        throw new PsuRetrievalError(`PSU returned HTTP ${response.status}.`, retryable, response.status, retryAfterMs);
       }
       const finalUrl = response.url || url;
       assertAllowedResponseUrl(finalUrl, url);
@@ -151,6 +185,23 @@ export class PsuHttpRetriever {
       clearTimeout(timeout);
     }
   }
+}
+
+function validateRandom(value: number): number {
+  if (!Number.isFinite(value) || value < 0 || value >= 1) {
+    throw new Error("PSU retriever random source must return a value from 0 up to but not including 1.");
+  }
+  return value;
+}
+
+function parseRetryAfter(value: string | null, nowMs: number): number | undefined {
+  if (value === null) return undefined;
+  const seconds = /^\d+$/.test(value.trim()) ? Number(value.trim()) : Number.NaN;
+  const milliseconds = Number.isFinite(seconds)
+    ? seconds * 1_000
+    : Date.parse(value) - nowMs;
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return undefined;
+  return Math.min(milliseconds, 60_000);
 }
 
 function boundedInteger(value: number, field: string, minimum: number, maximum: number): number {

@@ -123,6 +123,24 @@ test("validated empty menus are live and do not request nutrition", async () => 
   assert.deepEqual(calls, { menu: 1, nutrition: 0 });
 });
 
+test("ingestion fails before nutrition retrieval when a per-query release bound is exceeded", async () => {
+  const calls = { menu: 0, nutrition: 0 };
+  const retriever = new PsuHttpRetriever({
+    fetchImpl: fixtureFetch(calls),
+    minimumIntervalMs: 0,
+    jitterMs: 0,
+    maximumAttempts: 1,
+    now: () => now.getTime(),
+  });
+  const result = await new PsuIngestionPipeline(retriever, new MemoryPsuSnapshotStore(), {
+    now: () => now,
+    maximumItemsPerQuery: 1,
+  }).run(eastLunchQuery);
+  assert.equal(result.state, "unavailable");
+  assert.match(result.error.message, /item bound/i);
+  assert.deepEqual(calls, { menu: 1, nutrition: 0 });
+});
+
 test("structural failures are not retried and preserve last-known-good as stale", async () => {
   const store = new MemoryPsuSnapshotStore();
   const good = await pipelineFor(fixtureFetch(), store).run(eastLunchQuery);

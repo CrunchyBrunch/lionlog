@@ -34,6 +34,11 @@ export interface ParsedPsuMenu {
   readonly empty: boolean;
 }
 
+export interface ParsedPsuMealOption {
+  readonly mealPeriodId: string;
+  readonly sourceValue: string;
+}
+
 const dietaryMarkerMap = new Map<string, DietaryTrait>([
   ["Vegan", "vegan"],
   ["Meatless", "meatless"],
@@ -60,6 +65,36 @@ export function parsePsuMenuHtml(html: string, expected: PsuMenuParseContext): P
   }
 
   return { context: expected, stations, empty: itemCount === 0 };
+}
+
+export function parsePsuMealOptionsHtml(
+  html: string,
+  expected: Pick<PsuMenuParseContext, "sourceCampusId" | "sourceDate">,
+): readonly ParsedPsuMealOption[] {
+  const document = parseHtml(html);
+  assertSelectedValue(document, "selCampus", expected.sourceCampusId);
+  assertSelectedValue(document, "selMenuDate", expected.sourceDate);
+  const select = firstDescendant(document, (element) =>
+    element.tagName === "select" && getAttribute(element, "name") === "selMeal"
+  );
+  if (!select) throw new PsuStructuralError("PSU menu response is missing selMeal.");
+  const known = new Map([
+    ["Breakfast", "breakfast"],
+    ["Lunch", "lunch"],
+    ["Dinner", "dinner"],
+    ["Late Night", "late-night"],
+  ]);
+  const values = descendants(select, (element) => element.tagName === "option")
+    .map((option) => normalizeText(getAttribute(option, "value") ?? ""))
+    .filter(Boolean);
+  if (values.length === 0 || values.length > 4 || new Set(values).size !== values.length) {
+    throw new PsuStructuralError("PSU meal options failed bounded uniqueness validation.");
+  }
+  return values.map((sourceValue) => {
+    const mealPeriodId = known.get(sourceValue);
+    if (!mealPeriodId) throw new PsuStructuralError(`Unknown PSU meal option: ${sourceValue}`);
+    return { mealPeriodId, sourceValue };
+  });
 }
 
 function assertSelectedValue(root: ReturnType<typeof parseHtml>, name: string, expected: string): void {

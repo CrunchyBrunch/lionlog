@@ -158,6 +158,52 @@ test("retriever rejects unbounded retry and timeout configuration", () => {
   assert.throws(() => new PsuHttpRetriever({ fetchImpl, timeoutMs: 0 }), /timeout/i);
 });
 
+test("retriever honors bounded Retry-After and enforces a total request limit", async () => {
+  const sleeps: number[] = [];
+  let attempts = 0;
+  const retriever = new PsuHttpRetriever({
+    fetchImpl: async (input) => {
+      attempts += 1;
+      if (attempts === 1) {
+        const response = new Response("busy", {
+          status: 429,
+          headers: { "content-type": "text/html", "retry-after": "2" },
+        });
+        Object.defineProperty(response, "url", { value: String(input) });
+        return response;
+      }
+      return htmlResponse("<html>ok</html>", String(input));
+    },
+    minimumIntervalMs: 0,
+    jitterMs: 0,
+    maximumAttempts: 2,
+    maximumRequests: 2,
+    baseBackoffMs: 10,
+    sleep: (milliseconds) => { sleeps.push(milliseconds); return Promise.resolve(); },
+  });
+  assert.equal((await retriever.retrieveNutrition("900000001")).html, "<html>ok</html>");
+  assert.deepEqual(sleeps, [2_000]);
+  assert.equal(retriever.requestCount, 2);
+  await assert.rejects(retriever.retrieveNutrition("900000002"), /request limit/i);
+});
+
+test("release pacing applies at least the minimum interval plus bounded jitter", async () => {
+  const sleeps: number[] = [];
+  let now = 1_000;
+  const retriever = new PsuHttpRetriever({
+    fetchImpl: async (input) => htmlResponse("<html></html>", String(input)),
+    minimumIntervalMs: 1_000,
+    jitterMs: 250,
+    random: () => 0.5,
+    maximumAttempts: 1,
+    sleep: (milliseconds) => { sleeps.push(milliseconds); now += milliseconds; return Promise.resolve(); },
+    now: () => now,
+  });
+  await retriever.retrieveNutrition("900000001");
+  await retriever.retrieveNutrition("900000002");
+  assert.deepEqual(sleeps, [1_125]);
+});
+
 function testRetriever(
   fetchImpl: typeof fetch,
   sleep: (milliseconds: number) => Promise<void> = () => Promise.resolve(),
@@ -167,6 +213,7 @@ function testRetriever(
     minimumIntervalMs: 0,
     maximumAttempts: 3,
     baseBackoffMs: 10,
+    jitterMs: 0,
     sleep,
   });
 }

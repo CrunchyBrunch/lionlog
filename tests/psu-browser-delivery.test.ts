@@ -117,7 +117,7 @@ test("unsupported catalog and snapshot versions fail closed", async () => {
   const snapshot = await fixtureSnapshot();
   const catalog = fixtureCatalog(snapshot);
   assert.throws(
-    () => validatePsuPublicationCatalog({ ...catalog, catalogVersion: "lionlog.psu-catalog.v2" }),
+    () => validatePsuPublicationCatalog({ ...catalog, catalogVersion: "lionlog.psu-catalog.v3" }),
     /invalid PSU catalog/i,
   );
   await assert.rejects(
@@ -205,6 +205,22 @@ function fixtureCatalog(snapshot: Awaited<ReturnType<typeof fixtureSnapshot>>) {
     snapshotSchemaVersion: PSU_SNAPSHOT_VERSION,
     parserVersion: PSU_PARSER_VERSION,
     generatedAt: "2026-08-31T16:00:30.000Z",
+    publication: {
+      mode: "manual-export",
+      sourceKind: "psu-public-menu-html",
+      commitSha: null,
+      serviceDate: null,
+      hallIds: [snapshot.query.hallId],
+      retrievalStartedAt: null,
+      retrievalCompletedAt: null,
+      expectedSnapshotCount: 1,
+      publishedSnapshotCount: 1,
+      recognizedEmptySnapshotCount: 0,
+      itemCount: snapshot.stations.reduce((total, station) => total + station.items.length, 0),
+      requestCount: null,
+      nutritionRequests: null,
+      nutritionCacheHits: null,
+    },
     serviceDates: [snapshot.query.serviceDate],
     halls: [{ id: snapshot.query.hallId, displayName: "East / Findlay" }],
     mealPeriods: [{ id: snapshot.query.mealPeriodId, displayName: "Lunch" }],

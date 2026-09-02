@@ -8,7 +8,7 @@ import {
 import { PsuStructuralError } from "./errors.ts";
 import type { BrowserPsuMenuSnapshot } from "./snapshot-contract.ts";
 
-export const PSU_CATALOG_VERSION = "lionlog.psu-catalog.v1";
+export const PSU_CATALOG_VERSION = "lionlog.psu-catalog.v2";
 export const PSU_MENU_DATA_PATH = "./menu-data/v1/catalog.json";
 
 export const psuPublicationCatalogSchema = z.object({
@@ -16,6 +16,22 @@ export const psuPublicationCatalogSchema = z.object({
   snapshotSchemaVersion: z.literal(PSU_SNAPSHOT_VERSION),
   parserVersion: z.literal(PSU_PARSER_VERSION),
   generatedAt: z.string().datetime({ offset: true }),
+  publication: z.object({
+    mode: z.enum(["manual-export", "field-release"]),
+    sourceKind: z.literal("psu-public-menu-html"),
+    commitSha: z.string().regex(/^[a-f0-9]{40}$/).nullable(),
+    serviceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+    hallIds: z.array(z.string().min(1).max(80)).min(1).max(20),
+    retrievalStartedAt: z.string().datetime({ offset: true }).nullable(),
+    retrievalCompletedAt: z.string().datetime({ offset: true }).nullable(),
+    expectedSnapshotCount: z.number().int().min(1).max(2_000),
+    publishedSnapshotCount: z.number().int().min(1).max(2_000),
+    recognizedEmptySnapshotCount: z.number().int().min(0).max(2_000),
+    itemCount: z.number().int().min(0).max(100_000),
+    requestCount: z.number().int().min(1).max(2_000).nullable(),
+    nutritionRequests: z.number().int().min(0).max(2_000).nullable(),
+    nutritionCacheHits: z.number().int().min(0).max(100_000).nullable(),
+  }).strict(),
   serviceDates: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).max(60),
   halls: z.array(z.object({
     id: z.string().min(1).max(80),
@@ -42,6 +58,37 @@ export const psuPublicationCatalogSchema = z.object({
   const halls = new Set(catalog.halls.map((hall) => hall.id));
   const periods = new Set(catalog.mealPeriods.map((period) => period.id));
   const keys = new Set<string>();
+  if (
+    catalog.publication.expectedSnapshotCount !== catalog.snapshots.length
+    || catalog.publication.publishedSnapshotCount !== catalog.snapshots.length
+  ) context.addIssue({ code: "custom", message: "Catalog publication snapshot counts are inconsistent." });
+  if (catalog.publication.mode === "field-release") {
+    if (
+      catalog.publication.commitSha === null
+      || catalog.publication.serviceDate === null
+      || catalog.publication.retrievalStartedAt === null
+      || catalog.publication.retrievalCompletedAt === null
+      || catalog.publication.requestCount === null
+      || catalog.publication.nutritionRequests === null
+      || catalog.publication.nutritionCacheHits === null
+    ) context.addIssue({ code: "custom", message: "Field-release catalog provenance is incomplete." });
+    if (
+      catalog.publication.serviceDate !== null
+      && (catalog.serviceDates.length !== 1 || catalog.serviceDates[0] !== catalog.publication.serviceDate)
+    ) context.addIssue({ code: "custom", message: "Field-release service-date coverage is inconsistent." });
+    const expectedHallIds = ["psu:campus:11", "psu:campus:13", "psu:campus:14", "psu:campus:16", "psu:campus:17"];
+    if (catalog.publication.hallIds.join("\u001f") !== expectedHallIds.join("\u001f")) {
+      context.addIssue({ code: "custom", message: "Field-release hall coverage is incomplete." });
+    }
+    const startedAt = Date.parse(catalog.publication.retrievalStartedAt ?? "");
+    const completedAt = Date.parse(catalog.publication.retrievalCompletedAt ?? "");
+    if (!(startedAt <= completedAt && completedAt <= Date.parse(catalog.generatedAt))) {
+      context.addIssue({ code: "custom", message: "Field-release provenance timestamps are out of order." });
+    }
+  }
+  if (catalog.publication.hallIds.join("\u001f") !== catalog.halls.map((hall) => hall.id).join("\u001f")) {
+    context.addIssue({ code: "custom", message: "Catalog publication hall index is inconsistent." });
+  }
   for (const hall of catalog.halls) {
     try {
       if (getPsuHall(hall.id).displayName !== hall.displayName) throw new Error("Hall label mismatch.");

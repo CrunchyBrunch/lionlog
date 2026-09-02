@@ -1,12 +1,12 @@
 # LionLog
 
-LionLog is a mobile-first dining hall menu browser. The `v0.2.0-alpha.3` milestone delivers validated, centrally ingested Penn State public-menu snapshots to the PWA as same-origin static JSON, with a separate explicit sample mode.
+LionLog is a mobile-first dining hall menu browser. The `v0.2.0-alpha.4` milestone prepares a manually dispatched, reviewable GitHub Pages field-release artifact containing the PWA and fresh validated Penn State public-menu snapshots, with a separate explicit sample mode. It does not deploy that artifact.
 
 The PWA does not scrape Penn State. Manual ingestion retrieves and parses source HTML outside React, validates a versioned JSON snapshot, and stores it under the ignored `work/` cache. A separate manual export validates that output again and writes a static catalog and independently loadable snapshots. Browser-delivered JavaScript and JSON are public and contain no client secret.
 
 Menu and nutrition information is sourced from Penn State Campus Dining's [public Daily Menu](https://www.absecom.psu.edu/menus/user-pages/daily-menu.cfm). LionLog is independent and is not affiliated with or endorsed by Penn State. It does not use an official Penn State API and does not claim a partnership or supported private integration.
 
-Alpha 3 distinguishes `live`, `cached`, `stale`, `sample`, and `unavailable` states. Missing or expired publications remain unavailable; sample foods are never substituted automatically. This release is a menu browser, not a recommendation engine, and does not include an optimizer, nutrition targets, accounts, diary, analytics, or scheduled production scraping. A separate manual-only GitHub Pages workflow is present but has not been run or activated.
+The PWA distinguishes `live`, `cached`, `stale`, `sample`, and `unavailable` states. Missing or expired publications remain unavailable; sample foods are never substituted automatically. This release is a menu browser, not a recommendation engine, and does not include an optimizer, nutrition targets, accounts, diary, analytics, or scheduled production scraping. Pages deployment remains a separate manual owner action.
 
 ## Requirements
 
@@ -35,7 +35,7 @@ LIONLOG_PUBLIC_ORIGIN=https://crunchybrunch.github.io \
 npm run build
 ```
 
-The result is emitted beneath `dist/client/`. The review-artifact workflow does not deploy and cannot contact Penn State. The separate deployment workflow runs only after an intentional dispatch from `main`; see the [deployment handoff](docs/github-pages-deployment.md).
+The result is emitted beneath `dist/client/`. The ordinary review-artifact workflow does not deploy and cannot contact Penn State. The separate Alpha 4 field-release preparation workflow can contact PSU only after an intentional trusted `workflow_dispatch`, builds a retained artifact, and has no deployment permission or step. The separate deployment workflow runs only after an intentional dispatch from `main`; see the [deployment handoff](docs/github-pages-deployment.md).
 
 ## Verify
 
@@ -53,7 +53,7 @@ LIONLOG_ALLOW_PSU_NETWORK=I_UNDERSTAND_THIS_CONTACTS_PSU npm run ingest:psu -- -
 npm run export:psu-static -- --cache-dir=work/psu-ingestion --output-dir=public
 ```
 
-Validated snapshots and nutrition cache entries are written beneath `work/psu-ingestion`. Repeat the same command to refresh the menu while reusing still-fresh nutrition entries. The browser reads `./menu-data/v1/catalog.json` from its own origin; a missing publication is shown as unavailable, and sample data appears only when sample mode is selected. See the [Alpha 3 implementation notes](docs/psu-live-menu/implementation-alpha-3.md).
+Validated snapshots and nutrition cache entries are written beneath `work/psu-ingestion`. Repeat the same command to refresh the menu while reusing still-fresh nutrition entries. The browser reads `./menu-data/v1/catalog.json` from its own origin; a missing publication is shown as unavailable, and sample data appears only when sample mode is selected. The production-shaped field-release process is documented in the [Alpha 4 implementation notes](docs/psu-live-menu/implementation-alpha-4.md).
 
 The project is a React, Vite, and TypeScript site built with vinext for static-first Sites deployment. Domain contracts live in `domain/`, application coordination in `application/`, and the replaceable sample provider in `infrastructure/`.
 

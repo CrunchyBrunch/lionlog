@@ -273,7 +273,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
       </section>
 
       <footer className="milestone-note">
-        <span>v0.2.0-alpha.3</span>
+        <span>v0.2.0-alpha.4</span>
         <p>Cached public-menu delivery · no official PSU API.</p>
       </footer>
     </main>

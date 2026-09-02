@@ -9,6 +9,7 @@ import {
 } from "../infrastructure/psu/publication-catalog.ts";
 import { validatePsuSnapshot } from "../infrastructure/psu/snapshot-schema.ts";
 import { FilePsuSnapshotStore } from "../infrastructure/psu/snapshot-store.ts";
+import { releaseQueryKey, validatePsuReleaseReport, type PsuReleaseReport } from "../infrastructure/psu/release-plan.ts";
 
 const argumentsByName = parseArguments(process.argv.slice(2));
 if (argumentsByName.has("help")) {
@@ -26,10 +27,12 @@ if (argumentsByName.has("help")) {
 const cacheDirectory = path.resolve(argumentsByName.get("cache-dir") ?? "work/psu-ingestion");
 const outputDirectory = path.resolve(argumentsByName.get("output-dir") ?? "public");
 const generatedAt = parseGeneratedAt(argumentsByName.get("generated-at"));
+const releaseReport = await readReleaseReport(argumentsByName.get("release-report"));
 const store = new FilePsuSnapshotStore(cacheDirectory);
 const snapshots = (await store.listMenus()).map(validatePsuSnapshot)
   .sort((left, right) => menuKey(left.query).localeCompare(menuKey(right.query)));
 if (snapshots.length === 0) throw new Error(`No validated PSU menu snapshots found in ${cacheDirectory}.`);
+if (releaseReport) assertExactReleaseSet(snapshots, releaseReport);
 
 const publicationDirectory = path.join(outputDirectory, "menu-data", "v1");
 const stagingDirectory = `${publicationDirectory}.staging-${process.pid}`;
@@ -54,6 +57,37 @@ try {
     snapshotSchemaVersion: PSU_SNAPSHOT_VERSION,
     parserVersion: PSU_PARSER_VERSION,
     generatedAt: generatedAt.toISOString(),
+    publication: releaseReport ? {
+      mode: "field-release",
+      sourceKind: "psu-public-menu-html",
+      commitSha: releaseReport.commitSha,
+      serviceDate: releaseReport.serviceDate,
+      hallIds,
+      retrievalStartedAt: releaseReport.startedAt,
+      retrievalCompletedAt: releaseReport.completedAt,
+      expectedSnapshotCount: releaseReport.queryCount,
+      publishedSnapshotCount: snapshots.length,
+      recognizedEmptySnapshotCount: releaseReport.queries.filter((query) => query.recognizedEmpty).length,
+      itemCount: releaseReport.itemCount,
+      requestCount: releaseReport.requestCount,
+      nutritionRequests: releaseReport.nutritionRequests,
+      nutritionCacheHits: releaseReport.nutritionCacheHits,
+    } : {
+      mode: "manual-export",
+      sourceKind: "psu-public-menu-html",
+      commitSha: null,
+      serviceDate: null,
+      hallIds,
+      retrievalStartedAt: null,
+      retrievalCompletedAt: null,
+      expectedSnapshotCount: snapshots.length,
+      publishedSnapshotCount: snapshots.length,
+      recognizedEmptySnapshotCount: snapshots.filter((snapshot) => snapshot.stations.every((station) => station.items.length === 0)).length,
+      itemCount: snapshots.reduce((total, snapshot) => total + snapshot.stations.reduce((subtotal, station) => subtotal + station.items.length, 0), 0),
+      requestCount: null,
+      nutritionRequests: null,
+      nutritionCacheHits: null,
+    },
     serviceDates: [...new Set(snapshots.map((snapshot) => snapshot.query.serviceDate))].sort(),
     halls: hallIds.map((id) => ({ id, displayName: getPsuHall(id).displayName })),
     mealPeriods: mealPeriodIds.map((id) => ({ id, displayName: getPsuMealPeriod(id).displayName })),
@@ -76,6 +110,27 @@ try {
 } catch (error) {
   await rm(stagingDirectory, { recursive: true, force: true });
   throw error;
+}
+
+async function readReleaseReport(value: string | undefined): Promise<PsuReleaseReport | null> {
+  if (!value) return null;
+  return validatePsuReleaseReport(JSON.parse(await readFile(path.resolve(value), "utf8")));
+}
+
+function assertExactReleaseSet(
+  snapshots: readonly ReturnType<typeof validatePsuSnapshot>[],
+  report: PsuReleaseReport,
+): void {
+  const snapshotsByKey = new Map(snapshots.map((snapshot) => [releaseQueryKey(snapshot.query), snapshot]));
+  if (snapshotsByKey.size !== report.queries.length || snapshots.length !== report.queries.length) {
+    throw new Error("Validated cache does not contain the exact release query set.");
+  }
+  for (const query of report.queries) {
+    const snapshot = snapshotsByKey.get(releaseQueryKey(query));
+    if (!snapshot || snapshot.snapshotId !== query.snapshotId || snapshot.retrievedAt !== query.retrievedAt) {
+      throw new Error(`Validated cache does not match release query ${releaseQueryKey(query)}.`);
+    }
+  }
 }
 
 function parseArguments(values: readonly string[]): Map<string, string> {

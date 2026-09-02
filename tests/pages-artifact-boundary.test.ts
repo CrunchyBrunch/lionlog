@@ -45,10 +45,10 @@ test("Pages packaging retains only .nojekyll and survives a download-equivalent 
   }
 });
 
-test("Pages artifact validation rejects hidden configuration, menu data, source maps, and ingestion code", async () => {
+test("Pages artifact validation rejects hidden configuration, invalid menu data, source maps, and ingestion code", async () => {
   for (const [relativePath, content, message] of [
     [".env", "SECRET=value", /Unexpected hidden publication path/],
-    ["menu-data/v1/catalog.json", "{}", /Forbidden publication directory/],
+    ["menu-data/v1/catalog.json", "{}", /Invalid PSU catalog/],
     ["_next/static/app.js.map", "{}", /Forbidden publication file/],
     ["_next/static/app.js", "const selMenuDate = 'x';", /Forbidden browser ingestion code/],
   ] as const) {
