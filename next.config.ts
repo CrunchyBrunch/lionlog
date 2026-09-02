@@ -6,6 +6,7 @@ if (publicBasePath !== "" && !/^\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(publicBasePa
 }
 
 const nextConfig: NextConfig = {
+  assetPrefix: publicBasePath,
   output: "export",
 };
 

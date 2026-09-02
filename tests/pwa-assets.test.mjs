@@ -135,17 +135,16 @@ test("production builds are static and accept only a bounded root or single-segm
     readFile(path.join(projectRoot, "worker/index.ts"), "utf8"),
   ]);
   assert.match(nextConfig, /process\.env\.LIONLOG_BASE_PATH/);
+  assert.match(nextConfig, /assetPrefix: publicBasePath/);
   assert.match(nextConfig, /output: "export"/);
   assert.doesNotMatch(nextConfig, /\n\s*basePath[,\s:]/);
-
-  const viteConfig = await readFile(path.join(projectRoot, "vite.config.ts"), "utf8");
-  assert.match(viteConfig, /base: publicBasePath === "" \? "\/" : `\$\{publicBasePath\}\//);
   assert.match(nextConfig, /absolute single path segment/);
   assert.match(layout, /process\.env\.LIONLOG_PUBLIC_ORIGIN/);
   assert.match(layout, /metadataBase/);
   assert.doesNotMatch(layout, /next\/headers|x-forwarded-host|requestHeaders/);
   assert.match(packageJson.scripts.build, /normalize-build-base-path/);
-  assert.match(normalizer, /applicationDocument/);
+  assert.match(normalizer, /nestedFrameworkAssets/);
+  assert.match(normalizer, /rename\(nestedFrameworkAssets, frameworkAssets\)/);
   assert.match(normalizer, /html\.includes\(`\$\{basePath\}\/_next\//);
   assert.match(worker, /APPLICATION_BASE_PATH/);
   assert.match(worker, /\/_next\//);
@@ -166,10 +165,11 @@ test("browser bundle contains static delivery but no PSU retrieval or Node-only 
   ]) assert.doesNotMatch(source, new RegExp(forbidden));
 });
 
-test("live artifact workflow is manual-only and ordinary CI cannot invoke ingestion", async () => {
-  const [manualWorkflow, pagesWorkflow, ciWorkflow] = await Promise.all([
+test("live and Pages workflows are explicit, bounded, and ordinary CI cannot invoke ingestion or deployment", async () => {
+  const [manualWorkflow, pagesWorkflow, deploymentWorkflow, ciWorkflow] = await Promise.all([
     readFile(path.join(projectRoot, ".github/workflows/build-live-menu-artifact.yml"), "utf8"),
     readFile(path.join(projectRoot, ".github/workflows/build-pages-artifact.yml"), "utf8"),
+    readFile(path.join(projectRoot, ".github/workflows/deploy-github-pages.yml"), "utf8"),
     readFile(path.join(projectRoot, ".github/workflows/ci.yml"), "utf8"),
   ]);
   assert.match(manualWorkflow, /workflow_dispatch:/);
@@ -180,9 +180,28 @@ test("live artifact workflow is manual-only and ordinary CI cannot invoke ingest
   assert.match(pagesWorkflow, /workflow_dispatch:/);
   assert.match(pagesWorkflow, /LIONLOG_BASE_PATH: \/lionlog/);
   assert.match(pagesWorkflow, /LIONLOG_PUBLIC_ORIGIN: https:\/\/crunchybrunch\.github\.io/);
-  assert.match(pagesWorkflow, /actions\/upload-pages-artifact@[0-9a-f]{40}/);
+  assert.match(pagesWorkflow, /actions\/upload-artifact@[0-9a-f]{40}/);
+  assert.match(pagesWorkflow, /name: github-pages-review/);
+  assert.match(pagesWorkflow, /prepare-pages-artifact\.ts/);
+  assert.match(pagesWorkflow, /round-trip/);
+  assert.match(pagesWorkflow, /grep -c '\^\.\/\.nojekyll\$'/);
+  assert.doesNotMatch(pagesWorkflow, /actions\/upload-pages-artifact/);
   assert.doesNotMatch(pagesWorkflow, /ingest:psu|LIONLOG_ALLOW_PSU_NETWORK|deploy-pages|pages:\s*write|id-token:\s*write/);
   assert.doesNotMatch(pagesWorkflow, /^\s*(?:schedule|push|pull_request):/m);
+
+  assert.match(deploymentWorkflow, /workflow_dispatch:/);
+  assert.match(deploymentWorkflow, /^permissions: \{\}$/m);
+  assert.match(deploymentWorkflow, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(deploymentWorkflow, /permissions:\n\s+contents: read/);
+  assert.match(deploymentWorkflow, /permissions:\n\s+pages: write\n\s+id-token: write/);
+  assert.match(deploymentWorkflow, /environment:\n\s+name: github-pages/);
+  assert.match(deploymentWorkflow, /actions\/deploy-pages@[0-9a-f]{40}/);
+  assert.match(deploymentWorkflow, /actions\/upload-artifact@[0-9a-f]{40}/);
+  assert.match(deploymentWorkflow, /name: github-pages\n/);
+  assert.match(deploymentWorkflow, /prepare-pages-artifact\.ts/);
+  assert.match(deploymentWorkflow, /LIONLOG_BASE_PATH: \/lionlog/);
+  assert.doesNotMatch(deploymentWorkflow, /ingest:psu|LIONLOG_ALLOW_PSU_NETWORK|LIVE_PSU_INGESTION/);
+  assert.doesNotMatch(deploymentWorkflow, /^\s*(?:schedule|push|pull_request):/m);
 });
 
 async function javascriptFiles(directory) {

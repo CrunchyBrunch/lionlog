@@ -6,7 +6,7 @@ The PWA does not scrape Penn State. Manual ingestion retrieves and parses source
 
 Menu and nutrition information is sourced from Penn State Campus Dining's [public Daily Menu](https://www.absecom.psu.edu/menus/user-pages/daily-menu.cfm). LionLog is independent and is not affiliated with or endorsed by Penn State. It does not use an official Penn State API and does not claim a partnership or supported private integration.
 
-Alpha 3 distinguishes `live`, `cached`, `stale`, `sample`, and `unavailable` states. Missing or expired publications remain unavailable; sample foods are never substituted automatically. This release is a menu browser, not a recommendation engine, and does not include an optimizer, nutrition targets, accounts, diary, analytics, scheduled production scraping, or deployment.
+Alpha 3 distinguishes `live`, `cached`, `stale`, `sample`, and `unavailable` states. Missing or expired publications remain unavailable; sample foods are never substituted automatically. This release is a menu browser, not a recommendation engine, and does not include an optimizer, nutrition targets, accounts, diary, analytics, or scheduled production scraping. A separate manual-only GitHub Pages workflow is present but has not been run or activated.
 
 ## Requirements
 
@@ -35,7 +35,7 @@ LIONLOG_PUBLIC_ORIGIN=https://crunchybrunch.github.io \
 npm run build
 ```
 
-The result is emitted beneath `dist/client/`. The manual Pages artifact workflow does not deploy and cannot contact Penn State.
+The result is emitted beneath `dist/client/`. The review-artifact workflow does not deploy and cannot contact Penn State. The separate deployment workflow runs only after an intentional dispatch from `main`; see the [deployment handoff](docs/github-pages-deployment.md).
 
 ## Verify
 
@@ -59,7 +59,7 @@ The project is a React, Vite, and TypeScript site built with vinext for static-f
 
 ## Licensing
 
-No project license has been selected. Public visibility would make the source readable but would not grant general reuse rights. A permissive license such as MIT is the recommended default if the owner wants broad reuse; selecting or adding a license remains an explicit owner decision. Third-party packages and assets remain governed by their own licenses.
+No project license has been selected. The public repository is readable, but public visibility does not grant general reuse rights. A permissive license such as MIT is the recommended default if the owner wants broad reuse; selecting or adding a license remains an explicit owner decision. Third-party packages and assets remain governed by their own licenses.
 
 ## Architecture audits
 

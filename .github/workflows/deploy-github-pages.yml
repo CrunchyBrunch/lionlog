@@ -1,0 +1,77 @@
+name: Deploy GitHub Pages (manual)
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: github-pages-production
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'CrunchyBrunch/lionlog' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm exec tsc -- --noEmit
+      - run: npm test
+      - run: npm run lint
+      - name: Build static project-site artifact
+        env:
+          LIONLOG_BASE_PATH: /lionlog
+          LIONLOG_PUBLIC_ORIGIN: https://crunchybrunch.github.io
+        run: npm run build
+      - name: Verify static Pages boundary
+        run: |
+          test -f dist/client/index.html
+          test -f dist/client/.nojekyll
+          test ! -e public/menu-data
+          test ! -e dist/client/menu-data
+      - name: Prepare isolated Pages artifact
+        run: >-
+          node --experimental-strip-types scripts/prepare-pages-artifact.ts
+          --source=dist/client
+          --output=work/pages-deployment/site
+      - name: Package and round-trip validate Pages artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --directory work/pages-deployment/site --dereference --hard-dereference -cf work/pages-deployment/artifact.tar .
+          mkdir work/pages-deployment/round-trip
+          tar -xf work/pages-deployment/artifact.tar -C work/pages-deployment/round-trip
+          node --experimental-strip-types scripts/prepare-pages-artifact.ts --validate=work/pages-deployment/round-trip
+          diff -qr work/pages-deployment/site work/pages-deployment/round-trip
+          test "$(tar -tf work/pages-deployment/artifact.tar | grep -c '^./.nojekyll$')" -eq 1
+      - name: Upload deployment artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: github-pages
+          path: work/pages-deployment/artifact.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  deploy:
+    if: github.repository == 'CrunchyBrunch/lionlog' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5

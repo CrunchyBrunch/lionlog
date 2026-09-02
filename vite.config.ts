@@ -49,11 +49,6 @@ export default defineConfig(async () => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
-    // Vinext currently skips static prerendering when Next's basePath and
-    // output: "export" are combined. Vite's public base prefixes framework
-    // assets while keeping the generated static document at the artifact root,
-    // which is exactly what a Pages project-site artifact requires.
-    base: publicBasePath === "" ? "/" : `${publicBasePath}/`,
     define: {
       __LIONLOG_BASE_PATH__: JSON.stringify(publicBasePath),
     },

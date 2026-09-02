@@ -3,6 +3,8 @@
 Date: 2026-09-01  
 Audited base: `37706c119f4b2f12d089004a3e59de6ae8f8223f`
 
+Status update: the repository was subsequently made public. A separate manual-only Pages deployment workflow was added for review in commit `bb46104e4bb222e2f01c638f9a148f8d7dd6e337`; it has not been run, Pages settings remain an owner action, and the original audit conclusions remain historical context.
+
 ## Result
 
 The Alpha 3 repository is suitable for public visibility after the changes on the public-release-readiness branch are reviewed and merged. Making the repository public and enabling or configuring GitHub Pages remain owner actions; this audit does neither.
