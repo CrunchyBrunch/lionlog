@@ -165,10 +165,11 @@ test("browser bundle contains static delivery but no PSU retrieval or Node-only 
   ]) assert.doesNotMatch(source, new RegExp(forbidden));
 });
 
-test("live artifact workflow is manual-only and ordinary CI cannot invoke ingestion", async () => {
-  const [manualWorkflow, pagesWorkflow, ciWorkflow] = await Promise.all([
+test("live and Pages workflows are explicit, bounded, and ordinary CI cannot invoke ingestion or deployment", async () => {
+  const [manualWorkflow, pagesWorkflow, deploymentWorkflow, ciWorkflow] = await Promise.all([
     readFile(path.join(projectRoot, ".github/workflows/build-live-menu-artifact.yml"), "utf8"),
     readFile(path.join(projectRoot, ".github/workflows/build-pages-artifact.yml"), "utf8"),
+    readFile(path.join(projectRoot, ".github/workflows/deploy-github-pages.yml"), "utf8"),
     readFile(path.join(projectRoot, ".github/workflows/ci.yml"), "utf8"),
   ]);
   assert.match(manualWorkflow, /workflow_dispatch:/);
@@ -187,6 +188,20 @@ test("live artifact workflow is manual-only and ordinary CI cannot invoke ingest
   assert.doesNotMatch(pagesWorkflow, /actions\/upload-pages-artifact/);
   assert.doesNotMatch(pagesWorkflow, /ingest:psu|LIONLOG_ALLOW_PSU_NETWORK|deploy-pages|pages:\s*write|id-token:\s*write/);
   assert.doesNotMatch(pagesWorkflow, /^\s*(?:schedule|push|pull_request):/m);
+
+  assert.match(deploymentWorkflow, /workflow_dispatch:/);
+  assert.match(deploymentWorkflow, /^permissions: \{\}$/m);
+  assert.match(deploymentWorkflow, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(deploymentWorkflow, /permissions:\n\s+contents: read/);
+  assert.match(deploymentWorkflow, /permissions:\n\s+pages: write\n\s+id-token: write/);
+  assert.match(deploymentWorkflow, /environment:\n\s+name: github-pages/);
+  assert.match(deploymentWorkflow, /actions\/deploy-pages@[0-9a-f]{40}/);
+  assert.match(deploymentWorkflow, /actions\/upload-artifact@[0-9a-f]{40}/);
+  assert.match(deploymentWorkflow, /name: github-pages\n/);
+  assert.match(deploymentWorkflow, /prepare-pages-artifact\.ts/);
+  assert.match(deploymentWorkflow, /LIONLOG_BASE_PATH: \/lionlog/);
+  assert.doesNotMatch(deploymentWorkflow, /ingest:psu|LIONLOG_ALLOW_PSU_NETWORK|LIVE_PSU_INGESTION/);
+  assert.doesNotMatch(deploymentWorkflow, /^\s*(?:schedule|push|pull_request):/m);
 });
 
 async function javascriptFiles(directory) {
