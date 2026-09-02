@@ -3,7 +3,7 @@ import path from "node:path";
 import { validatePsuNutritionCacheEntry } from "../infrastructure/psu/snapshot-schema.ts";
 
 const root = path.resolve(process.argv.find((value) => value.startsWith("--cache-dir="))?.slice(12)
-  ?? "work/psu-field-release-cache/lionlog.psu-nutrition.v1");
+  ?? "work/psu-field-release-cache/lionlog.psu-nutrition.v2");
 let entries;
 try { entries = await readdir(root, { withFileTypes: true }); }
 catch (error) {

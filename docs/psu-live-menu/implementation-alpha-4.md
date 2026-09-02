@@ -1,6 +1,6 @@
 # v0.2.0-alpha.4 — live Pages field-release preparation
 
-Date: 2026-09-01
+Date: 2026-09-02
 
 ## Scope and source status
 
@@ -17,17 +17,25 @@ For the requested date the job:
 1. verifies the toolchain with TypeScript, fixture-only tests, and ESLint;
 2. restores only the versioned JSON nutrition cache and validates every restored entry;
 3. discovers current source-provided meal option values for East (11), South (13), Pollock (14), West (16), and North (17);
-4. ingests every discovered hall/meal query, accepting a recognized empty menu but failing the complete release for any retrieval, structure, normalization, cache, or publication failure;
-5. exports the exact report-backed query set as catalog version `lionlog.psu-catalog.v2` and snapshot version `lionlog.psu-menu.v1`;
-6. builds for `/lionlog/`, validates that `menu-data/v1` contains only the catalog and its referenced snapshots, round-trips the artifact, records SHA-256 inventory output, and retains the site artifact for review.
+4. ingests every discovered hall/meal query, accepting a recognized empty menu and only the narrowly bounded invalid-name omission described below while failing closed for every other retrieval, structure, normalization, cache, or publication failure;
+5. exports the exact report-backed query set as catalog version `lionlog.psu-catalog.v3` and snapshot version `lionlog.psu-menu.v2`;
+6. builds for `/lionlog/`, validates that `menu-data/v2` contains only the catalog and its referenced snapshots, round-trips the artifact, records SHA-256 inventory output, and retains the site artifact for review.
 
 Bounds are explicit: at most 20 menu queries, 1,000 items and nutrition handles per query, 5,000 items for the release, and 750 upstream attempts including retries. Requests are serialized, paced by at least one second plus bounded jitter, limited to three attempts with ten-second timeouts and response-size caps, and use bounded exponential backoff while honoring a valid `Retry-After` up to 60 seconds. Structural failures are not retried.
 
 The menu freshness window is 18 hours and last-known-good retention is 48 hours, which supports a manually produced static artifact without describing an old snapshot as fresh. Nutrition observations remain reusable for 24 hours when their versioned cache entries pass integrity validation. Missing values remain `null`, PSU serving labels/units are preserved, and source nutrition handles remain provenance rather than canonical food identities.
 
+### Bounded invalid-name quarantine
+
+LionLog first uses a valid source menu label, then a valid nutrition-detail title. A recognized menu observation with a valid numeric nutrition handle is omitted only when both display-name sources are empty or exceed the existing 160-character bound. The parser retains only the typed internal condition (`empty` or `over-limit`), never the rejected text. LionLog does not invent a name, display the handle as a name, or expose omitted names, handles, URLs, encodings, or hashes.
+
+The release remains fail-closed unless every threshold holds: no more than one such omission per hall/meal query, no more than five in the release, and no more than `max(1, floor(total source observations × 0.01))`, still subject to the absolute cap of five. A non-empty source query must retain at least one published observation. Invalid handles, changed menu/category/item/link/dietary structure, nutrition structure failures, name disagreement when both names are valid, cache failures, and every non-name validation failure remain blocking.
+
+Snapshots, catalog entries, and the release report record only aggregate typed `invalid-name` omission counts plus independent `complete` or `partial` coverage. Completeness does not change whether data is live, cached, or stale. The PWA explicitly warns when a selected snapshot is partial; sample data is never substituted or blended.
+
 ## Publication and browser behavior
 
-The catalog records schema/parser versions, generation and retrieval times, source commit, exact service date, hall/query coverage, empty and item counts, request totals, and nutrition cache hits. The artifact validator reconstructs the allowed `menu-data/v1` file set from the validated catalog, validates every snapshot again, rejects unreferenced files and unsafe paths, and scans browser JavaScript for retriever/parser/form/pacing and Node-only ingestion code.
+The catalog records schema/parser versions, generation and retrieval times, source commit, exact service date, hall/query completeness, aggregate invalid-name omission counts, empty and source/published item counts, request totals, and nutrition cache hits. The artifact validator reconstructs the allowed `menu-data/v2` file set from the validated catalog, validates every snapshot again, rejects inconsistent or tampered coverage metadata, unreferenced files, and unsafe paths, and scans browser JavaScript for retriever/parser/form/pacing and Node-only ingestion code.
 
 The PWA still defaults to PSU snapshots and keeps sample mode explicitly selectable. It shows source state, retrieval time and age, a public-source link, and independent/not-endorsed wording. Same-origin catalog/snapshot validation, IndexedDB last-known-good storage, retention bounds, and app-shell/menu-data service-worker separation remain the Alpha 3 boundary.
 

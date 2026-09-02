@@ -111,6 +111,8 @@ export class PsuMenuProvider implements MenuProvider {
         retrievedAt: selection.snapshot.retrievedAt,
         sourceUrl: selection.snapshot.query.sourceUrl,
         snapshotVersion: selection.snapshot.schemaVersion,
+        completeness: selection.snapshot.coverage.status,
+        omittedObservationCount: selection.snapshot.coverage.omissions["invalid-name"],
         warning: mode === "stale"
           ? "Live retrieval failed or the cached snapshot expired; items may have changed."
           : undefined,

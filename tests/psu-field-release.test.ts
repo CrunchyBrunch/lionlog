@@ -71,11 +71,15 @@ test("release report rejects incomplete coverage, inconsistent counts, and exces
     sourceMeal: "Lunch",
     recognizedEmpty: index === 0,
     itemCount: index === 0 ? 0 : 1,
-    snapshotId: `psu:snapshot:v1:${String(index).padStart(64, "0")}`,
+    coverage: "complete",
+    sourceObservationCount: index === 0 ? 0 : 1,
+    publishedObservationCount: index === 0 ? 0 : 1,
+    omissions: { "invalid-name": 0 },
+    snapshotId: `psu:snapshot:v2:${String(index).padStart(64, "0")}`,
     retrievedAt: "2026-09-01T16:00:00.000Z",
   }));
   const report = {
-    reportVersion: "lionlog.psu-field-release-report.v1",
+    reportVersion: "lionlog.psu-field-release-report.v2",
     serviceDate: "2026-09-01",
     commitSha: "a".repeat(40),
     startedAt: "2026-09-01T15:00:00.000Z",
@@ -83,6 +87,10 @@ test("release report rejects incomplete coverage, inconsistent counts, and exces
     hallIds: [...PSU_RELEASE_HALL_IDS],
     queryCount: 5,
     itemCount: 4,
+    coverage: "complete",
+    sourceObservationCount: 4,
+    publishedObservationCount: 4,
+    omissions: { "invalid-name": 0 },
     requestCount: 10,
     nutritionRequests: 4,
     nutritionCacheHits: 1,
@@ -91,6 +99,57 @@ test("release report rejects incomplete coverage, inconsistent counts, and exces
   assert.equal(validatePsuReleaseReport(report).queryCount, 5);
   assert.throws(() => validatePsuReleaseReport({ ...report, queryCount: 4 }), /query count is inconsistent/i);
   assert.throws(() => validatePsuReleaseReport({ ...report, hallIds: report.hallIds.slice(1) }), /Invalid PSU release report/i);
+});
+
+test("release report enforces per-query, one-percent, absolute, all-lost, and metadata consistency", () => {
+  const base = releaseReportFixture();
+  const partialQueries = base.queries.map((query, index) => index < 2 ? {
+    ...query,
+    recognizedEmpty: false,
+    coverage: "partial" as const,
+    sourceObservationCount: index === 0 ? 50 : 50,
+    publishedObservationCount: 49,
+    itemCount: 49,
+    omissions: { "invalid-name": 1 },
+  } : query);
+  const underOnePercent = {
+    ...base,
+    coverage: "partial" as const,
+    sourceObservationCount: 103,
+    publishedObservationCount: 101,
+    itemCount: 101,
+    omissions: { "invalid-name": 2 },
+    queries: partialQueries,
+  };
+  assert.throws(() => validatePsuReleaseReport(underOnePercent), /omission threshold/i);
+
+  const permittedQueries = partialQueries.map((query, index) => index === 0
+    ? { ...query, sourceObservationCount: 100, publishedObservationCount: 99, itemCount: 99 }
+    : index === 1
+      ? { ...query, sourceObservationCount: 97, publishedObservationCount: 96, itemCount: 96 }
+      : query);
+  const permitted = {
+    ...underOnePercent,
+    sourceObservationCount: 200,
+    publishedObservationCount: 198,
+    itemCount: 198,
+    queries: permittedQueries,
+  };
+  assert.equal(validatePsuReleaseReport(permitted).omissions["invalid-name"], 2);
+  assert.throws(() => validatePsuReleaseReport({ ...permitted, omissions: { "invalid-name": 6 } }), /Invalid PSU release report/);
+  assert.throws(() => validatePsuReleaseReport({
+    ...permitted,
+    queries: permitted.queries.map((query, index) => index === 0
+      ? { ...query, sourceObservationCount: 101, publishedObservationCount: 99, omissions: { "invalid-name": 2 } }
+      : query),
+  }), /Invalid PSU release report/);
+  assert.throws(() => validatePsuReleaseReport({
+    ...permitted,
+    queries: permitted.queries.map((query, index) => index === 0
+      ? { ...query, publishedObservationCount: 0, itemCount: 0, sourceObservationCount: 1, omissions: { "invalid-name": 1 } }
+      : query),
+  }), /Invalid PSU release report/);
+  assert.throws(() => validatePsuReleaseReport({ ...permitted, coverage: "complete" }), /coverage status/i);
 });
 
 test("live release workflow is manual-only and has no deployment privilege or step", async () => {
@@ -102,3 +161,38 @@ test("live release workflow is manual-only and has no deployment privilege or st
   assert.match(workflow, /prepare:psu-field-release/);
   assert.doesNotMatch(workflow, /pull_request:|push:/);
 });
+
+function releaseReportFixture() {
+  const queries = PSU_RELEASE_HALL_IDS.map((hallId, index) => ({
+    serviceDate: "2026-09-01",
+    hallId,
+    mealPeriodId: "lunch",
+    sourceMeal: "Lunch",
+    recognizedEmpty: false,
+    itemCount: 1,
+    coverage: "complete" as const,
+    sourceObservationCount: 1,
+    publishedObservationCount: 1,
+    omissions: { "invalid-name": 0 },
+    snapshotId: `psu:snapshot:v2:${String(index).padStart(64, "0")}`,
+    retrievedAt: "2026-09-01T16:00:00.000Z",
+  }));
+  return {
+    reportVersion: "lionlog.psu-field-release-report.v2" as const,
+    serviceDate: "2026-09-01",
+    commitSha: "a".repeat(40),
+    startedAt: "2026-09-01T15:00:00.000Z",
+    completedAt: "2026-09-01T16:00:00.000Z",
+    hallIds: [...PSU_RELEASE_HALL_IDS],
+    queryCount: 5,
+    itemCount: 5,
+    coverage: "complete" as const,
+    sourceObservationCount: 5,
+    publishedObservationCount: 5,
+    omissions: { "invalid-name": 0 },
+    requestCount: 10,
+    nutritionRequests: 5,
+    nutritionCacheHits: 0,
+    queries,
+  };
+}

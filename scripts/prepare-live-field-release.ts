@@ -55,12 +55,16 @@ const pipeline = new PsuIngestionPipeline(retriever, store, {
 });
 const queryReports = [];
 let itemCount = 0;
+let sourceObservationCount = 0;
+let invalidNameOmissions = 0;
 let nutritionRequests = 0;
 let nutritionCacheHits = 0;
 for (const query of queries) {
   const result = await pipeline.run(query);
   if (result.state !== "live") throw new Error(`Release query failed closed (${query.hallId}/${query.mealPeriodId}): ${result.error.message}`);
   itemCount += result.report.itemCount;
+  sourceObservationCount += result.report.sourceObservationCount;
+  invalidNameOmissions += result.report.omissions["invalid-name"];
   nutritionRequests += result.report.nutritionRequests;
   nutritionCacheHits += result.report.nutritionCacheHits;
   if (itemCount > PSU_RELEASE_MAXIMUM_ITEMS) throw new Error("Release item count exceeded its bound.");
@@ -69,15 +73,19 @@ for (const query of queries) {
     hallId: query.hallId,
     mealPeriodId: query.mealPeriodId,
     sourceMeal: result.snapshot.query.sourceMeal,
-    recognizedEmpty: result.report.itemCount === 0,
+    recognizedEmpty: result.report.sourceObservationCount === 0,
     itemCount: result.report.itemCount,
+    coverage: result.report.coverage,
+    sourceObservationCount: result.report.sourceObservationCount,
+    publishedObservationCount: result.report.publishedObservationCount,
+    omissions: result.report.omissions,
     snapshotId: result.snapshot.snapshotId,
     retrievedAt: result.snapshot.retrievedAt,
   });
 }
 
 const report = validatePsuReleaseReport({
-  reportVersion: "lionlog.psu-field-release-report.v1",
+  reportVersion: "lionlog.psu-field-release-report.v2",
   serviceDate,
   commitSha: process.env.GITHUB_SHA,
   startedAt: startedAt.toISOString(),
@@ -85,6 +93,10 @@ const report = validatePsuReleaseReport({
   hallIds: [...PSU_RELEASE_HALL_IDS],
   queryCount: queryReports.length,
   itemCount,
+  coverage: invalidNameOmissions === 0 ? "complete" : "partial",
+  sourceObservationCount,
+  publishedObservationCount: itemCount,
+  omissions: { "invalid-name": invalidNameOmissions },
   requestCount: retriever.requestCount,
   nutritionRequests,
   nutritionCacheHits,

@@ -113,6 +113,8 @@ test("release version and brand colors stay consistent across the PWA surface", 
   assert.equal(packageJson.version, releaseVersion);
   assert.match(layout, new RegExp(`data-lionlog-shell="v${releaseVersion.replaceAll(".", "\\.")}"`));
   assert.match(mealBuilder, new RegExp(`v${releaseVersion.replaceAll(".", "\\.")}`));
+  assert.match(mealBuilder, /snapshot is partial/i);
+  assert.match(mealBuilder, /trustworthy display name/i);
   assert.match(serviceWorker, new RegExp(`CACHE_NAME = .*v${releaseVersion.replaceAll(".", "\\.")}`));
   assert.match(pwaRegister, /retained validated menus remain available when saved/i);
   assert.doesNotMatch(pwaRegister, /installed sample menu remains available/i);
@@ -154,7 +156,7 @@ test("browser bundle contains static delivery but no PSU retrieval or Node-only 
   const clientDirectory = path.join(projectRoot, "dist", "client");
   const files = await javascriptFiles(clientDirectory);
   const source = (await Promise.all(files.map((file) => readFile(file, "utf8")))).join("\n");
-  assert.match(source, /lionlog-menu-data-v1/);
+  assert.match(source, /lionlog-menu-data-v2/);
   for (const forbidden of [
     "PsuHttpRetriever",
     "parsePsuMenuHtml",

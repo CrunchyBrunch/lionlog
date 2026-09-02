@@ -31,7 +31,7 @@ test("manual exporter creates a validated catalog and independent snapshot tree"
       "--generated-at=2026-08-31T16:01:00.000Z",
     ], { cwd: projectRoot });
 
-    const catalogPath = path.join(outputDirectory, "menu-data", "v1", "catalog.json");
+    const catalogPath = path.join(outputDirectory, "menu-data", "v2", "catalog.json");
     const catalog = validatePsuPublicationCatalog(JSON.parse(await readFile(catalogPath, "utf8")));
     assert.equal(catalog.snapshots.length, 1);
     assert.equal(catalog.generatedAt, "2026-08-31T16:01:00.000Z");
@@ -41,8 +41,8 @@ test("manual exporter creates a validated catalog and independent snapshot tree"
 
     await writeStaticShell(outputDirectory);
     const files = await validatePagesArtifact(outputDirectory);
-    assert.ok(files.includes("menu-data/v1/catalog.json"));
-    await writeFile(path.join(outputDirectory, "menu-data", "v1", "unreferenced.json"), "{}\n");
+    assert.ok(files.includes("menu-data/v2/catalog.json"));
+    await writeFile(path.join(outputDirectory, "menu-data", "v2", "unreferenced.json"), "{}\n");
     await assert.rejects(validatePagesArtifact(outputDirectory), /Unexpected menu-data publication path|not referenced by the catalog/);
   } finally {
     await rm(root, { recursive: true, force: true });

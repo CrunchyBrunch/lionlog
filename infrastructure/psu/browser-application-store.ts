@@ -1,7 +1,7 @@
 import type { PsuPublicationCatalog } from "./publication-catalog.ts";
 import type { BrowserPsuMenuSnapshot } from "./snapshot-contract.ts";
 
-export const PSU_BROWSER_DATABASE = "lionlog-menu-data-v1";
+export const PSU_BROWSER_DATABASE = "lionlog-menu-data-v2";
 
 export interface BrowserMenuApplicationStore {
   readCatalog(): Promise<unknown | null>;

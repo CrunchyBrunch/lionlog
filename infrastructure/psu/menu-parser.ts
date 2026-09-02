@@ -1,5 +1,6 @@
 import type { DietaryTrait } from "../../domain/nutrition.ts";
 import { PsuStructuralError } from "./errors.ts";
+import { validateSourceName, type InvalidSourceNameReason } from "./source-name.ts";
 import {
   descendants,
   firstDescendant,
@@ -18,7 +19,8 @@ export interface PsuMenuParseContext {
 }
 
 export interface ParsedPsuMenuItem {
-  readonly name: string;
+  readonly name: string | null;
+  readonly nameIssue: InvalidSourceNameReason | null;
   readonly sourceHandle: string;
   readonly dietaryTraits: readonly DietaryTrait[];
 }
@@ -126,7 +128,7 @@ function parseMenuItem(element: HtmlElement): ParsedPsuMenuItem {
   const href = getAttribute(link, "href") ?? "";
   const handleMatch = /^(?:\.\/)?nutrition-label\.cfm\?mid=(\d+)$/.exec(href);
   if (!handleMatch) throw new PsuStructuralError("PSU menu item has an unexpected nutrition URL.");
-  const name = boundedText(normalizedText(link), "food name", 160);
+  const validatedName = validateSourceName(normalizedText(link));
 
   const dietaryTraits = descendants(element, (candidate) => candidate.tagName === "img")
     .map((image) => normalizeText(getAttribute(image, "alt") ?? ""))
@@ -138,7 +140,8 @@ function parseMenuItem(element: HtmlElement): ParsedPsuMenuItem {
     });
 
   return {
-    name,
+    name: validatedName.value,
+    nameIssue: validatedName.issue,
     sourceHandle: handleMatch[1],
     dietaryTraits: [...new Set(dietaryTraits)],
   };

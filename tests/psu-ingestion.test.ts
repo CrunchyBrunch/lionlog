@@ -123,6 +123,70 @@ test("validated empty menus are live and do not request nutrition", async () => 
   assert.deepEqual(calls, { menu: 1, nutrition: 0 });
 });
 
+test("nutrition title supplies a missing menu label without reducing coverage", async () => {
+  const result = await runFixtureIngestion(eastLunchQuery, nameScenarioFetch({ menuNamesMissing: ["900000001"] }));
+  assert.equal(result.state, "live");
+  if (result.state !== "live") return;
+  const item = result.snapshot.stations.flatMap((station) => station.items)
+    .find((candidate) => candidate.sourceHandle === "900000001");
+  assert.equal(item?.name, "Fixture Lemon Chicken");
+  assert.equal(item?.nameSource, "nutrition-detail");
+  assert.equal(item?.sourceMenuLabel, null);
+  assert.deepEqual(result.snapshot.coverage, {
+    status: "complete",
+    sourceObservationCount: 2,
+    publishedObservationCount: 2,
+    omissions: { "invalid-name": 0 },
+  });
+});
+
+test("one both-invalid name is quarantined with aggregate partial coverage and no leakage", async () => {
+  const result = await runFixtureIngestion(eastLunchQuery, nameScenarioFetch({
+    menuNamesMissing: ["900000001"],
+    nutritionNamesMissing: ["900000001"],
+  }));
+  assert.equal(result.state, "live");
+  if (result.state !== "live") return;
+  assert.deepEqual(result.snapshot.coverage, {
+    status: "partial",
+    sourceObservationCount: 2,
+    publishedObservationCount: 1,
+    omissions: { "invalid-name": 1 },
+  });
+  assert.equal(result.report.coverage, "partial");
+  assert.equal(result.report.omissions["invalid-name"], 1);
+  const serialized = JSON.stringify(result.snapshot);
+  assert.doesNotMatch(serialized, /900000001|Fixture Lemon Chicken/);
+  const menu = await new PsuMenuProvider(new MemoryPsuSnapshotStore(), {
+    activeSnapshot: { state: "live", snapshot: result.snapshot },
+    now: () => now,
+  }).getMenu(eastLunchQuery);
+  assert.equal(menu.source.mode, "live");
+  assert.equal(menu.source.completeness, "partial");
+  assert.equal(menu.source.omittedObservationCount, 1);
+});
+
+test("invalid-name quarantine fails closed at per-query cap and when every source item would be lost", async () => {
+  const twoInvalid = await runFixtureIngestion(eastLunchQuery, nameScenarioFetch({
+    menuNamesMissing: ["900000001", "900000002"],
+    nutritionNamesMissing: ["900000001", "900000002"],
+  }));
+  assert.equal(twoInvalid.state, "unavailable");
+  if (twoInvalid.state === "unavailable") assert.match(twoInvalid.error.message, /invalid-name omission limit/i);
+
+  const parsedNutrition = parsePsuNutritionHtml(await fixture("nutrition-900000001.sanitized.html"));
+  assert.throws(() => buildPsuSnapshot(eastLunchQuery, {
+    context: { sourceCampusId: "11", sourceDate: "8/31/26", sourceMeal: "Lunch" },
+    empty: false,
+    stations: [{
+      displayName: "PURE",
+      items: [{ name: null, nameIssue: "empty", sourceHandle: "900000001", dietaryTraits: [] }],
+    }],
+  }, new Map([["900000001", { ...parsedNutrition, name: null, nameIssue: "empty" }]]), {
+    retrievedAt: now, cachedAt: now, freshForMs: 300_000, retainForMs: 172_800_000,
+  }), /lost every source observation/i);
+});
+
 test("ingestion fails before nutrition retrieval when a per-query release bound is exceeded", async () => {
   const calls = { menu: 0, nutrition: 0 };
   const retriever = new PsuHttpRetriever({
@@ -182,7 +246,7 @@ test("observation IDs remain stable when unrelated station items are reordered",
     empty: false,
     stations: [{
       displayName: "PURE",
-      items: [{ name: chicken.name, sourceHandle: "900000001", dietaryTraits: [] }],
+      items: [{ name: chicken.name, nameIssue: null, sourceHandle: "900000001", dietaryTraits: [] }],
     }],
   } as const;
   const reorderedMenu = {
@@ -190,7 +254,7 @@ test("observation IDs remain stable when unrelated station items are reordered",
     stations: [{
       displayName: "PURE",
       items: [
-        { name: rice.name, sourceHandle: "900000002", dietaryTraits: [] },
+        { name: rice.name, nameIssue: null, sourceHandle: "900000002", dietaryTraits: [] },
         ...baseMenu.stations[0].items,
       ],
     }],
@@ -275,6 +339,30 @@ function fixtureFetch(calls = { menu: 0, nutrition: 0 }): typeof fetch {
     calls.nutrition += 1;
     const handle = url.searchParams.get("mid");
     return htmlResponse(await fixture(`nutrition-${handle}.sanitized.html`), url.href);
+  };
+}
+
+function nameScenarioFetch(options: {
+  menuNamesMissing?: readonly string[];
+  nutritionNamesMissing?: readonly string[];
+}): typeof fetch {
+  return async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/daily-menu.cfm")) {
+      let html = await fixture("menu-east-lunch.sanitized.html");
+      for (const handle of options.menuNamesMissing ?? []) {
+        const name = handle === "900000001" ? "Fixture Lemon Chicken" : "Fixture Brown Rice";
+        html = html.replace(`${name}</a>`, "</a>");
+      }
+      return htmlResponse(html, url.href);
+    }
+    const handle = url.searchParams.get("mid") ?? "";
+    let html = await fixture(`nutrition-${handle}.sanitized.html`);
+    if (options.nutritionNamesMissing?.includes(handle)) {
+      const name = handle === "900000001" ? "Fixture Lemon Chicken" : "Fixture Brown Rice";
+      html = html.replace(`${name}</h1>`, "</h1>");
+    }
+    return htmlResponse(html, url.href);
   };
 }
 

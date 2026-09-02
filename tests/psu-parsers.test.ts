@@ -22,6 +22,7 @@ test("pure menu parser preserves station, meal context, names, handles, and diet
   ]);
   assert.deepEqual(parsed.stations[0].items[0], {
     name: "Fixture Lemon Chicken",
+    nameIssue: null,
     sourceHandle: "900000001",
     dietaryTraits: ["gluten-friendly", "halal-friendly"],
   });
@@ -84,10 +85,34 @@ test("menu fixture changes fail closed at category, item, link, and dietary boun
   );
 });
 
+test("name validation distinguishes missing and over-limit values without retaining unsafe text", async () => {
+  const html = await fixture("menu-east-lunch.sanitized.html");
+  const expected = { sourceCampusId: "11", sourceDate: "8/31/26", sourceMeal: "Lunch" };
+  const missing = parsePsuMenuHtml(html.replace("Fixture Lemon Chicken</a>", "</a>"), expected);
+  assert.equal(missing.stations[0].items[0].name, null);
+  assert.equal(missing.stations[0].items[0].nameIssue, "empty");
+
+  const unsafe = "X".repeat(161);
+  const overLimit = parsePsuMenuHtml(html.replace("Fixture Lemon Chicken", unsafe), expected);
+  assert.equal(overLimit.stations[0].items[0].name, null);
+  assert.equal(overLimit.stations[0].items[0].nameIssue, "over-limit");
+  assert.doesNotMatch(JSON.stringify(overLimit), new RegExp(unsafe));
+
+  const nutrition = await fixture("nutrition-900000001.sanitized.html");
+  const missingTitle = parsePsuNutritionHtml(nutrition.replace("Fixture Lemon Chicken</h1>", "</h1>"));
+  assert.equal(missingTitle.name, null);
+  assert.equal(missingTitle.nameIssue, "empty");
+  const overLimitTitle = parsePsuNutritionHtml(nutrition.replace("Fixture Lemon Chicken", unsafe));
+  assert.equal(overLimitTitle.name, null);
+  assert.equal(overLimitTitle.nameIssue, "over-limit");
+  assert.doesNotMatch(JSON.stringify(overLimitTitle), new RegExp(unsafe));
+});
+
 test("pure nutrition parser preserves source precision, units, ingredients, and allergens", async () => {
   const detail = parsePsuNutritionHtml(await fixture("nutrition-900000001.sanitized.html"));
 
   assert.equal(detail.name, "Fixture Lemon Chicken");
+  assert.equal(detail.nameIssue, null);
   assert.equal(detail.servingLabel, "1 EACH");
   assert.equal(detail.sourceQuantity, 1);
   assert.equal(detail.sourceUnit, "EACH");
@@ -116,6 +141,7 @@ test("source-unavailable nutrient values remain null rather than zero", async ()
 test("an explicit PSU unavailable-nutrition page preserves null source fields", async () => {
   const parsed = parsePsuNutritionHtml(await fixture("nutrition-unavailable.sanitized.html"));
   assert.equal(parsed.name, null);
+  assert.equal(parsed.nameIssue, "empty");
   assert.equal(parsed.servingLabel, null);
   assert.equal(parsed.sourceQuantity, null);
   assert.equal(parsed.sourceUnit, null);

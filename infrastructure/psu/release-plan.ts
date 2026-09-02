@@ -14,6 +14,9 @@ export const PSU_RELEASE_HALL_IDS = [
 export const PSU_RELEASE_MAXIMUM_QUERIES = 20;
 export const PSU_RELEASE_MAXIMUM_ITEMS = 5_000;
 export const PSU_RELEASE_MAXIMUM_REQUESTS = 750;
+export const PSU_RELEASE_MAXIMUM_INVALID_NAME_OMISSIONS = 5;
+
+const omissionSchema = z.object({ "invalid-name": z.number().int().min(0).max(PSU_RELEASE_MAXIMUM_INVALID_NAME_OMISSIONS) }).strict();
 
 const querySchema = z.object({
   serviceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -22,12 +25,16 @@ const querySchema = z.object({
   sourceMeal: z.string(),
   recognizedEmpty: z.boolean(),
   itemCount: z.number().int().min(0).max(1_000),
-  snapshotId: z.string().regex(/^psu:snapshot:v1:[a-f0-9]{64}$/),
+  coverage: z.enum(["complete", "partial"]),
+  sourceObservationCount: z.number().int().min(0).max(1_000),
+  publishedObservationCount: z.number().int().min(0).max(1_000),
+  omissions: omissionSchema,
+  snapshotId: z.string().regex(/^psu:snapshot:v2:[a-f0-9]{64}$/),
   retrievedAt: z.string().datetime({ offset: true }),
 }).strict();
 
 export const psuReleaseReportSchema = z.object({
-  reportVersion: z.literal("lionlog.psu-field-release-report.v1"),
+  reportVersion: z.literal("lionlog.psu-field-release-report.v2"),
   serviceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   commitSha: z.string().regex(/^[a-f0-9]{40}$/),
   startedAt: z.string().datetime({ offset: true }),
@@ -35,6 +42,10 @@ export const psuReleaseReportSchema = z.object({
   hallIds: z.array(z.string()).length(5),
   queryCount: z.number().int().min(1).max(PSU_RELEASE_MAXIMUM_QUERIES),
   itemCount: z.number().int().min(0).max(PSU_RELEASE_MAXIMUM_ITEMS),
+  coverage: z.enum(["complete", "partial"]),
+  sourceObservationCount: z.number().int().min(0).max(PSU_RELEASE_MAXIMUM_ITEMS),
+  publishedObservationCount: z.number().int().min(0).max(PSU_RELEASE_MAXIMUM_ITEMS),
+  omissions: omissionSchema,
   requestCount: z.number().int().min(1).max(PSU_RELEASE_MAXIMUM_REQUESTS),
   nutritionRequests: z.number().int().min(0),
   nutritionCacheHits: z.number().int().min(0),
@@ -52,6 +63,25 @@ export const psuReleaseReportSchema = z.object({
   if (report.itemCount !== report.queries.reduce((total, query) => total + query.itemCount, 0)) {
     context.addIssue({ code: "custom", message: "Release report item count is inconsistent." });
   }
+  const sourceObservationCount = report.queries.reduce((total, query) => total + query.sourceObservationCount, 0);
+  const publishedObservationCount = report.queries.reduce((total, query) => total + query.publishedObservationCount, 0);
+  const invalidNameOmissions = report.queries.reduce((total, query) => total + query.omissions["invalid-name"], 0);
+  if (
+    report.sourceObservationCount !== sourceObservationCount
+    || report.publishedObservationCount !== publishedObservationCount
+    || report.omissions["invalid-name"] !== invalidNameOmissions
+    || report.itemCount !== publishedObservationCount
+  ) context.addIssue({ code: "custom", message: "Release coverage totals are inconsistent." });
+  const allowedOmissions = Math.min(
+    PSU_RELEASE_MAXIMUM_INVALID_NAME_OMISSIONS,
+    Math.max(1, Math.floor(sourceObservationCount * 0.01)),
+  );
+  if (invalidNameOmissions > allowedOmissions) {
+    context.addIssue({ code: "custom", message: "Release exceeded its invalid-name omission threshold." });
+  }
+  if (report.coverage !== (invalidNameOmissions === 0 ? "complete" : "partial")) {
+    context.addIssue({ code: "custom", message: "Release coverage status is inconsistent." });
+  }
   if (Date.parse(report.startedAt) > Date.parse(report.completedAt)) {
     context.addIssue({ code: "custom", message: "Release report timestamps are out of order." });
   }
@@ -66,9 +96,16 @@ export const psuReleaseReportSchema = z.object({
     try {
       if (getPsuMealPeriod(query.mealPeriodId).sourceValue !== query.sourceMeal) throw new Error("Meal mismatch.");
     } catch { context.addIssue({ code: "custom", message: `Release query uses an unsupported meal: ${key}` }); }
-    if (query.recognizedEmpty !== (query.itemCount === 0)) {
+    if (query.recognizedEmpty !== (query.sourceObservationCount === 0)) {
       context.addIssue({ code: "custom", message: `Release empty status is inconsistent: ${key}` });
     }
+    if (
+      query.itemCount !== query.publishedObservationCount
+      || query.sourceObservationCount !== query.publishedObservationCount + query.omissions["invalid-name"]
+      || query.coverage !== (query.omissions["invalid-name"] === 0 ? "complete" : "partial")
+      || query.omissions["invalid-name"] > 1
+      || (query.sourceObservationCount > 0 && query.publishedObservationCount === 0)
+    ) context.addIssue({ code: "custom", message: `Release query coverage is inconsistent: ${key}` });
     if (Date.parse(query.retrievedAt) < Date.parse(report.startedAt) || Date.parse(query.retrievedAt) > Date.parse(report.completedAt)) {
       context.addIssue({ code: "custom", message: `Release query timestamp is outside the retrieval window: ${key}` });
     }

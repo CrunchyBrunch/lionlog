@@ -48,6 +48,10 @@ export interface PsuIngestionReport {
   readonly nutritionCacheHits: number;
   readonly stationCount: number;
   readonly itemCount: number;
+  readonly sourceObservationCount: number;
+  readonly publishedObservationCount: number;
+  readonly coverage: "complete" | "partial";
+  readonly omissions: { readonly "invalid-name": number };
 }
 
 export interface PsuIngestionPipelineOptions {
@@ -179,6 +183,10 @@ export class PsuIngestionPipeline {
         nutritionCacheHits,
         stationCount: snapshot.stations.length,
         itemCount: snapshot.stations.reduce((total, station) => total + station.items.length, 0),
+        sourceObservationCount: snapshot.coverage.sourceObservationCount,
+        publishedObservationCount: snapshot.coverage.publishedObservationCount,
+        coverage: snapshot.coverage.status,
+        omissions: snapshot.coverage.omissions,
       },
     };
   }

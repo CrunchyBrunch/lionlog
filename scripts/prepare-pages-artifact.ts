@@ -184,7 +184,7 @@ function validatePublicationPath(relativePath: string): void {
   if (segments.some((segment) => FORBIDDEN_SEGMENTS.has(segment.toLowerCase()))) {
     throw new Error(`Forbidden publication directory: ${relativePath}`);
   }
-  if (segments[0] === "menu-data" && !/^menu-data\/v1\/(?:catalog\.json|snapshots\/\d{4}-\d{2}-\d{2}\/\d+\/(?:breakfast|lunch|dinner|late-night)\.json)$/.test(normalized)) {
+  if (segments[0] === "menu-data" && !/^menu-data\/v2\/(?:catalog\.json|snapshots\/\d{4}-\d{2}-\d{2}\/\d+\/(?:breakfast|lunch|dinner|late-night)\.json)$/.test(normalized)) {
     throw new Error(`Unexpected menu-data publication path: ${relativePath}`);
   }
   const extension = path.extname(normalized).toLowerCase();
@@ -197,14 +197,14 @@ function validatePublicationPath(relativePath: string): void {
 async function validateMenuDataPublication(root: string, files: readonly string[]): Promise<void> {
   const menuFiles = files.filter((file) => file.startsWith("menu-data/"));
   if (menuFiles.length === 0) return;
-  const catalogPath = "menu-data/v1/catalog.json";
+  const catalogPath = "menu-data/v2/catalog.json";
   if (!menuFiles.includes(catalogPath)) throw new Error("Menu-data publication is missing its catalog.");
   const catalog = validatePsuPublicationCatalog(JSON.parse(await readFile(path.join(root, ...catalogPath.split("/")), "utf8")));
   const expectedFiles = new Set([catalogPath]);
   let itemCount = 0;
   let emptyCount = 0;
   for (const entry of catalog.snapshots) {
-    const relative = `menu-data/v1/${entry.snapshotUrl.slice(2)}`;
+    const relative = `menu-data/v2/${entry.snapshotUrl.slice(2)}`;
     expectedFiles.add(relative);
     if (!menuFiles.includes(relative)) throw new Error(`Catalog-referenced snapshot is missing: ${relative}`);
     const snapshot = validatePsuSnapshot(JSON.parse(await readFile(path.join(root, ...relative.split("/")), "utf8")));
@@ -232,7 +232,7 @@ async function main(): Promise<void> {
   const validate = argumentsByName.get("--validate");
   if (validate) {
     const files = await validatePagesArtifact(validate);
-    if (argumentsByName.has("--require-menu-data") && !files.includes("menu-data/v1/catalog.json")) {
+    if (argumentsByName.has("--require-menu-data") && !files.includes("menu-data/v2/catalog.json")) {
       throw new Error("Pages artifact requires a validated menu-data publication.");
     }
     console.log(`Validated Pages artifact: ${files.length} files.`);

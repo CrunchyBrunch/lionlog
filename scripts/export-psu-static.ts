@@ -19,7 +19,7 @@ if (argumentsByName.has("help")) {
     "Usage:",
     "  npm run export:psu-static -- --cache-dir=work/psu-ingestion --output-dir=public",
     "",
-    "The command writes <output-dir>/menu-data/v1/catalog.json and independently loadable snapshots.",
+    "The command writes <output-dir>/menu-data/v2/catalog.json and independently loadable snapshots.",
   ].join("\n") + "\n");
   process.exit(0);
 }
@@ -34,7 +34,7 @@ const snapshots = (await store.listMenus()).map(validatePsuSnapshot)
 if (snapshots.length === 0) throw new Error(`No validated PSU menu snapshots found in ${cacheDirectory}.`);
 if (releaseReport) assertExactReleaseSet(snapshots, releaseReport);
 
-const publicationDirectory = path.join(outputDirectory, "menu-data", "v1");
+const publicationDirectory = path.join(outputDirectory, "menu-data", "v2");
 const stagingDirectory = `${publicationDirectory}.staging-${process.pid}`;
 await rm(stagingDirectory, { recursive: true, force: true });
 await mkdir(stagingDirectory, { recursive: true });
@@ -69,6 +69,10 @@ try {
       publishedSnapshotCount: snapshots.length,
       recognizedEmptySnapshotCount: releaseReport.queries.filter((query) => query.recognizedEmpty).length,
       itemCount: releaseReport.itemCount,
+      coverage: releaseReport.coverage,
+      sourceObservationCount: releaseReport.sourceObservationCount,
+      publishedObservationCount: releaseReport.publishedObservationCount,
+      omissions: releaseReport.omissions,
       requestCount: releaseReport.requestCount,
       nutritionRequests: releaseReport.nutritionRequests,
       nutritionCacheHits: releaseReport.nutritionCacheHits,
@@ -84,6 +88,12 @@ try {
       publishedSnapshotCount: snapshots.length,
       recognizedEmptySnapshotCount: snapshots.filter((snapshot) => snapshot.stations.every((station) => station.items.length === 0)).length,
       itemCount: snapshots.reduce((total, snapshot) => total + snapshot.stations.reduce((subtotal, station) => subtotal + station.items.length, 0), 0),
+      coverage: snapshots.some((snapshot) => snapshot.coverage.status === "partial") ? "partial" : "complete",
+      sourceObservationCount: snapshots.reduce((total, snapshot) => total + snapshot.coverage.sourceObservationCount, 0),
+      publishedObservationCount: snapshots.reduce((total, snapshot) => total + snapshot.coverage.publishedObservationCount, 0),
+      omissions: {
+        "invalid-name": snapshots.reduce((total, snapshot) => total + snapshot.coverage.omissions["invalid-name"], 0),
+      },
       requestCount: null,
       nutritionRequests: null,
       nutritionCacheHits: null,
@@ -127,7 +137,15 @@ function assertExactReleaseSet(
   }
   for (const query of report.queries) {
     const snapshot = snapshotsByKey.get(releaseQueryKey(query));
-    if (!snapshot || snapshot.snapshotId !== query.snapshotId || snapshot.retrievedAt !== query.retrievedAt) {
+    if (
+      !snapshot
+      || snapshot.snapshotId !== query.snapshotId
+      || snapshot.retrievedAt !== query.retrievedAt
+      || snapshot.coverage.status !== query.coverage
+      || snapshot.coverage.sourceObservationCount !== query.sourceObservationCount
+      || snapshot.coverage.publishedObservationCount !== query.publishedObservationCount
+      || snapshot.coverage.omissions["invalid-name"] !== query.omissions["invalid-name"]
+    ) {
       throw new Error(`Validated cache does not match release query ${releaseQueryKey(query)}.`);
     }
   }

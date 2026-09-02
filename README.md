@@ -53,7 +53,7 @@ LIONLOG_ALLOW_PSU_NETWORK=I_UNDERSTAND_THIS_CONTACTS_PSU npm run ingest:psu -- -
 npm run export:psu-static -- --cache-dir=work/psu-ingestion --output-dir=public
 ```
 
-Validated snapshots and nutrition cache entries are written beneath `work/psu-ingestion`. Repeat the same command to refresh the menu while reusing still-fresh nutrition entries. The browser reads `./menu-data/v1/catalog.json` from its own origin; a missing publication is shown as unavailable, and sample data appears only when sample mode is selected. The production-shaped field-release process is documented in the [Alpha 4 implementation notes](docs/psu-live-menu/implementation-alpha-4.md).
+Validated snapshots and nutrition cache entries are written beneath `work/psu-ingestion`. Repeat the same command to refresh the menu while reusing still-fresh nutrition entries. The browser reads `./menu-data/v2/catalog.json` from its own origin; a missing publication is shown as unavailable, and sample data appears only when sample mode is selected. Version 2 snapshots carry independently validated complete/partial coverage metadata. The production-shaped field-release process and narrowly bounded invalid-name quarantine are documented in the [Alpha 4 implementation notes](docs/psu-live-menu/implementation-alpha-4.md).
 
 The project is a React, Vite, and TypeScript site built with vinext for static-first Sites deployment. Domain contracts live in `domain/`, application coordination in `application/`, and the replaceable sample provider in `infrastructure/`.
 

@@ -8,8 +8,11 @@ import {
 import { PsuStructuralError } from "./errors.ts";
 import type { BrowserPsuMenuSnapshot } from "./snapshot-contract.ts";
 
-export const PSU_CATALOG_VERSION = "lionlog.psu-catalog.v2";
-export const PSU_MENU_DATA_PATH = "./menu-data/v1/catalog.json";
+export const PSU_CATALOG_VERSION = "lionlog.psu-catalog.v3";
+export const PSU_MENU_DATA_PATH = "./menu-data/v2/catalog.json";
+
+const omissionSchema = z.object({ "invalid-name": z.number().int().min(0).max(5) }).strict();
+const coverageStatusSchema = z.enum(["complete", "partial"]);
 
 export const psuPublicationCatalogSchema = z.object({
   catalogVersion: z.literal(PSU_CATALOG_VERSION),
@@ -28,6 +31,10 @@ export const psuPublicationCatalogSchema = z.object({
     publishedSnapshotCount: z.number().int().min(1).max(2_000),
     recognizedEmptySnapshotCount: z.number().int().min(0).max(2_000),
     itemCount: z.number().int().min(0).max(100_000),
+    coverage: coverageStatusSchema,
+    sourceObservationCount: z.number().int().min(0).max(100_000),
+    publishedObservationCount: z.number().int().min(0).max(100_000),
+    omissions: omissionSchema,
     requestCount: z.number().int().min(1).max(2_000).nullable(),
     nutritionRequests: z.number().int().min(0).max(2_000).nullable(),
     nutritionCacheHits: z.number().int().min(0).max(100_000).nullable(),
@@ -45,11 +52,15 @@ export const psuPublicationCatalogSchema = z.object({
     serviceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     hallId: z.string().min(1).max(80),
     mealPeriodId: z.string().min(1).max(80),
-    snapshotId: z.string().regex(/^psu:snapshot:v1:[a-f0-9]{64}$/),
+    snapshotId: z.string().regex(/^psu:snapshot:v2:[a-f0-9]{64}$/),
     snapshotUrl: z.string().regex(/^\.\/snapshots\/\d{4}-\d{2}-\d{2}\/\d+\/(?:breakfast|lunch|dinner|late-night)\.json$/),
     retrievedAt: z.string().datetime({ offset: true }),
     freshUntil: z.string().datetime({ offset: true }),
     retainUntil: z.string().datetime({ offset: true }),
+    coverage: coverageStatusSchema,
+    sourceObservationCount: z.number().int().min(0).max(1_000),
+    publishedObservationCount: z.number().int().min(0).max(1_000),
+    omissions: z.object({ "invalid-name": z.number().int().min(0).max(1) }).strict(),
   }).strict()).max(2_000),
 }).strict().superRefine((catalog, context) => {
   if (!isSortedUnique(catalog.serviceDates)) {
@@ -62,6 +73,22 @@ export const psuPublicationCatalogSchema = z.object({
     catalog.publication.expectedSnapshotCount !== catalog.snapshots.length
     || catalog.publication.publishedSnapshotCount !== catalog.snapshots.length
   ) context.addIssue({ code: "custom", message: "Catalog publication snapshot counts are inconsistent." });
+  const sourceObservationCount = catalog.snapshots.reduce((total, entry) => total + entry.sourceObservationCount, 0);
+  const publishedObservationCount = catalog.snapshots.reduce((total, entry) => total + entry.publishedObservationCount, 0);
+  const invalidNameOmissions = catalog.snapshots.reduce((total, entry) => total + entry.omissions["invalid-name"], 0);
+  if (
+    catalog.publication.sourceObservationCount !== sourceObservationCount
+    || catalog.publication.publishedObservationCount !== publishedObservationCount
+    || catalog.publication.itemCount !== publishedObservationCount
+    || catalog.publication.omissions["invalid-name"] !== invalidNameOmissions
+  ) context.addIssue({ code: "custom", message: "Catalog publication coverage totals are inconsistent." });
+  const allowedOmissions = Math.min(5, Math.max(1, Math.floor(sourceObservationCount * 0.01)));
+  if (invalidNameOmissions > allowedOmissions) {
+    context.addIssue({ code: "custom", message: "Catalog exceeded its invalid-name omission threshold." });
+  }
+  if (catalog.publication.coverage !== (invalidNameOmissions === 0 ? "complete" : "partial")) {
+    context.addIssue({ code: "custom", message: "Catalog publication coverage status is inconsistent." });
+  }
   if (catalog.publication.mode === "field-release") {
     if (
       catalog.publication.commitSha === null
@@ -118,6 +145,11 @@ export const psuPublicationCatalogSchema = z.object({
       && Date.parse(entry.freshUntil) <= Date.parse(entry.retainUntil))) {
       context.addIssue({ code: "custom", message: `Catalog entry timestamps are invalid: ${key}` });
     }
+    if (
+      entry.sourceObservationCount !== entry.publishedObservationCount + entry.omissions["invalid-name"]
+      || entry.coverage !== (entry.omissions["invalid-name"] === 0 ? "complete" : "partial")
+      || (entry.sourceObservationCount > 0 && entry.publishedObservationCount === 0)
+    ) context.addIssue({ code: "custom", message: `Catalog entry coverage is inconsistent: ${key}` });
   }
 });
 
@@ -142,6 +174,10 @@ export function assertSnapshotMatchesCatalog(
     || snapshot.retrievedAt !== entry.retrievedAt
     || snapshot.freshUntil !== entry.freshUntil
     || snapshot.retainUntil !== entry.retainUntil
+    || snapshot.coverage.status !== entry.coverage
+    || snapshot.coverage.sourceObservationCount !== entry.sourceObservationCount
+    || snapshot.coverage.publishedObservationCount !== entry.publishedObservationCount
+    || snapshot.coverage.omissions["invalid-name"] !== entry.omissions["invalid-name"]
   ) throw new PsuStructuralError("Published snapshot does not match its catalog entry.");
 }
 
@@ -158,6 +194,10 @@ export function catalogEntryForSnapshot(
     retrievedAt: snapshot.retrievedAt,
     freshUntil: snapshot.freshUntil,
     retainUntil: snapshot.retainUntil,
+    coverage: snapshot.coverage.status,
+    sourceObservationCount: snapshot.coverage.sourceObservationCount,
+    publishedObservationCount: snapshot.coverage.publishedObservationCount,
+    omissions: snapshot.coverage.omissions,
   };
 }
 

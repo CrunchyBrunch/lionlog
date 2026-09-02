@@ -45,7 +45,7 @@ test("file cache writes atomically and rejects mismatched or corrupted records",
     await store.writeMenu(snapshot);
     assert.deepEqual(await store.readMenu(query), snapshot);
 
-    const menuDirectory = path.join(root, "lionlog.psu-menu.v1");
+    const menuDirectory = path.join(root, "lionlog.psu-menu.v2");
     const menuFiles = await readdir(menuDirectory);
     assert.equal(menuFiles.length, 1);
     assert.match(menuFiles[0], /^[a-f0-9]{64}\.json$/);
@@ -57,7 +57,7 @@ test("file cache writes atomically and rejects mismatched or corrupted records",
 
     const nutrition = toNutritionCacheEntry("900000001", chicken, timestamp, 86_400_000);
     await store.writeNutrition(nutrition);
-    const nutritionPath = path.join(root, "lionlog.psu-nutrition.v1", "900000001.json");
+    const nutritionPath = path.join(root, "lionlog.psu-nutrition.v2", "900000001.json");
     const mismatched = {
       ...nutrition,
       sourceHandle: "900000002",
