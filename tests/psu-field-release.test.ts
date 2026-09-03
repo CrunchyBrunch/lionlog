@@ -5,7 +5,10 @@ import test from "node:test";
 import { parsePsuMealOptionsHtml } from "../infrastructure/psu/menu-parser.ts";
 import {
   buildReleaseQueries,
+  derivePsuReleaseRequestBudget,
   PSU_RELEASE_HALL_IDS,
+  PSU_RELEASE_MAXIMUM_REQUESTS,
+  PSU_RELEASE_MAXIMUM_UNIQUE_NUTRITION_OBSERVATIONS,
   validatePsuReleaseReport,
 } from "../infrastructure/psu/release-plan.ts";
 import { assertTrustedReleaseIngestionEnvironment } from "../infrastructure/psu/trusted-release-guard.ts";
@@ -61,6 +64,36 @@ test("release planning covers the exact five halls and only source-verified meal
   assert.deepEqual([...new Set(queries.map((query) => query.hallId))], [...PSU_RELEASE_HALL_IDS]);
   assert.throws(() => buildReleaseQueries("2026-09-01", new Map()), /No source meal options/);
   assert.throws(() => buildReleaseQueries("2026-02-30", meals), /Invalid ISO service date/);
+});
+
+test("release request budget is derived from the workflow window and paced request envelope", () => {
+  const budget = derivePsuReleaseRequestBudget({
+    workflowTimeoutMs: 45 * 60_000,
+    nonIngestionReserveMs: 10 * 60_000,
+    minimumIntervalMs: 1_000,
+    maximumJitterMs: 250,
+    hallDiscoveryRequests: 5,
+    maximumMenuQueries: 20,
+    maximumAttemptsPerOperation: 3,
+  });
+  assert.deepEqual(budget, {
+    ingestionWindowMs: 35 * 60_000,
+    maximumPacedRequestIntervalMs: 1_250,
+    maximumUpstreamAttempts: 1_680,
+    maximumUniqueNutritionObservations: 1_655,
+    maximumAttemptsPerOperation: 3,
+  });
+  assert.equal(PSU_RELEASE_MAXIMUM_REQUESTS, 1_680);
+  assert.equal(PSU_RELEASE_MAXIMUM_UNIQUE_NUTRITION_OBSERVATIONS, 1_655);
+  assert.throws(() => derivePsuReleaseRequestBudget({
+    workflowTimeoutMs: 60_000,
+    nonIngestionReserveMs: 60_000,
+    minimumIntervalMs: 1_000,
+    maximumJitterMs: 0,
+    hallDiscoveryRequests: 5,
+    maximumMenuQueries: 20,
+    maximumAttemptsPerOperation: 3,
+  }), /no bounded ingestion window/i);
 });
 
 test("release report rejects incomplete coverage, inconsistent counts, and excess scope", () => {
@@ -160,6 +193,17 @@ test("live release workflow is manual-only and has no deployment privilege or st
   assert.doesNotMatch(workflow, /pages:\s*write|id-token:\s*write|deploy-pages/);
   assert.match(workflow, /prepare:psu-field-release/);
   assert.doesNotMatch(workflow, /pull_request:|push:/);
+  assert.match(workflow, /actions\/cache\/restore@caa296126883cff596d87d8935842f9db880ef25/);
+  assert.match(workflow, /actions\/cache\/save@caa296126883cff596d87d8935842f9db880ef25/);
+  assert.match(workflow, /restore-keys:[\s\S]*lionlog-psu-nutrition-v2-psu-html-v2-/);
+  assert.match(workflow, /continue-on-error: true/);
+  assert.match(workflow, /hashFiles\('work\/psu-field-release-cache\/lionlog\.psu-nutrition\.v2\/\*\.json'\) != ''/);
+  const ingestion = workflow.indexOf("id: ingestion");
+  const cacheValidation = workflow.indexOf("id: nutrition-cache-validation");
+  const cacheSave = workflow.indexOf("actions/cache/save@");
+  const failureGate = workflow.indexOf("Fail closed before publication when ingestion failed");
+  const exportStep = workflow.indexOf("Export the exact validated release set");
+  assert.ok(ingestion < cacheValidation && cacheValidation < cacheSave && cacheSave < failureGate && failureGate < exportStep);
 });
 
 function releaseReportFixture() {

@@ -15,6 +15,7 @@ export interface PsuRetrieverOptions {
   readonly maximumAttempts?: number;
   readonly baseBackoffMs?: number;
   readonly maximumRequests?: number;
+  readonly maximumElapsedMs?: number;
   readonly jitterMs?: number;
   readonly random?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
@@ -27,6 +28,16 @@ export interface RetrievedHtml {
   readonly retrievedAt: Date;
 }
 
+export interface PsuRequestTelemetry {
+  readonly requestCount: number;
+  readonly mealOptionRequests: number;
+  readonly menuRequests: number;
+  readonly nutritionRequests: number;
+  readonly retryRequests: number;
+}
+
+type PsuRequestKind = "meal-options" | "menu" | "nutrition";
+
 export class PsuHttpRetriever {
   private readonly fetchImpl: typeof fetch;
   private readonly minimumIntervalMs: number;
@@ -34,6 +45,7 @@ export class PsuHttpRetriever {
   private readonly maximumAttempts: number;
   private readonly baseBackoffMs: number;
   private readonly maximumRequests: number;
+  private readonly maximumElapsedMs: number;
   private readonly jitterMs: number;
   private readonly random: () => number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
@@ -41,6 +53,11 @@ export class PsuHttpRetriever {
   private serialTail: Promise<void> = Promise.resolve();
   private lastRequestStartedAt = Number.NEGATIVE_INFINITY;
   private requestCountValue = 0;
+  private mealOptionRequestCount = 0;
+  private menuRequestCount = 0;
+  private nutritionRequestCount = 0;
+  private retryRequestCount = 0;
+  private readonly startedAtMs: number;
 
   constructor(options: PsuRetrieverOptions = {}) {
     if (!options.fetchImpl && !options.allowNetwork) {
@@ -52,13 +69,25 @@ export class PsuHttpRetriever {
     this.maximumAttempts = boundedInteger(options.maximumAttempts ?? 3, "maximum attempts", 1, 5);
     this.baseBackoffMs = boundedInteger(options.baseBackoffMs ?? 1_000, "base backoff", 0, 60_000);
     this.maximumRequests = boundedInteger(options.maximumRequests ?? 1_000, "maximum requests", 1, 2_000);
+    this.maximumElapsedMs = boundedInteger(options.maximumElapsedMs ?? 60 * 60_000, "maximum elapsed time", 1, 60 * 60_000);
     this.jitterMs = boundedInteger(options.jitterMs ?? 250, "jitter", 0, 5_000);
     this.random = options.random ?? Math.random;
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.now = options.now ?? Date.now;
+    this.startedAtMs = this.now();
   }
 
   get requestCount(): number { return this.requestCountValue; }
+
+  get telemetry(): PsuRequestTelemetry {
+    return {
+      requestCount: this.requestCountValue,
+      mealOptionRequests: this.mealOptionRequestCount,
+      menuRequests: this.menuRequestCount,
+      nutritionRequests: this.nutritionRequestCount,
+      retryRequests: this.retryRequestCount,
+    };
+  }
 
   retrieveMealOptions(form: {
     readonly sourceDate: string;
@@ -69,7 +98,7 @@ export class PsuHttpRetriever {
       selMeal: "",
       selCampus: form.sourceCampusId,
     });
-    return this.enqueue(() => this.retrieveWithRetry(PSU_MENU_URL, {
+    return this.enqueue(() => this.retrieveWithRetry("meal-options", PSU_MENU_URL, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded;charset=UTF-8" },
       body,
@@ -86,7 +115,7 @@ export class PsuHttpRetriever {
       selMeal: form.sourceMeal,
       selCampus: form.sourceCampusId,
     });
-    return this.enqueue(() => this.retrieveWithRetry(PSU_MENU_URL, {
+    return this.enqueue(() => this.retrieveWithRetry("menu", PSU_MENU_URL, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded;charset=UTF-8" },
       body,
@@ -95,6 +124,7 @@ export class PsuHttpRetriever {
 
   retrieveNutrition(sourceHandle: string): Promise<RetrievedHtml> {
     return this.enqueue(() => this.retrieveWithRetry(
+      "nutrition",
       nutritionUrlForHandle(sourceHandle),
       { method: "GET" },
       262_144,
@@ -108,6 +138,7 @@ export class PsuHttpRetriever {
   }
 
   private async retrieveWithRetry(
+    kind: PsuRequestKind,
     url: string,
     init: RequestInit,
     maximumBytes: number,
@@ -116,7 +147,7 @@ export class PsuHttpRetriever {
     for (let attempt = 1; attempt <= this.maximumAttempts; attempt += 1) {
       await this.pace();
       try {
-        return await this.retrieveOnce(url, init, maximumBytes);
+        return await this.retrieveOnce(kind, attempt, url, init, maximumBytes);
       } catch (error) {
         lastError = error;
         if (!(error instanceof PsuRetrievalError) || !error.retryable || attempt === this.maximumAttempts) {
@@ -137,6 +168,8 @@ export class PsuHttpRetriever {
   }
 
   private async retrieveOnce(
+    kind: PsuRequestKind,
+    attempt: number,
     url: string,
     init: RequestInit,
     maximumBytes: number,
@@ -147,7 +180,14 @@ export class PsuHttpRetriever {
       if (this.requestCountValue >= this.maximumRequests) {
         throw new PsuRetrievalError("PSU release request limit was reached.", false);
       }
+      if (this.now() - this.startedAtMs >= this.maximumElapsedMs) {
+        throw new PsuRetrievalError("PSU ingestion time budget was reached.", false);
+      }
       this.requestCountValue += 1;
+      if (kind === "meal-options") this.mealOptionRequestCount += 1;
+      else if (kind === "menu") this.menuRequestCount += 1;
+      else this.nutritionRequestCount += 1;
+      if (attempt > 1) this.retryRequestCount += 1;
       const response = await this.fetchImpl(url, { ...init, redirect: "manual", signal: controller.signal });
 
       if (!response.ok) {

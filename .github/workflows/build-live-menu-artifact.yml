@@ -41,12 +41,17 @@ jobs:
           "import { sourceDateFromIso } from './infrastructure/psu/constants.ts';
           sourceDateFromIso(process.env.SERVICE_DATE ?? '')"
       - name: Restore versioned validated nutrition cache
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        id: nutrition-cache-restore
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: work/psu-field-release-cache/lionlog.psu-nutrition.v2
-          key: lionlog-psu-nutrition-v2-psu-html-v2-${{ inputs.service_date }}
+          key: lionlog-psu-nutrition-v2-psu-html-v2-${{ inputs.service_date }}-${{ github.run_id }}
+          restore-keys: |
+            lionlog-psu-nutrition-v2-psu-html-v2-${{ inputs.service_date }}-
       - run: npm run validate:psu-release-cache
       - name: Run trusted source-driven field-release ingestion
+        id: ingestion
+        continue-on-error: true
         env:
           CI: "true"
           LIONLOG_ALLOW_PSU_NETWORK: "I_UNDERSTAND_THIS_CONTACTS_PSU"
@@ -57,7 +62,23 @@ jobs:
           --date="$SERVICE_DATE"
           --cache-dir=work/psu-field-release-cache
           --report=work/psu-field-release/report.json
-      - run: npm run validate:psu-release-cache
+      - name: Validate cache after ingestion attempt
+        id: nutrition-cache-validation
+        if: always() && steps.ingestion.outcome != 'skipped'
+        run: npm run validate:psu-release-cache
+      - name: Preserve validated nutrition cache for a bounded resume
+        if: >-
+          always() &&
+          steps.ingestion.outcome != 'skipped' &&
+          steps.nutrition-cache-validation.outcome == 'success' &&
+          hashFiles('work/psu-field-release-cache/lionlog.psu-nutrition.v2/*.json') != ''
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: work/psu-field-release-cache/lionlog.psu-nutrition.v2
+          key: lionlog-psu-nutrition-v2-psu-html-v2-${{ inputs.service_date }}-${{ github.run_id }}
+      - name: Fail closed before publication when ingestion failed
+        if: always() && steps.ingestion.outcome != 'success'
+        run: exit 1
       - name: Export the exact validated release set
         run: >-
           npm run export:psu-static --

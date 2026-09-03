@@ -184,7 +184,15 @@ test("retriever honors bounded Retry-After and enforces a total request limit", 
   assert.equal((await retriever.retrieveNutrition("900000001")).html, "<html>ok</html>");
   assert.deepEqual(sleeps, [2_000]);
   assert.equal(retriever.requestCount, 2);
+  assert.deepEqual(retriever.telemetry, {
+    requestCount: 2,
+    mealOptionRequests: 0,
+    menuRequests: 0,
+    nutritionRequests: 2,
+    retryRequests: 1,
+  });
   await assert.rejects(retriever.retrieveNutrition("900000002"), /request limit/i);
+  assert.equal(retriever.requestCount, 2);
 });
 
 test("release pacing applies at least the minimum interval plus bounded jitter", async () => {
@@ -202,6 +210,27 @@ test("release pacing applies at least the minimum interval plus bounded jitter",
   await retriever.retrieveNutrition("900000001");
   await retriever.retrieveNutrition("900000002");
   assert.deepEqual(sleeps, [1_125]);
+});
+
+test("retriever elapsed-time guard fails before another upstream request", async () => {
+  let now = 1_000;
+  let attempts = 0;
+  const retriever = new PsuHttpRetriever({
+    fetchImpl: async (input) => {
+      attempts += 1;
+      return htmlResponse("<html></html>", String(input));
+    },
+    minimumIntervalMs: 0,
+    jitterMs: 0,
+    maximumAttempts: 1,
+    maximumElapsedMs: 100,
+    now: () => now,
+  });
+  await retriever.retrieveNutrition("900000001");
+  now += 100;
+  await assert.rejects(retriever.retrieveNutrition("900000002"), /time budget/i);
+  assert.equal(attempts, 1);
+  assert.equal(retriever.requestCount, 1);
 });
 
 function testRetriever(

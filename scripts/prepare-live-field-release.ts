@@ -6,8 +6,13 @@ import { parsePsuMealOptionsHtml } from "../infrastructure/psu/menu-parser.ts";
 import {
   buildReleaseQueries,
   PSU_RELEASE_HALL_IDS,
+  PSU_RELEASE_MAXIMUM_ATTEMPTS_PER_OPERATION,
   PSU_RELEASE_MAXIMUM_ITEMS,
   PSU_RELEASE_MAXIMUM_REQUESTS,
+  PSU_RELEASE_MAXIMUM_UNIQUE_NUTRITION_OBSERVATIONS,
+  PSU_RELEASE_MAXIMUM_JITTER_MS,
+  PSU_RELEASE_MINIMUM_INTERVAL_MS,
+  PSU_RELEASE_REQUEST_BUDGET,
   validatePsuReleaseReport,
 } from "../infrastructure/psu/release-plan.ts";
 import { PsuHttpRetriever } from "../infrastructure/psu/retriever.ts";
@@ -23,12 +28,13 @@ const reportPath = path.resolve(argumentsByName.get("report") ?? "work/psu-field
 const startedAt = new Date();
 const retriever = new PsuHttpRetriever({
   allowNetwork: true,
-  minimumIntervalMs: 1_000,
-  jitterMs: 250,
+  minimumIntervalMs: PSU_RELEASE_MINIMUM_INTERVAL_MS,
+  jitterMs: PSU_RELEASE_MAXIMUM_JITTER_MS,
   timeoutMs: 10_000,
-  maximumAttempts: 3,
+  maximumAttempts: PSU_RELEASE_MAXIMUM_ATTEMPTS_PER_OPERATION,
   baseBackoffMs: 1_000,
   maximumRequests: PSU_RELEASE_MAXIMUM_REQUESTS,
+  maximumElapsedMs: PSU_RELEASE_REQUEST_BUDGET.ingestionWindowMs,
 });
 const store = new FilePsuSnapshotStore(cacheDirectory);
 const sourceDate = sourceDateFromIso(serviceDate);
@@ -52,6 +58,7 @@ const pipeline = new PsuIngestionPipeline(retriever, store, {
   maximumStationsPerQuery: 100,
   maximumItemsPerQuery: 1_000,
   maximumNutritionHandlesPerQuery: 1_000,
+  maximumNutritionHandlesTotal: PSU_RELEASE_MAXIMUM_UNIQUE_NUTRITION_OBSERVATIONS,
 });
 const queryReports = [];
 let itemCount = 0;
@@ -59,29 +66,36 @@ let sourceObservationCount = 0;
 let invalidNameOmissions = 0;
 let nutritionRequests = 0;
 let nutritionCacheHits = 0;
-for (const query of queries) {
-  const result = await pipeline.run(query);
-  if (result.state !== "live") throw new Error(`Release query failed closed (${query.hallId}/${query.mealPeriodId}): ${result.error.message}`);
-  itemCount += result.report.itemCount;
-  sourceObservationCount += result.report.sourceObservationCount;
-  invalidNameOmissions += result.report.omissions["invalid-name"];
-  nutritionRequests += result.report.nutritionRequests;
-  nutritionCacheHits += result.report.nutritionCacheHits;
-  if (itemCount > PSU_RELEASE_MAXIMUM_ITEMS) throw new Error("Release item count exceeded its bound.");
-  queryReports.push({
-    serviceDate,
-    hallId: query.hallId,
-    mealPeriodId: query.mealPeriodId,
-    sourceMeal: result.snapshot.query.sourceMeal,
-    recognizedEmpty: result.report.sourceObservationCount === 0,
-    itemCount: result.report.itemCount,
-    coverage: result.report.coverage,
-    sourceObservationCount: result.report.sourceObservationCount,
-    publishedObservationCount: result.report.publishedObservationCount,
-    omissions: result.report.omissions,
-    snapshotId: result.snapshot.snapshotId,
-    retrievedAt: result.snapshot.retrievedAt,
-  });
+writeAggregateProgress("planned", queries.length);
+try {
+  for (const query of queries) {
+    const result = await pipeline.run(query);
+    if (result.state !== "live") throw new Error(`Release query failed closed: ${result.error.message}`);
+    itemCount += result.report.itemCount;
+    sourceObservationCount += result.report.sourceObservationCount;
+    invalidNameOmissions += result.report.omissions["invalid-name"];
+    nutritionRequests += result.report.nutritionRequests;
+    nutritionCacheHits += result.report.nutritionCacheHits;
+    if (itemCount > PSU_RELEASE_MAXIMUM_ITEMS) throw new Error("Release item count exceeded its bound.");
+    queryReports.push({
+      serviceDate,
+      hallId: query.hallId,
+      mealPeriodId: query.mealPeriodId,
+      sourceMeal: result.snapshot.query.sourceMeal,
+      recognizedEmpty: result.report.sourceObservationCount === 0,
+      itemCount: result.report.itemCount,
+      coverage: result.report.coverage,
+      sourceObservationCount: result.report.sourceObservationCount,
+      publishedObservationCount: result.report.publishedObservationCount,
+      omissions: result.report.omissions,
+      snapshotId: result.snapshot.snapshotId,
+      retrievedAt: result.snapshot.retrievedAt,
+    });
+    writeAggregateProgress("query-complete", queries.length);
+  }
+} catch (error) {
+  writeAggregateProgress("failed", queries.length);
+  throw error;
 }
 
 const report = validatePsuReleaseReport({
@@ -104,6 +118,23 @@ const report = validatePsuReleaseReport({
 });
 await writeJsonAtomically(reportPath, report);
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+
+function writeAggregateProgress(phase: "planned" | "query-complete" | "failed", plannedQueries: number): void {
+  process.stdout.write(`${JSON.stringify({
+    event: "lionlog.psu-field-release-progress.v1",
+    phase,
+    plannedQueries,
+    completedQueries: pipeline.telemetry.completedQueries,
+    uniqueNutritionObservations: pipeline.telemetry.uniqueNutritionObservations,
+    nutritionCacheHits: pipeline.telemetry.nutritionCacheHits,
+    requestBudget: {
+      maximumUpstreamAttempts: PSU_RELEASE_MAXIMUM_REQUESTS,
+      maximumUniqueNutritionObservations: PSU_RELEASE_MAXIMUM_UNIQUE_NUTRITION_OBSERVATIONS,
+      maximumAttemptsPerOperation: PSU_RELEASE_REQUEST_BUDGET.maximumAttemptsPerOperation,
+    },
+    upstream: retriever.telemetry,
+  })}\n`);
+}
 
 function parseArguments(values: readonly string[]): Map<string, string> {
   const parsed = new Map<string, string>();

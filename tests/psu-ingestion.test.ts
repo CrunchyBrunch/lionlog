@@ -54,7 +54,15 @@ test("two representative hall/meal fixtures produce validated live snapshots", a
 test("a repeated ingestion reuses cached nutrition while refreshing the menu", async () => {
   const calls = { menu: 0, nutrition: 0 };
   const store = new MemoryPsuSnapshotStore();
-  const pipeline = pipelineFor(fixtureFetch(calls), store);
+  const retriever = new PsuHttpRetriever({
+    fetchImpl: fixtureFetch(calls),
+    minimumIntervalMs: 0,
+    jitterMs: 0,
+    maximumAttempts: 2,
+    sleep: () => Promise.resolve(),
+    now: () => now.getTime(),
+  });
+  const pipeline = new PsuIngestionPipeline(retriever, store, { now: () => now });
 
   const first = await pipeline.run(eastLunchQuery);
   const second = await pipeline.run(eastLunchQuery);
@@ -66,6 +74,31 @@ test("a repeated ingestion reuses cached nutrition while refreshing the menu", a
   assert.equal(second.report.nutritionRequests, 0);
   assert.equal(second.report.nutritionCacheHits, 2);
   assert.deepEqual(calls, { menu: 2, nutrition: 2 });
+  assert.equal(retriever.requestCount, 4);
+  assert.equal(pipeline.telemetry.uniqueNutritionObservations, 2);
+  assert.equal(pipeline.telemetry.nutritionCacheHits, 2);
+});
+
+test("duplicate source handles within one menu use one nutrition request", async () => {
+  const calls = { menu: 0, nutrition: 0 };
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/daily-menu.cfm")) {
+      calls.menu += 1;
+      const html = (await fixture("menu-east-lunch.sanitized.html"))
+        .replaceAll("900000002", "900000001")
+        .replaceAll("Fixture Brown Rice", "Fixture Lemon Chicken");
+      return htmlResponse(html, url.href);
+    }
+    calls.nutrition += 1;
+    return htmlResponse(await fixture("nutrition-900000001.sanitized.html"), url.href);
+  };
+  const result = await runFixtureIngestion(eastLunchQuery, fetchImpl);
+  assert.equal(result.state, "live");
+  if (result.state !== "live") return;
+  assert.equal(result.report.sourceObservationCount, 2);
+  assert.equal(result.report.nutritionRequests, 1);
+  assert.deepEqual(calls, { menu: 1, nutrition: 1 });
 });
 
 test("PsuMenuProvider maps live, cached, stale, and unavailable states without sample fallback", async () => {
@@ -203,6 +236,27 @@ test("ingestion fails before nutrition retrieval when a per-query release bound 
   assert.equal(result.state, "unavailable");
   assert.match(result.error.message, /item bound/i);
   assert.deepEqual(calls, { menu: 1, nutrition: 0 });
+});
+
+test("total unique nutrition-observation exhaustion fails closed before partial publication", async () => {
+  const calls = { menu: 0, nutrition: 0 };
+  const store = new MemoryPsuSnapshotStore();
+  const retriever = new PsuHttpRetriever({
+    fetchImpl: fixtureFetch(calls),
+    minimumIntervalMs: 0,
+    jitterMs: 0,
+    maximumAttempts: 1,
+    now: () => now.getTime(),
+  });
+  const pipeline = new PsuIngestionPipeline(retriever, store, {
+    now: () => now,
+    maximumNutritionHandlesTotal: 1,
+  });
+  const result = await pipeline.run(eastLunchQuery);
+  assert.equal(result.state, "unavailable");
+  if (result.state === "unavailable") assert.match(result.error.message, /total unique nutrition-observation bound/i);
+  assert.deepEqual(calls, { menu: 1, nutrition: 0 });
+  assert.equal((await store.listMenus()).length, 0);
 });
 
 test("structural failures are not retried and preserve last-known-good as stale", async () => {

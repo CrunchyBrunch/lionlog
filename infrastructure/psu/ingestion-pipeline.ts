@@ -60,6 +60,13 @@ export interface PsuIngestionPipelineOptions {
   readonly maximumStationsPerQuery?: number;
   readonly maximumItemsPerQuery?: number;
   readonly maximumNutritionHandlesPerQuery?: number;
+  readonly maximumNutritionHandlesTotal?: number;
+}
+
+export interface PsuIngestionTelemetry {
+  readonly completedQueries: number;
+  readonly uniqueNutritionObservations: number;
+  readonly nutritionCacheHits: number;
 }
 
 export class PsuIngestionPipeline {
@@ -70,6 +77,10 @@ export class PsuIngestionPipeline {
   private readonly maximumStationsPerQuery: number;
   private readonly maximumItemsPerQuery: number;
   private readonly maximumNutritionHandlesPerQuery: number;
+  private readonly maximumNutritionHandlesTotal: number;
+  private readonly observedNutritionHandles = new Set<string>();
+  private completedQueryCount = 0;
+  private nutritionCacheHitCount = 0;
 
   constructor(
     retriever: PsuHttpRetriever,
@@ -83,11 +94,25 @@ export class PsuIngestionPipeline {
     this.maximumStationsPerQuery = boundedLimit(options.maximumStationsPerQuery ?? 100, "stations", 100);
     this.maximumItemsPerQuery = boundedLimit(options.maximumItemsPerQuery ?? 1_000, "items", 1_000);
     this.maximumNutritionHandlesPerQuery = boundedLimit(options.maximumNutritionHandlesPerQuery ?? 1_000, "nutrition handles", 1_000);
+    this.maximumNutritionHandlesTotal = boundedLimit(
+      options.maximumNutritionHandlesTotal ?? 5_000,
+      "total nutrition handles",
+      5_000,
+    );
+  }
+
+  get telemetry(): PsuIngestionTelemetry {
+    return {
+      completedQueries: this.completedQueryCount,
+      uniqueNutritionObservations: this.observedNutritionHandles.size,
+      nutritionCacheHits: this.nutritionCacheHitCount,
+    };
   }
 
   async run(query: MenuQuery): Promise<PsuIngestionResult> {
     try {
       const snapshotResult = await this.ingest(query);
+      this.completedQueryCount += 1;
       return { state: "live", ...snapshotResult };
     } catch (error) {
       const normalizedError = error instanceof Error ? error : new Error(String(error));
@@ -144,12 +169,18 @@ export class PsuIngestionPipeline {
     if (uniqueHandles.length > this.maximumNutritionHandlesPerQuery) {
       throw new Error("PSU menu exceeded the release nutrition-handle bound.");
     }
+    const nextObservedHandles = new Set([...this.observedNutritionHandles, ...uniqueHandles]);
+    if (nextObservedHandles.size > this.maximumNutritionHandlesTotal) {
+      throw new Error("PSU release exceeded the total unique nutrition-observation bound.");
+    }
+    for (const sourceHandle of uniqueHandles) this.observedNutritionHandles.add(sourceHandle);
     for (const sourceHandle of uniqueHandles) {
       const storedNutrition = await this.store.readNutrition(sourceHandle);
       const cached = storedNutrition ? validatePsuNutritionCacheEntry(storedNutrition) : null;
       if (cached && this.now().getTime() <= Date.parse(cached.freshUntil)) {
         nutritionByHandle.set(sourceHandle, nutritionFromCacheEntry(cached));
         nutritionCacheHits += 1;
+        this.nutritionCacheHitCount += 1;
         continue;
       }
       const response = await this.retriever.retrieveNutrition(sourceHandle);

@@ -13,8 +13,70 @@ export const PSU_RELEASE_HALL_IDS = [
 ] as const;
 export const PSU_RELEASE_MAXIMUM_QUERIES = 20;
 export const PSU_RELEASE_MAXIMUM_ITEMS = 5_000;
-export const PSU_RELEASE_MAXIMUM_REQUESTS = 750;
+export const PSU_RELEASE_WORKFLOW_TIMEOUT_MS = 45 * 60 * 1_000;
+export const PSU_RELEASE_NON_INGESTION_RESERVE_MS = 10 * 60 * 1_000;
+export const PSU_RELEASE_MINIMUM_INTERVAL_MS = 1_000;
+export const PSU_RELEASE_MAXIMUM_JITTER_MS = 250;
+export const PSU_RELEASE_MAXIMUM_ATTEMPTS_PER_OPERATION = 3;
+export const PSU_RELEASE_REQUEST_BUDGET = derivePsuReleaseRequestBudget({
+  workflowTimeoutMs: PSU_RELEASE_WORKFLOW_TIMEOUT_MS,
+  nonIngestionReserveMs: PSU_RELEASE_NON_INGESTION_RESERVE_MS,
+  minimumIntervalMs: PSU_RELEASE_MINIMUM_INTERVAL_MS,
+  maximumJitterMs: PSU_RELEASE_MAXIMUM_JITTER_MS,
+  hallDiscoveryRequests: PSU_RELEASE_HALL_IDS.length,
+  maximumMenuQueries: PSU_RELEASE_MAXIMUM_QUERIES,
+  maximumAttemptsPerOperation: PSU_RELEASE_MAXIMUM_ATTEMPTS_PER_OPERATION,
+});
+export const PSU_RELEASE_MAXIMUM_REQUESTS = PSU_RELEASE_REQUEST_BUDGET.maximumUpstreamAttempts;
+export const PSU_RELEASE_MAXIMUM_UNIQUE_NUTRITION_OBSERVATIONS =
+  PSU_RELEASE_REQUEST_BUDGET.maximumUniqueNutritionObservations;
 export const PSU_RELEASE_MAXIMUM_INVALID_NAME_OMISSIONS = 5;
+
+export interface PsuReleaseRequestBudgetInput {
+  readonly workflowTimeoutMs: number;
+  readonly nonIngestionReserveMs: number;
+  readonly minimumIntervalMs: number;
+  readonly maximumJitterMs: number;
+  readonly hallDiscoveryRequests: number;
+  readonly maximumMenuQueries: number;
+  readonly maximumAttemptsPerOperation: number;
+}
+
+export interface PsuReleaseRequestBudget {
+  readonly ingestionWindowMs: number;
+  readonly maximumPacedRequestIntervalMs: number;
+  readonly maximumUpstreamAttempts: number;
+  readonly maximumUniqueNutritionObservations: number;
+  readonly maximumAttemptsPerOperation: number;
+}
+
+export function derivePsuReleaseRequestBudget(input: PsuReleaseRequestBudgetInput): PsuReleaseRequestBudget {
+  for (const [field, value] of Object.entries(input)) {
+    if (!Number.isInteger(value) || value < 0) throw new Error(`Invalid PSU release request-budget ${field}.`);
+  }
+  if (input.maximumAttemptsPerOperation < 1 || input.maximumAttemptsPerOperation > 5) {
+    throw new Error("PSU release retries must be bounded from one through five attempts per operation.");
+  }
+  const ingestionWindowMs = input.workflowTimeoutMs - input.nonIngestionReserveMs;
+  const maximumPacedRequestIntervalMs = input.minimumIntervalMs + input.maximumJitterMs;
+  if (ingestionWindowMs <= 0 || maximumPacedRequestIntervalMs <= 0) {
+    throw new Error("PSU release request budget has no bounded ingestion window.");
+  }
+  const maximumUpstreamAttempts = Math.floor(ingestionWindowMs / maximumPacedRequestIntervalMs);
+  const maximumUniqueNutritionObservations = maximumUpstreamAttempts
+    - input.hallDiscoveryRequests
+    - input.maximumMenuQueries;
+  if (maximumUniqueNutritionObservations < 1) {
+    throw new Error("PSU release request budget leaves no capacity for nutrition observations.");
+  }
+  return {
+    ingestionWindowMs,
+    maximumPacedRequestIntervalMs,
+    maximumUpstreamAttempts,
+    maximumUniqueNutritionObservations,
+    maximumAttemptsPerOperation: input.maximumAttemptsPerOperation,
+  };
+}
 
 const omissionSchema = z.object({ "invalid-name": z.number().int().min(0).max(PSU_RELEASE_MAXIMUM_INVALID_NAME_OMISSIONS) }).strict();
 
