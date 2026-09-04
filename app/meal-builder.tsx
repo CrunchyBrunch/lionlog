@@ -263,6 +263,11 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
               <strong>{menu.source.label}.</strong>{" "}
               {menu.source.retrievedAt && `Retrieved ${formatRetrievedAt(menu.source.retrievedAt)} (${formatAge(menu.source.retrievedAt)}). `}
               {menu.source.warning && `${menu.source.warning} `}
+              {menu.source.completeness === "partial" && (
+                <strong>
+                  This snapshot is partial: {menu.source.omittedObservationCount} source item was omitted because PSU did not provide a trustworthy display name.{" "}
+                </strong>
+              )}
               {menu.source.sourceUrl && (
                 <a href={menu.source.sourceUrl} target="_blank" rel="noreferrer">View the public source.</a>
               )}{" "}
@@ -273,7 +278,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
       </section>
 
       <footer className="milestone-note">
-        <span>v0.2.0-alpha.3</span>
+        <span>v0.2.0-alpha.4</span>
         <p>Cached public-menu delivery · no official PSU API.</p>
       </footer>
     </main>

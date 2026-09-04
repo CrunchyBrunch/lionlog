@@ -48,11 +48,25 @@ export interface PsuIngestionReport {
   readonly nutritionCacheHits: number;
   readonly stationCount: number;
   readonly itemCount: number;
+  readonly sourceObservationCount: number;
+  readonly publishedObservationCount: number;
+  readonly coverage: "complete" | "partial";
+  readonly omissions: { readonly "invalid-name": number };
 }
 
 export interface PsuIngestionPipelineOptions {
   readonly policy?: PsuIngestionPolicy;
   readonly now?: () => Date;
+  readonly maximumStationsPerQuery?: number;
+  readonly maximumItemsPerQuery?: number;
+  readonly maximumNutritionHandlesPerQuery?: number;
+  readonly maximumNutritionHandlesTotal?: number;
+}
+
+export interface PsuIngestionTelemetry {
+  readonly completedQueries: number;
+  readonly uniqueNutritionObservations: number;
+  readonly nutritionCacheHits: number;
 }
 
 export class PsuIngestionPipeline {
@@ -60,6 +74,13 @@ export class PsuIngestionPipeline {
   private readonly store: PsuSnapshotStore;
   private readonly policy: PsuIngestionPolicy;
   private readonly now: () => Date;
+  private readonly maximumStationsPerQuery: number;
+  private readonly maximumItemsPerQuery: number;
+  private readonly maximumNutritionHandlesPerQuery: number;
+  private readonly maximumNutritionHandlesTotal: number;
+  private readonly observedNutritionHandles = new Set<string>();
+  private completedQueryCount = 0;
+  private nutritionCacheHitCount = 0;
 
   constructor(
     retriever: PsuHttpRetriever,
@@ -70,11 +91,28 @@ export class PsuIngestionPipeline {
     this.store = store;
     this.policy = options.policy ?? defaultPsuIngestionPolicy;
     this.now = options.now ?? (() => new Date());
+    this.maximumStationsPerQuery = boundedLimit(options.maximumStationsPerQuery ?? 100, "stations", 100);
+    this.maximumItemsPerQuery = boundedLimit(options.maximumItemsPerQuery ?? 1_000, "items", 1_000);
+    this.maximumNutritionHandlesPerQuery = boundedLimit(options.maximumNutritionHandlesPerQuery ?? 1_000, "nutrition handles", 1_000);
+    this.maximumNutritionHandlesTotal = boundedLimit(
+      options.maximumNutritionHandlesTotal ?? 5_000,
+      "total nutrition handles",
+      5_000,
+    );
+  }
+
+  get telemetry(): PsuIngestionTelemetry {
+    return {
+      completedQueries: this.completedQueryCount,
+      uniqueNutritionObservations: this.observedNutritionHandles.size,
+      nutritionCacheHits: this.nutritionCacheHitCount,
+    };
   }
 
   async run(query: MenuQuery): Promise<PsuIngestionResult> {
     try {
       const snapshotResult = await this.ingest(query);
+      this.completedQueryCount += 1;
       return { state: "live", ...snapshotResult };
     } catch (error) {
       const normalizedError = error instanceof Error ? error : new Error(String(error));
@@ -114,6 +152,13 @@ export class PsuIngestionPipeline {
       sourceDate,
       sourceMeal: period.sourceValue,
     });
+    const itemCount = parsedMenu.stations.reduce((total, station) => total + station.items.length, 0);
+    if (parsedMenu.stations.length > this.maximumStationsPerQuery) {
+      throw new Error("PSU menu exceeded the release station bound.");
+    }
+    if (itemCount > this.maximumItemsPerQuery) {
+      throw new Error("PSU menu exceeded the release item bound.");
+    }
 
     const nutritionByHandle = new Map<string, ParsedPsuNutrition>();
     let nutritionRequests = 0;
@@ -121,12 +166,21 @@ export class PsuIngestionPipeline {
     const uniqueHandles = [...new Set(parsedMenu.stations.flatMap((station) =>
       station.items.map((item) => item.sourceHandle)
     ))];
+    if (uniqueHandles.length > this.maximumNutritionHandlesPerQuery) {
+      throw new Error("PSU menu exceeded the release nutrition-handle bound.");
+    }
+    const nextObservedHandles = new Set([...this.observedNutritionHandles, ...uniqueHandles]);
+    if (nextObservedHandles.size > this.maximumNutritionHandlesTotal) {
+      throw new Error("PSU release exceeded the total unique nutrition-observation bound.");
+    }
+    for (const sourceHandle of uniqueHandles) this.observedNutritionHandles.add(sourceHandle);
     for (const sourceHandle of uniqueHandles) {
       const storedNutrition = await this.store.readNutrition(sourceHandle);
       const cached = storedNutrition ? validatePsuNutritionCacheEntry(storedNutrition) : null;
       if (cached && this.now().getTime() <= Date.parse(cached.freshUntil)) {
         nutritionByHandle.set(sourceHandle, nutritionFromCacheEntry(cached));
         nutritionCacheHits += 1;
+        this.nutritionCacheHitCount += 1;
         continue;
       }
       const response = await this.retriever.retrieveNutrition(sourceHandle);
@@ -160,7 +214,18 @@ export class PsuIngestionPipeline {
         nutritionCacheHits,
         stationCount: snapshot.stations.length,
         itemCount: snapshot.stations.reduce((total, station) => total + station.items.length, 0),
+        sourceObservationCount: snapshot.coverage.sourceObservationCount,
+        publishedObservationCount: snapshot.coverage.publishedObservationCount,
+        coverage: snapshot.coverage.status,
+        omissions: snapshot.coverage.omissions,
       },
     };
   }
+}
+
+function boundedLimit(value: number, field: string, maximum: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > maximum) {
+    throw new Error(`PSU ingestion ${field} limit must be an integer from 1 through ${maximum}.`);
+  }
+  return value;
 }

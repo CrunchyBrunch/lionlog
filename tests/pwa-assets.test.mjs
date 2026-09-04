@@ -5,7 +5,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
-const releaseVersion = "0.2.0-alpha.3";
+const releaseVersion = "0.2.0-alpha.4";
 
 async function pngDimensions(relativePath) {
   const data = await readFile(path.join(projectRoot, relativePath));
@@ -42,7 +42,7 @@ test("service worker versions the shell and supports safe activation", async () 
   const source = await readFile(path.join(projectRoot, "public/sw.js"), "utf8");
 
   assert.match(source, /lionlog-shell-/);
-  assert.match(source, /v0\.2\.0-alpha\.3/);
+  assert.match(source, /v0\.2\.0-alpha\.4/);
   assert.match(source, /caches\.delete/);
   assert.match(source, /request\.mode === "navigate"/);
   assert.match(source, /caches\.match\(SCOPE_URL\)/);
@@ -58,7 +58,7 @@ test("service worker refuses redirected, cross-origin, or unmarked navigation do
   assert.match(source, /response\.type === "opaqueredirect"/);
   assert.match(source, /responseUrl\.origin !== self\.location\.origin/);
   assert.match(source, /contentType\.includes\("text\/html"\)/);
-  assert.match(source, /data-lionlog-shell="v0\.2\.0-alpha\.3"/);
+  assert.match(source, /data-lionlog-shell="v0\.2\.0-alpha\.4"/);
   assert.match(source, /if \(await isExpectedApplicationDocument\(response\)\)/);
 });
 
@@ -75,7 +75,7 @@ test("application-document verification accepts only the marked LionLog response
   vm.runInNewContext(source, context);
 
   function documentResponse({
-    body = '<html data-lionlog-shell="v0.2.0-alpha.3"></html>',
+    body = '<html data-lionlog-shell="v0.2.0-alpha.4"></html>',
     contentType = "text/html; charset=utf-8",
     redirected = false,
     type = "basic",
@@ -113,6 +113,8 @@ test("release version and brand colors stay consistent across the PWA surface", 
   assert.equal(packageJson.version, releaseVersion);
   assert.match(layout, new RegExp(`data-lionlog-shell="v${releaseVersion.replaceAll(".", "\\.")}"`));
   assert.match(mealBuilder, new RegExp(`v${releaseVersion.replaceAll(".", "\\.")}`));
+  assert.match(mealBuilder, /snapshot is partial/i);
+  assert.match(mealBuilder, /trustworthy display name/i);
   assert.match(serviceWorker, new RegExp(`CACHE_NAME = .*v${releaseVersion.replaceAll(".", "\\.")}`));
   assert.match(pwaRegister, /retained validated menus remain available when saved/i);
   assert.doesNotMatch(pwaRegister, /installed sample menu remains available/i);
@@ -154,7 +156,7 @@ test("browser bundle contains static delivery but no PSU retrieval or Node-only 
   const clientDirectory = path.join(projectRoot, "dist", "client");
   const files = await javascriptFiles(clientDirectory);
   const source = (await Promise.all(files.map((file) => readFile(file, "utf8")))).join("\n");
-  assert.match(source, /lionlog-menu-data-v1/);
+  assert.match(source, /lionlog-menu-data-v2/);
   for (const forbidden of [
     "PsuHttpRetriever",
     "parsePsuMenuHtml",
@@ -173,8 +175,15 @@ test("live and Pages workflows are explicit, bounded, and ordinary CI cannot inv
     readFile(path.join(projectRoot, ".github/workflows/ci.yml"), "utf8"),
   ]);
   assert.match(manualWorkflow, /workflow_dispatch:/);
-  assert.match(manualWorkflow, /LIVE_PSU_INGESTION/);
+  assert.match(manualWorkflow, /PREPARE_LIVE_PAGES_FIELD_RELEASE/);
+  assert.match(manualWorkflow, /github\.repository == 'CrunchyBrunch\/lionlog'/);
+  assert.match(manualWorkflow, /validate:psu-release-cache/);
+  assert.doesNotMatch(manualWorkflow, /deploy-pages|pages:\s*write|id-token:\s*write/);
   assert.match(manualWorkflow, /actions\/upload-artifact@/);
+  assert.match(
+    manualWorkflow,
+    /name: lionlog-alpha-4-field-release-\$\{\{ inputs\.service_date \}\}[\s\S]*?path: work\/pages-field-release\/site\/[\s\S]*?include-hidden-files: true[\s\S]*?if-no-files-found: error/,
+  );
   assert.doesNotMatch(manualWorkflow, /^\s*(?:schedule|push|pull_request):/m);
   assert.doesNotMatch(ciWorkflow, /ingest:psu|LIONLOG_ALLOW_PSU_NETWORK/);
   assert.match(pagesWorkflow, /workflow_dispatch:/);
@@ -192,12 +201,12 @@ test("live and Pages workflows are explicit, bounded, and ordinary CI cannot inv
   assert.match(deploymentWorkflow, /workflow_dispatch:/);
   assert.match(deploymentWorkflow, /^permissions: \{\}$/m);
   assert.match(deploymentWorkflow, /github\.ref == 'refs\/heads\/main'/);
-  assert.match(deploymentWorkflow, /permissions:\n\s+contents: read/);
-  assert.match(deploymentWorkflow, /permissions:\n\s+pages: write\n\s+id-token: write/);
-  assert.match(deploymentWorkflow, /environment:\n\s+name: github-pages/);
+  assert.match(deploymentWorkflow, /permissions:\r?\n\s+contents: read/);
+  assert.match(deploymentWorkflow, /permissions:\r?\n\s+pages: write\r?\n\s+id-token: write/);
+  assert.match(deploymentWorkflow, /environment:\r?\n\s+name: github-pages/);
   assert.match(deploymentWorkflow, /actions\/deploy-pages@[0-9a-f]{40}/);
   assert.match(deploymentWorkflow, /actions\/upload-artifact@[0-9a-f]{40}/);
-  assert.match(deploymentWorkflow, /name: github-pages\n/);
+  assert.match(deploymentWorkflow, /name: github-pages\r?\n/);
   assert.match(deploymentWorkflow, /prepare-pages-artifact\.ts/);
   assert.match(deploymentWorkflow, /LIONLOG_BASE_PATH: \/lionlog/);
   assert.doesNotMatch(deploymentWorkflow, /ingest:psu|LIONLOG_ALLOW_PSU_NETWORK|LIVE_PSU_INGESTION/);

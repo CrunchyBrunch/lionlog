@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { preparePagesArtifact, validatePagesArtifact } from "../scripts/prepare-pages-artifact.ts";
+import {
+  preparePagesArtifact,
+  validatePagesArtifact,
+  validatePublicationEntryPath,
+  validatePublicationPathList,
+} from "../scripts/prepare-pages-artifact.ts";
 
 test("Pages packaging retains only .nojekyll and survives a download-equivalent tar round trip", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "lionlog-pages-boundary-"));
@@ -45,10 +50,10 @@ test("Pages packaging retains only .nojekyll and survives a download-equivalent 
   }
 });
 
-test("Pages artifact validation rejects hidden configuration, menu data, source maps, and ingestion code", async () => {
+test("Pages artifact validation rejects hidden configuration, invalid menu data, source maps, and ingestion code", async () => {
   for (const [relativePath, content, message] of [
     [".env", "SECRET=value", /Unexpected hidden publication path/],
-    ["menu-data/v1/catalog.json", "{}", /Forbidden publication directory/],
+    ["menu-data/v2/catalog.json", "{}", /Invalid PSU catalog/],
     ["_next/static/app.js.map", "{}", /Forbidden publication file/],
     ["_next/static/app.js", "const selMenuDate = 'x';", /Forbidden browser ingestion code/],
   ] as const) {
@@ -74,6 +79,72 @@ test("Pages artifact validation requires an empty .nojekyll and rejects obsolete
     await writeFile(path.join(root, ".nojekyll"), "\n");
     await writeFile(path.join(root, "index.html"), '<a href="https://example.chatgpt.site/">old host</a> /lionlog/_next/ <link href="./manifest.webmanifest">');
     await assert.rejects(validatePagesArtifact(root), /Forbidden publication text/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("publication path validation rejects traversal, absolute paths, backslashes, casing, lookalikes, and normalized duplicates", () => {
+  for (const relativePath of [
+    "../menu-data/v2/catalog.json",
+    "/menu-data/v2/catalog.json",
+    "C:/menu-data/v2/catalog.json",
+    "menu-data\\v2\\catalog.json",
+    "Menu-Data/v2/catalog.json",
+    "ｍｅｎｕ－ｄａｔａ/v2/catalog.json",
+  ]) {
+    assert.throws(() => validatePublicationEntryPath(relativePath), /Unsafe publication path|menu-data path spelling|canonical ASCII/);
+  }
+  assert.throws(
+    () => validatePublicationPathList(["_next/static/App.js", "_next/static/app.js"]),
+    /Duplicate normalized publication paths/,
+  );
+});
+
+test("Pages artifact validation rejects file, hardlink, symlink, and empty-directory boundary entries", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "lionlog-pages-entry-types-"));
+  try {
+    const menuDataFile = path.join(root, "menu-data-file");
+    await writeSiteFixture(menuDataFile);
+    await writeFile(path.join(menuDataFile, "menu-data"), "not a directory");
+    await assert.rejects(validatePagesArtifact(menuDataFile), /menu-data must be a real publication directory/);
+
+    const hardlinkRoot = path.join(root, "hardlink");
+    await writeSiteFixture(hardlinkRoot);
+    await link(path.join(hardlinkRoot, "index.html"), path.join(hardlinkRoot, "menu-data"));
+    await assert.rejects(validatePagesArtifact(hardlinkRoot), /hardlinks/);
+
+    const emptyRoot = path.join(root, "empty-directory");
+    await writeSiteFixture(emptyRoot);
+    await mkdir(path.join(emptyRoot, "menu-data"));
+    await assert.rejects(validatePagesArtifact(emptyRoot), /missing its catalog|Unexpected or empty publication directory/);
+
+    const symlinkRoot = path.join(root, "symlink");
+    await writeSiteFixture(symlinkRoot);
+    try {
+      await symlink(path.join(symlinkRoot, "icons"), path.join(symlinkRoot, "menu-data"), "junction");
+      await assert.rejects(validatePagesArtifact(symlinkRoot), /symlinks/);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") t.diagnostic("Symlink creation is not permitted on this platform.");
+      else throw error;
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Pages artifact preparation removes partial output after validation failure", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "lionlog-pages-atomic-"));
+  try {
+    const source = path.join(root, "source");
+    const output = path.join(root, "output");
+    await writeSiteFixture(source);
+    await mkdir(path.join(source, "unexpected-empty"));
+    await mkdir(output);
+    await writeFile(path.join(output, "stale.txt"), "must not survive");
+    await assert.rejects(preparePagesArtifact(source, output), /Unexpected or empty publication directory/);
+    await assert.rejects(readFile(path.join(output, "index.html"), "utf8"), /ENOENT/);
+    await assert.rejects(readFile(path.join(output, "stale.txt"), "utf8"), /ENOENT/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -1,5 +1,6 @@
 import type { AdditionalNutrition, Allergen } from "../../domain/nutrition.ts";
 import { PsuStructuralError } from "./errors.ts";
+import { validateSourceName, type InvalidSourceNameReason } from "./source-name.ts";
 import {
   descendants,
   firstDescendant,
@@ -12,6 +13,7 @@ import {
 
 export interface ParsedPsuNutrition {
   readonly name: string | null;
+  readonly nameIssue: InvalidSourceNameReason | null;
   readonly servingLabel: string | null;
   readonly sourceQuantity: number | null;
   readonly sourceUnit: string | null;
@@ -85,8 +87,10 @@ export function parsePsuNutritionHtml(html: string): ParsedPsuNutrition {
     ? allergensText.split(",").map((value) => normalizeText(value)).filter(Boolean).map(parseAllergen)
     : [];
 
+  const validatedName = validateSourceName(normalizedText(title));
   return {
-    name: boundedText(normalizedText(title), "recipe title", 160),
+    name: validatedName.value,
+    nameIssue: validatedName.issue,
     servingLabel,
     sourceQuantity: serving.quantity,
     sourceUnit: serving.unit,
@@ -115,6 +119,7 @@ export function parsePsuNutritionHtml(html: string): ParsedPsuNutrition {
 function unavailableNutrition(): ParsedPsuNutrition {
   return {
     name: null,
+    nameIssue: "empty",
     servingLabel: null,
     sourceQuantity: null,
     sourceUnit: null,
