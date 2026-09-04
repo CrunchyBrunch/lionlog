@@ -180,6 +180,10 @@ test("live and Pages workflows are explicit, bounded, and ordinary CI cannot inv
   assert.match(manualWorkflow, /validate:psu-release-cache/);
   assert.doesNotMatch(manualWorkflow, /deploy-pages|pages:\s*write|id-token:\s*write/);
   assert.match(manualWorkflow, /actions\/upload-artifact@/);
+  assert.match(
+    manualWorkflow,
+    /name: lionlog-alpha-4-field-release-\$\{\{ inputs\.service_date \}\}[\s\S]*?path: work\/pages-field-release\/site\/[\s\S]*?include-hidden-files: true[\s\S]*?if-no-files-found: error/,
+  );
   assert.doesNotMatch(manualWorkflow, /^\s*(?:schedule|push|pull_request):/m);
   assert.doesNotMatch(ciWorkflow, /ingest:psu|LIONLOG_ALLOW_PSU_NETWORK/);
   assert.match(pagesWorkflow, /workflow_dispatch:/);

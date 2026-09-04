@@ -112,5 +112,6 @@ jobs:
         with:
           name: lionlog-alpha-4-field-release-${{ inputs.service_date }}
           path: work/pages-field-release/site/
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
