@@ -4,8 +4,9 @@ export const PSU_SOURCE_ORIGIN = "https://www.absecom.psu.edu";
 export const PSU_MENU_PATH = "/menus/user-pages/daily-menu.cfm";
 export const PSU_NUTRITION_PATH = "/menus/user-pages/nutrition-label.cfm";
 export const PSU_MENU_URL = `${PSU_SOURCE_ORIGIN}${PSU_MENU_PATH}`;
-export const PSU_SNAPSHOT_VERSION = "lionlog.psu-menu.v1";
-export const PSU_PARSER_VERSION = "psu-html.v1";
+export const PSU_SNAPSHOT_VERSION = "lionlog.psu-menu.v2";
+export const PSU_NUTRITION_CACHE_VERSION = "lionlog.psu-nutrition.v2";
+export const PSU_PARSER_VERSION = "psu-html.v2";
 
 export interface PsuHall extends DiningHall {
   readonly sourceCampusId: string;

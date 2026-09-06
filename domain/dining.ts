@@ -41,6 +41,8 @@ export interface MenuSource {
   readonly sourceUrl?: string | null;
   readonly snapshotVersion?: string;
   readonly warning?: string;
+  readonly completeness?: "complete" | "partial";
+  readonly omittedObservationCount?: number;
 }
 
 export type MenuDataState = "live" | "cached" | "stale" | "sample" | "unavailable";

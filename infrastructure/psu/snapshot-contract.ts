@@ -50,10 +50,27 @@ export const browserPsuNutritionSchema = z.object({
   }).strict(),
 }).strict();
 
+const browserPsuCoverageSchema = z.object({
+  status: z.enum(["complete", "partial"]),
+  sourceObservationCount: z.number().int().min(0).max(1_000),
+  publishedObservationCount: z.number().int().min(0).max(1_000),
+  omissions: z.object({ "invalid-name": z.number().int().min(0).max(1) }).strict(),
+}).strict().superRefine((coverage, context) => {
+  if (coverage.sourceObservationCount !== coverage.publishedObservationCount + coverage.omissions["invalid-name"]) {
+    context.addIssue({ code: "custom", message: "Snapshot coverage counts are inconsistent." });
+  }
+  if (coverage.status !== (coverage.omissions["invalid-name"] === 0 ? "complete" : "partial")) {
+    context.addIssue({ code: "custom", message: "Snapshot coverage status is inconsistent." });
+  }
+  if (coverage.sourceObservationCount > 0 && coverage.publishedObservationCount === 0) {
+    context.addIssue({ code: "custom", message: "A non-empty source menu cannot publish zero items." });
+  }
+});
+
 export const browserPsuSnapshotSchema = z.object({
   schemaVersion: z.literal(PSU_SNAPSHOT_VERSION),
   parserVersion: z.literal(PSU_PARSER_VERSION),
-  snapshotId: z.string().regex(/^psu:snapshot:v1:[a-f0-9]{64}$/),
+  snapshotId: z.string().regex(/^psu:snapshot:v2:[a-f0-9]{64}$/),
   query: z.object({
     serviceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     hallId: z.string().min(1).max(80),
@@ -66,6 +83,7 @@ export const browserPsuSnapshotSchema = z.object({
   cachedAt: z.string().datetime({ offset: true }),
   freshUntil: z.string().datetime({ offset: true }),
   retainUntil: z.string().datetime({ offset: true }),
+  coverage: browserPsuCoverageSchema,
   stations: z.array(z.object({
     id: z.string().regex(/^psu:station:v1:[a-f0-9]{64}$/),
     displayName: z.string().min(1).max(100),
@@ -74,6 +92,8 @@ export const browserPsuSnapshotSchema = z.object({
       sourceHandle: z.string().regex(/^\d+$/),
       sourceUrl: z.string().url().refine(isAllowedNutritionUrl, "Unexpected PSU nutrition URL"),
       name: z.string().min(1).max(160),
+      nameSource: z.enum(["menu-label", "nutrition-detail"]),
+      sourceMenuLabel: z.string().min(1).max(160).nullable(),
       stationId: z.string().regex(/^psu:station:v1:[a-f0-9]{64}$/),
       serving: z.object({
         label: z.string().min(1).max(80).nullable(),
@@ -84,7 +104,14 @@ export const browserPsuSnapshotSchema = z.object({
       dietaryTraits: z.array(dietaryTraitSchema).max(10),
       ingredients: z.string().min(1).max(20_000).nullable(),
       allergens: z.array(allergenSchema).max(20),
-    }).strict()).max(1_000),
+    }).strict().superRefine((item, itemContext) => {
+      if (item.nameSource === "menu-label" && item.sourceMenuLabel !== item.name) {
+        itemContext.addIssue({ code: "custom", message: "Menu-label provenance is inconsistent." });
+      }
+      if (item.nameSource === "nutrition-detail" && item.sourceMenuLabel !== null) {
+        itemContext.addIssue({ code: "custom", message: "Nutrition-title provenance must not contain a menu label." });
+      }
+    })).max(1_000),
   }).strict()).max(100),
 }).strict().superRefine((snapshot, context) => {
   const stationIds = new Set<string>();
@@ -120,6 +147,10 @@ export const browserPsuSnapshotSchema = z.object({
   const retainUntil = Date.parse(snapshot.retainUntil);
   if (!(retrievedAt <= cachedAt && cachedAt <= freshUntil && freshUntil <= retainUntil)) {
     context.addIssue({ code: "custom", message: "Snapshot timestamps are out of order." });
+  }
+  const publishedObservationCount = snapshot.stations.reduce((total, station) => total + station.items.length, 0);
+  if (publishedObservationCount !== snapshot.coverage.publishedObservationCount) {
+    context.addIssue({ code: "custom", message: "Snapshot item count does not match coverage metadata." });
   }
 });
 
@@ -159,11 +190,12 @@ export async function validatePsuSnapshotForBrowser(value: unknown): Promise<Bro
       observationIds.add(item.observationId);
     }
   }
-  const expectedSnapshotId = `psu:snapshot:v1:${await sha256([
+  const expectedSnapshotId = `psu:snapshot:v2:${await sha256([
     snapshot.query.serviceDate,
     snapshot.query.hallId,
     snapshot.query.mealPeriodId,
     snapshot.retrievedAt,
+    JSON.stringify(snapshot.coverage),
     JSON.stringify(snapshot.stations),
   ])}`;
   if (snapshot.snapshotId !== expectedSnapshotId) {

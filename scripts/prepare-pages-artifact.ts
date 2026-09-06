@@ -1,13 +1,15 @@
-import { copyFile, lstat, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { assertSnapshotMatchesCatalog, validatePsuPublicationCatalog } from "../infrastructure/psu/publication-catalog.ts";
+import { validatePsuSnapshot } from "../infrastructure/psu/snapshot-schema.ts";
 
 const REQUIRED_FILES = ["index.html", ".nojekyll", "manifest.webmanifest", "sw.js"] as const;
 const OMITTED_BUILD_METADATA = new Set([".vite", ".assetsignore"]);
 const ALLOWED_HIDDEN_PATH = ".nojekyll";
 const TEXT_EXTENSIONS = new Set(["", ".css", ".html", ".js", ".json", ".rsc", ".txt", ".webmanifest"]);
 const FORBIDDEN_EXTENSIONS = new Set([".bak", ".env", ".gz", ".key", ".log", ".map", ".p12", ".pem", ".pfx", ".tar", ".zip"]);
-const FORBIDDEN_SEGMENTS = new Set(["menu-data", "node_modules", "work"]);
+const FORBIDDEN_SEGMENTS = new Set(["node_modules", "work"]);
 const FORBIDDEN_TEXT = [
   /chatgpt\.site/i,
   /C:\\Users\\/i,
@@ -41,20 +43,45 @@ export async function preparePagesArtifact(sourceDirectory: string, outputDirect
     throw new Error("Pages artifact source and output must be separate directories.");
   }
 
-  await stat(source);
   await rm(output, { recursive: true, force: true });
-  await mkdir(output, { recursive: true });
-  await copyPublicationTree(source, output);
-  await validatePagesArtifact(output);
+  try {
+    const sourceDetails = await lstat(source);
+    if (sourceDetails.isSymbolicLink() || !sourceDetails.isDirectory()) {
+      throw new Error("Pages artifact source must be a real directory.");
+    }
+    await validatePagesArtifactTree(source, true);
+    await mkdir(output, { recursive: true });
+    await copyPublicationTree(source, output);
+    await validatePagesArtifact(output);
+  } catch (error) {
+    await rm(output, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 export async function validatePagesArtifact(directory: string): Promise<string[]> {
   const root = path.resolve(directory);
-  const files = await listPublicationFiles(root);
+  return validatePagesArtifactTree(root, false);
+}
+
+async function validatePagesArtifactTree(root: string, omitRootBuildMetadata: boolean): Promise<string[]> {
+  const rootDetails = await lstat(root);
+  if (rootDetails.isSymbolicLink() || !rootDetails.isDirectory()) {
+    throw new Error("Pages artifact must be a real directory.");
+  }
+  const tree = await listPublicationEntries(root, omitRootBuildMetadata);
+  const { files, directories } = tree;
   const fileSet = new Set(files);
 
   for (const required of REQUIRED_FILES) {
     if (!fileSet.has(required)) throw new Error(`Pages artifact is missing ${required}.`);
+  }
+  await validateMenuDataPublication(root, tree);
+  const requiredDirectories = deriveAncestorDirectories(files);
+  for (const directory of directories) {
+    if (!requiredDirectories.has(directory)) {
+      throw new Error(`Unexpected or empty publication directory: ${directory}`);
+    }
   }
 
   const noJekyll = await readFile(path.join(root, ALLOWED_HIDDEN_PATH), "utf8");
@@ -87,7 +114,7 @@ export async function validatePagesArtifact(directory: string): Promise<string[]
   }
 
   for (const relativePath of files) {
-    validatePublicationPath(relativePath);
+    validatePublicationEntryPath(relativePath);
     const extension = path.extname(relativePath).toLowerCase();
     if (!TEXT_EXTENSIONS.has(extension) && path.basename(relativePath) !== "_headers") continue;
     const text = await readFile(path.join(root, relativePath), "utf8");
@@ -136,12 +163,13 @@ async function copyPublicationTree(source: string, output: string, relativeDirec
   for (const entry of await readdir(currentSource, { withFileTypes: true })) {
     const relativePath = path.posix.join(relativeDirectory.split(path.sep).join(path.posix.sep), entry.name);
     if (relativeDirectory === "" && OMITTED_BUILD_METADATA.has(entry.name)) continue;
-    validatePublicationPath(relativePath);
+    validatePublicationEntryPath(relativePath);
 
     const sourcePath = path.join(source, ...relativePath.split("/"));
     const outputPath = path.join(output, ...relativePath.split("/"));
     const details = await lstat(sourcePath);
     if (details.isSymbolicLink()) throw new Error(`Pages artifact cannot contain symlinks: ${relativePath}`);
+    if (details.isFile() && details.nlink > 1) throw new Error(`Pages artifact cannot contain hardlinks: ${relativePath}`);
     if (details.isDirectory()) {
       await mkdir(outputPath, { recursive: true });
       await copyPublicationTree(source, output, relativePath.split("/").join(path.sep));
@@ -154,50 +182,156 @@ async function copyPublicationTree(source: string, output: string, relativeDirec
   }
 }
 
-async function listPublicationFiles(root: string, relativeDirectory = ""): Promise<string[]> {
-  const files: string[] = [];
-  const current = path.join(root, ...relativeDirectory.split("/").filter(Boolean));
-  for (const entry of await readdir(current, { withFileTypes: true })) {
-    const relativePath = path.posix.join(relativeDirectory, entry.name);
-    const details = await lstat(path.join(root, ...relativePath.split("/")));
-    if (details.isSymbolicLink()) throw new Error(`Pages artifact cannot contain symlinks: ${relativePath}`);
-    if (details.isDirectory()) files.push(...await listPublicationFiles(root, relativePath));
-    else if (details.isFile()) files.push(relativePath);
-    else throw new Error(`Unsupported publication entry: ${relativePath}`);
-  }
-  return files.sort();
+interface PublicationTree {
+  files: string[];
+  directories: string[];
 }
 
-function validatePublicationPath(relativePath: string): void {
-  const normalized = relativePath.split(path.sep).join("/");
-  const segments = normalized.split("/");
+async function listPublicationEntries(root: string, omitRootBuildMetadata: boolean): Promise<PublicationTree> {
+  const files: string[] = [];
+  const directories: string[] = [];
+  await visitPublicationDirectory(root, "", omitRootBuildMetadata, files, directories);
+  validatePublicationPathList([...files, ...directories]);
+  return { files: files.sort(), directories: directories.sort() };
+}
+
+async function visitPublicationDirectory(
+  root: string,
+  relativeDirectory: string,
+  omitRootBuildMetadata: boolean,
+  files: string[],
+  directories: string[],
+): Promise<void> {
+  const current = path.join(root, ...relativeDirectory.split("/").filter(Boolean));
+  for (const entry of await readdir(current, { withFileTypes: true })) {
+    if (omitRootBuildMetadata && relativeDirectory === "" && OMITTED_BUILD_METADATA.has(entry.name)) continue;
+    const relativePath = path.posix.join(relativeDirectory, entry.name);
+    validatePublicationEntryPath(relativePath);
+    const details = await lstat(path.join(root, ...relativePath.split("/")));
+    if (details.isSymbolicLink()) throw new Error(`Pages artifact cannot contain symlinks: ${relativePath}`);
+    if (details.isDirectory()) {
+      directories.push(relativePath);
+      await visitPublicationDirectory(root, relativePath, omitRootBuildMetadata, files, directories);
+    } else if (details.isFile()) {
+      if (details.nlink > 1) throw new Error(`Pages artifact cannot contain hardlinks: ${relativePath}`);
+      files.push(relativePath);
+    }
+    else throw new Error(`Unsupported publication entry: ${relativePath}`);
+  }
+}
+
+export function validatePublicationEntryPath(relativePath: string): void {
+  if (relativePath !== relativePath.normalize("NFC") || /[^\x20-\x7e]/.test(relativePath)) {
+    throw new Error(`Publication paths must use canonical ASCII: ${relativePath}`);
+  }
+  if (relativePath.includes("\\") || path.posix.isAbsolute(relativePath) || /^[A-Za-z]:/.test(relativePath)) {
+    throw new Error(`Unsafe publication path: ${relativePath}`);
+  }
+  const normalized = path.posix.normalize(relativePath);
+  if (normalized !== relativePath) throw new Error(`Unsafe publication path: ${relativePath}`);
+  const segments = relativePath.split("/");
   if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
     throw new Error(`Unsafe publication path: ${relativePath}`);
   }
+  if (segments[0].normalize("NFKC").toLowerCase() === "menu-data" && segments[0] !== "menu-data") {
+    throw new Error(`Unexpected menu-data path spelling: ${relativePath}`);
+  }
   const hidden = segments.filter((segment) => segment.startsWith("."));
-  if (hidden.length > 0 && normalized !== ALLOWED_HIDDEN_PATH) {
+  if (hidden.length > 0 && relativePath !== ALLOWED_HIDDEN_PATH) {
     throw new Error(`Unexpected hidden publication path: ${relativePath}`);
   }
   if (segments.some((segment) => FORBIDDEN_SEGMENTS.has(segment.toLowerCase()))) {
     throw new Error(`Forbidden publication directory: ${relativePath}`);
   }
-  const extension = path.extname(normalized).toLowerCase();
+  const extension = path.extname(relativePath).toLowerCase();
   if (FORBIDDEN_EXTENSIONS.has(extension)) throw new Error(`Forbidden publication file: ${relativePath}`);
-  if (extension === ".html" && normalized !== "index.html" && normalized !== "404.html") {
+  if (extension === ".html" && relativePath !== "index.html" && relativePath !== "404.html") {
     throw new Error(`Unexpected HTML publication file: ${relativePath}`);
   }
+}
+
+export function validatePublicationPathList(paths: readonly string[]): void {
+  const normalizedPaths = new Map<string, string>();
+  for (const relativePath of paths) {
+    validatePublicationEntryPath(relativePath);
+    const key = relativePath.normalize("NFKC").toLowerCase();
+    const previous = normalizedPaths.get(key);
+    if (previous !== undefined) {
+      throw new Error(`Duplicate normalized publication paths: ${previous} and ${relativePath}`);
+    }
+    normalizedPaths.set(key, relativePath);
+  }
+}
+
+function deriveAncestorDirectories(files: readonly string[]): Set<string> {
+  const directories = new Set<string>();
+  for (const file of files) {
+    let directory = path.posix.dirname(file);
+    while (directory !== ".") {
+      directories.add(directory);
+      directory = path.posix.dirname(directory);
+    }
+  }
+  return directories;
+}
+
+async function validateMenuDataPublication(root: string, tree: PublicationTree): Promise<void> {
+  const { files, directories } = tree;
+  const menuFiles = files.filter((file) => file.startsWith("menu-data/"));
+  const hasMenuEntry = files.includes("menu-data")
+    || directories.includes("menu-data")
+    || files.some((file) => file.startsWith("menu-data/"))
+    || directories.some((directory) => directory.startsWith("menu-data/"));
+  if (!hasMenuEntry) return;
+  if (!directories.includes("menu-data") || files.includes("menu-data")) {
+    throw new Error("menu-data must be a real publication directory.");
+  }
+  const catalogPath = "menu-data/v2/catalog.json";
+  if (!menuFiles.includes(catalogPath)) throw new Error("Menu-data publication is missing its catalog.");
+  const catalog = validatePsuPublicationCatalog(JSON.parse(await readFile(path.join(root, ...catalogPath.split("/")), "utf8")));
+  const expectedFiles = new Set([catalogPath]);
+  let itemCount = 0;
+  let emptyCount = 0;
+  for (const entry of catalog.snapshots) {
+    const relative = `menu-data/v2/${entry.snapshotUrl.slice(2)}`;
+    expectedFiles.add(relative);
+    if (!menuFiles.includes(relative)) throw new Error(`Catalog-referenced snapshot is missing: ${relative}`);
+    const snapshot = validatePsuSnapshot(JSON.parse(await readFile(path.join(root, ...relative.split("/")), "utf8")));
+    assertSnapshotMatchesCatalog(snapshot, entry);
+    const snapshotItems = snapshot.stations.reduce((total, station) => total + station.items.length, 0);
+    itemCount += snapshotItems;
+    if (snapshotItems === 0) emptyCount += 1;
+  }
+  if (menuFiles.some((file) => !expectedFiles.has(file)) || expectedFiles.size !== menuFiles.length) {
+    throw new Error("Menu-data publication contains a file not referenced by the catalog.");
+  }
+  const expectedDirectories = deriveAncestorDirectories([...expectedFiles]);
+  const menuDirectories = directories.filter((directory) => directory === "menu-data" || directory.startsWith("menu-data/"));
+  if (
+    menuDirectories.some((directory) => !expectedDirectories.has(directory))
+    || [...expectedDirectories].some((directory) => directory.startsWith("menu-data") && !menuDirectories.includes(directory))
+  ) {
+    throw new Error("Menu-data publication contains an unexpected or missing directory.");
+  }
+  if (
+    catalog.publication.itemCount !== itemCount
+    || catalog.publication.recognizedEmptySnapshotCount !== emptyCount
+  ) throw new Error("Catalog publication coverage does not match its snapshots.");
 }
 
 async function main(): Promise<void> {
   const argumentsByName = new Map(
     process.argv.slice(2).map((argument) => {
       const [name, ...value] = argument.split("=");
-      return [name, value.join("=")] as const;
+      return [name, value.length === 0 ? "true" : value.join("=")] as const;
     }),
   );
   const validate = argumentsByName.get("--validate");
   if (validate) {
     const files = await validatePagesArtifact(validate);
+    if (argumentsByName.has("--require-menu-data") && !files.includes("menu-data/v2/catalog.json")) {
+      throw new Error("Pages artifact requires a validated menu-data publication.");
+    }
     console.log(`Validated Pages artifact: ${files.length} files.`);
     return;
   }

@@ -1,7 +1,7 @@
 const CACHE_PREFIX = "lionlog-shell-";
-const CACHE_NAME = `${CACHE_PREFIX}v0.2.0-alpha.3`;
+const CACHE_NAME = `${CACHE_PREFIX}v0.2.0-alpha.4`;
 const SCOPE_URL = new URL("./", self.registration.scope).href;
-const APPLICATION_DOCUMENT_MARKER = 'data-lionlog-shell="v0.2.0-alpha.3"';
+const APPLICATION_DOCUMENT_MARKER = 'data-lionlog-shell="v0.2.0-alpha.4"';
 const CORE_ASSETS = [
   SCOPE_URL,
   new URL("./manifest.webmanifest", self.registration.scope).href,

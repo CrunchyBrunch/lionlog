@@ -47,7 +47,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" data-lionlog-shell="v0.2.0-alpha.3">
+    <html lang="en" data-lionlog-shell="v0.2.0-alpha.4">
       <head>
         <link rel="manifest" href="./manifest.webmanifest" />
         <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png" />

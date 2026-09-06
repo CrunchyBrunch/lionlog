@@ -6,6 +6,7 @@ import {
   getPsuMealPeriod,
   nutritionUrlForHandle,
   PSU_MENU_URL,
+  PSU_NUTRITION_CACHE_VERSION,
   PSU_PARSER_VERSION,
   PSU_SNAPSHOT_VERSION,
   sourceDateFromIso,
@@ -57,6 +58,7 @@ export const psuNutritionSchema = z.object({
 
 export const psuNutritionDetailSchema = z.object({
   name: z.string().min(1).max(160).nullable(),
+  nameIssue: z.enum(["empty", "over-limit"]).nullable(),
   servingLabel: z.string().min(1).max(80).nullable(),
   sourceQuantity: z.number().finite().nonnegative().nullable(),
   sourceUnit: z.string().min(1).max(60).nullable(),
@@ -64,13 +66,19 @@ export const psuNutritionDetailSchema = z.object({
   dietaryTraits: z.array(dietaryTraitSchema).max(10),
   ingredients: z.string().min(1).max(20_000).nullable(),
   allergens: z.array(allergenSchema).max(20),
-}).strict();
+}).strict().superRefine((detail, context) => {
+  if ((detail.name === null) !== (detail.nameIssue !== null)) {
+    context.addIssue({ code: "custom", message: "Nutrition name and issue metadata are inconsistent." });
+  }
+});
 
 export const psuSnapshotItemSchema = z.object({
   observationId: z.string().regex(/^psu:observation:v1:[a-f0-9]{64}$/),
   sourceHandle: z.string().regex(/^\d+$/),
   sourceUrl: z.string().url().refine(isAllowedNutritionUrl, "Unexpected PSU nutrition URL"),
   name: z.string().min(1).max(160),
+  nameSource: z.enum(["menu-label", "nutrition-detail"]),
+  sourceMenuLabel: z.string().min(1).max(160).nullable(),
   stationId: z.string().regex(/^psu:station:v1:[a-f0-9]{64}$/),
   serving: z.object({
     label: z.string().min(1).max(80).nullable(),
@@ -81,12 +89,36 @@ export const psuSnapshotItemSchema = z.object({
   dietaryTraits: z.array(dietaryTraitSchema).max(10),
   ingredients: z.string().min(1).max(20_000).nullable(),
   allergens: z.array(allergenSchema).max(20),
-}).strict();
+}).strict().superRefine((item, context) => {
+  if (item.nameSource === "menu-label" && item.sourceMenuLabel !== item.name) {
+    context.addIssue({ code: "custom", message: "Menu-label provenance is inconsistent." });
+  }
+  if (item.nameSource === "nutrition-detail" && item.sourceMenuLabel !== null) {
+    context.addIssue({ code: "custom", message: "Nutrition-title provenance must not contain a menu label." });
+  }
+});
+
+export const psuCoverageSchema = z.object({
+  status: z.enum(["complete", "partial"]),
+  sourceObservationCount: z.number().int().min(0).max(1_000),
+  publishedObservationCount: z.number().int().min(0).max(1_000),
+  omissions: z.object({ "invalid-name": z.number().int().min(0).max(1) }).strict(),
+}).strict().superRefine((coverage, context) => {
+  if (coverage.sourceObservationCount !== coverage.publishedObservationCount + coverage.omissions["invalid-name"]) {
+    context.addIssue({ code: "custom", message: "Snapshot coverage counts are inconsistent." });
+  }
+  if (coverage.status !== (coverage.omissions["invalid-name"] === 0 ? "complete" : "partial")) {
+    context.addIssue({ code: "custom", message: "Snapshot coverage status is inconsistent." });
+  }
+  if (coverage.sourceObservationCount > 0 && coverage.publishedObservationCount === 0) {
+    context.addIssue({ code: "custom", message: "A non-empty source menu cannot publish zero items." });
+  }
+});
 
 export const psuSnapshotSchema = z.object({
   schemaVersion: z.literal(PSU_SNAPSHOT_VERSION),
   parserVersion: z.literal(PSU_PARSER_VERSION),
-  snapshotId: z.string().regex(/^psu:snapshot:v1:[a-f0-9]{64}$/),
+  snapshotId: z.string().regex(/^psu:snapshot:v2:[a-f0-9]{64}$/),
   query: z.object({
     serviceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     hallId: z.string().min(1).max(80),
@@ -99,6 +131,7 @@ export const psuSnapshotSchema = z.object({
   cachedAt: z.string().datetime({ offset: true }),
   freshUntil: z.string().datetime({ offset: true }),
   retainUntil: z.string().datetime({ offset: true }),
+  coverage: psuCoverageSchema,
   stations: z.array(z.object({
     id: z.string().regex(/^psu:station:v1:[a-f0-9]{64}$/),
     displayName: z.string().min(1).max(100),
@@ -167,11 +200,16 @@ export const psuSnapshotSchema = z.object({
   if (!(retrievedAt <= cachedAt && cachedAt <= freshUntil && freshUntil <= retainUntil)) {
     context.addIssue({ code: "custom", message: "Snapshot timestamps are out of order." });
   }
-  const expectedSnapshotId = `psu:snapshot:v1:${hash([
+  const publishedObservationCount = snapshot.stations.reduce((total, station) => total + station.items.length, 0);
+  if (publishedObservationCount !== snapshot.coverage.publishedObservationCount) {
+    context.addIssue({ code: "custom", message: "Snapshot item count does not match its coverage metadata." });
+  }
+  const expectedSnapshotId = `psu:snapshot:v2:${hash([
     snapshot.query.serviceDate,
     snapshot.query.hallId,
     snapshot.query.mealPeriodId,
     snapshot.retrievedAt,
+    JSON.stringify(snapshot.coverage),
     JSON.stringify(snapshot.stations),
   ])}`;
   if (snapshot.snapshotId !== expectedSnapshotId) {
@@ -180,7 +218,7 @@ export const psuSnapshotSchema = z.object({
 });
 
 export const psuNutritionCacheSchema = z.object({
-  schemaVersion: z.literal("lionlog.psu-nutrition.v1"),
+  schemaVersion: z.literal(PSU_NUTRITION_CACHE_VERSION),
   parserVersion: z.literal(PSU_PARSER_VERSION),
   sourceHandle: z.string().regex(/^\d+$/),
   sourceUrl: z.string().url().refine(isAllowedNutritionUrl, "Unexpected PSU nutrition URL"),
@@ -223,21 +261,33 @@ export function buildPsuSnapshot(
     throw new PsuStructuralError("Parsed PSU menu context does not match the LionLog query.");
   }
 
+  let invalidNameOmissions = 0;
   const stations = menu.stations.map((station) => {
     const stationId = `psu:station:v1:${hash([hall.id, station.displayName])}`;
     const occurrencesByHandle = new Map<string, number>();
     return {
       id: stationId,
       displayName: station.displayName,
-      items: station.items.map((item) => {
+      items: station.items.flatMap((item) => {
+        if ((item.name === null) !== (item.nameIssue !== null)) {
+          throw new PsuStructuralError("A PSU menu name is missing its validation classification.");
+        }
+        const detail = nutritionByHandle.get(item.sourceHandle);
+        if (!detail) throw new PsuStructuralError("A PSU menu observation is missing validated nutrition detail.");
+        if ((detail.name === null) !== (detail.nameIssue !== null)) {
+          throw new PsuStructuralError("A PSU nutrition name is missing its validation classification.");
+        }
+        if (item.name !== null && detail.name !== null && detail.name !== item.name) {
+          throw new PsuStructuralError("A PSU menu label and nutrition title disagree.");
+        }
+        const publishedName = item.name ?? detail.name;
+        if (publishedName === null) {
+          invalidNameOmissions += 1;
+          return [];
+        }
         const occurrenceIndex = occurrencesByHandle.get(item.sourceHandle) ?? 0;
         occurrencesByHandle.set(item.sourceHandle, occurrenceIndex + 1);
-        const detail = nutritionByHandle.get(item.sourceHandle);
-        if (!detail) throw new PsuStructuralError(`Missing PSU nutrition detail for ${item.sourceHandle}.`);
-        if (detail.name !== null && detail.name !== item.name) {
-          throw new PsuStructuralError(`PSU menu and nutrition names disagree for ${item.sourceHandle}.`);
-        }
-        return {
+        return [{
           observationId: `psu:observation:v1:${hash([
             query.serviceDate,
             hall.id,
@@ -248,7 +298,9 @@ export function buildPsuSnapshot(
           ])}`,
           sourceHandle: item.sourceHandle,
           sourceUrl: nutritionUrlForHandle(item.sourceHandle),
-          name: item.name,
+          name: publishedName,
+          nameSource: item.name !== null ? "menu-label" as const : "nutrition-detail" as const,
+          sourceMenuLabel: item.name,
           stationId,
           serving: {
             label: detail.servingLabel,
@@ -265,20 +317,36 @@ export function buildPsuSnapshot(
           dietaryTraits: item.dietaryTraits,
           ingredients: detail.ingredients,
           allergens: detail.allergens,
-        };
+        }];
       }),
     };
   });
+
+  const sourceObservationCount = menu.stations.reduce((total, station) => total + station.items.length, 0);
+  const publishedObservationCount = stations.reduce((total, station) => total + station.items.length, 0);
+  if (invalidNameOmissions > 1) {
+    throw new PsuStructuralError("PSU query exceeded the invalid-name omission limit.");
+  }
+  if (sourceObservationCount > 0 && publishedObservationCount === 0) {
+    throw new PsuStructuralError("PSU query lost every source observation during name validation.");
+  }
+  const coverage = {
+    status: invalidNameOmissions === 0 ? "complete" as const : "partial" as const,
+    sourceObservationCount,
+    publishedObservationCount,
+    omissions: { "invalid-name": invalidNameOmissions },
+  };
 
   const cachedAt = timing.cachedAt.toISOString();
   const snapshot = {
     schemaVersion: PSU_SNAPSHOT_VERSION,
     parserVersion: PSU_PARSER_VERSION,
-    snapshotId: `psu:snapshot:v1:${hash([
+    snapshotId: `psu:snapshot:v2:${hash([
       query.serviceDate,
       hall.id,
       period.id,
       timing.retrievedAt.toISOString(),
+      JSON.stringify(coverage),
       JSON.stringify(stations),
     ])}`,
     query: {
@@ -293,6 +361,7 @@ export function buildPsuSnapshot(
     cachedAt,
     freshUntil: new Date(timing.cachedAt.getTime() + timing.freshForMs).toISOString(),
     retainUntil: new Date(timing.cachedAt.getTime() + timing.retainForMs).toISOString(),
+    coverage,
     stations,
   };
   return validatePsuSnapshot(snapshot);
@@ -321,7 +390,7 @@ export function toNutritionCacheEntry(
   freshForMs: number,
 ): PsuNutritionCacheEntry {
   return validatePsuNutritionCacheEntry({
-    schemaVersion: "lionlog.psu-nutrition.v1",
+    schemaVersion: PSU_NUTRITION_CACHE_VERSION,
     parserVersion: PSU_PARSER_VERSION,
     sourceHandle,
     sourceUrl: nutritionUrlForHandle(sourceHandle),
@@ -329,6 +398,7 @@ export function toNutritionCacheEntry(
     freshUntil: new Date(retrievedAt.getTime() + freshForMs).toISOString(),
     detail: {
       name: detail.name,
+      nameIssue: detail.nameIssue,
       servingLabel: detail.servingLabel,
       sourceQuantity: detail.sourceQuantity,
       sourceUnit: detail.sourceUnit,
@@ -349,6 +419,7 @@ export function toNutritionCacheEntry(
 export function nutritionFromCacheEntry(entry: PsuNutritionCacheEntry): ParsedPsuNutrition {
   return {
     name: entry.detail.name,
+    nameIssue: entry.detail.nameIssue,
     servingLabel: entry.detail.servingLabel,
     sourceQuantity: entry.detail.sourceQuantity,
     sourceUnit: entry.detail.sourceUnit,

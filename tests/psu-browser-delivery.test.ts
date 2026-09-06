@@ -29,16 +29,16 @@ const fetchedAt = new Date("2026-08-31T16:00:00.000Z");
 
 test("catalog and snapshot URLs work at root and /lionlog/ without leaving the origin", () => {
   assert.equal(
-    resolveSameOriginMenuUrl("./menu-data/v1/catalog.json", "https://example.test/").href,
-    "https://example.test/menu-data/v1/catalog.json",
+    resolveSameOriginMenuUrl("./menu-data/v2/catalog.json", "https://example.test/").href,
+    "https://example.test/menu-data/v2/catalog.json",
   );
   assert.equal(
-    resolveSameOriginMenuUrl("./menu-data/v1/catalog.json", "https://example.test/lionlog/").href,
-    "https://example.test/lionlog/menu-data/v1/catalog.json",
+    resolveSameOriginMenuUrl("./menu-data/v2/catalog.json", "https://example.test/lionlog/").href,
+    "https://example.test/lionlog/menu-data/v2/catalog.json",
   );
   assert.equal(
-    resolveSameOriginMenuUrl("./snapshots/2026-08-31/11/lunch.json", "https://example.test/lionlog/menu-data/v1/catalog.json").href,
-    "https://example.test/lionlog/menu-data/v1/snapshots/2026-08-31/11/lunch.json",
+    resolveSameOriginMenuUrl("./snapshots/2026-08-31/11/lunch.json", "https://example.test/lionlog/menu-data/v2/catalog.json").href,
+    "https://example.test/lionlog/menu-data/v2/snapshots/2026-08-31/11/lunch.json",
   );
   assert.throws(() => resolveSameOriginMenuUrl("https://psu.example/menu.json", "https://example.test/"), /same|origin/i);
 });
@@ -113,15 +113,32 @@ test("tampered remote data is rejected without replacing last-known-good", async
   assert.notEqual(result?.snapshot.stations[0].items[0].nutrition.calories, 9999);
 });
 
+test("catalog coverage tampering and snapshot coverage tampering fail closed", async () => {
+  const snapshot = await fixtureSnapshot();
+  const catalog = fixtureCatalog(snapshot);
+  assert.throws(() => validatePsuPublicationCatalog({
+    ...catalog,
+    publication: { ...catalog.publication, coverage: "partial", omissions: { "invalid-name": 1 } },
+  }), /Invalid PSU catalog/i);
+  assert.throws(() => validatePsuPublicationCatalog({
+    ...catalog,
+    snapshots: [{ ...catalog.snapshots[0], sourceObservationCount: 999 }],
+  }), /Invalid PSU catalog/i);
+  await assert.rejects(() => validatePsuSnapshotForBrowser({
+    ...snapshot,
+    coverage: { ...snapshot.coverage, status: "partial", omissions: { "invalid-name": 1 } },
+  }), /Invalid PSU snapshot|deterministic ID/i);
+});
+
 test("unsupported catalog and snapshot versions fail closed", async () => {
   const snapshot = await fixtureSnapshot();
   const catalog = fixtureCatalog(snapshot);
   assert.throws(
-    () => validatePsuPublicationCatalog({ ...catalog, catalogVersion: "lionlog.psu-catalog.v2" }),
+    () => validatePsuPublicationCatalog({ ...catalog, catalogVersion: "lionlog.psu-catalog.v4" }),
     /invalid PSU catalog/i,
   );
   await assert.rejects(
-    () => validatePsuSnapshotForBrowser({ ...snapshot, schemaVersion: "lionlog.psu-menu.v2" }),
+    () => validatePsuSnapshotForBrowser({ ...snapshot, schemaVersion: "lionlog.psu-menu.v3" }),
     /invalid PSU snapshot/i,
   );
   assert.throws(
@@ -205,6 +222,26 @@ function fixtureCatalog(snapshot: Awaited<ReturnType<typeof fixtureSnapshot>>) {
     snapshotSchemaVersion: PSU_SNAPSHOT_VERSION,
     parserVersion: PSU_PARSER_VERSION,
     generatedAt: "2026-08-31T16:00:30.000Z",
+    publication: {
+      mode: "manual-export",
+      sourceKind: "psu-public-menu-html",
+      commitSha: null,
+      serviceDate: null,
+      hallIds: [snapshot.query.hallId],
+      retrievalStartedAt: null,
+      retrievalCompletedAt: null,
+      expectedSnapshotCount: 1,
+      publishedSnapshotCount: 1,
+      recognizedEmptySnapshotCount: 0,
+      itemCount: snapshot.stations.reduce((total, station) => total + station.items.length, 0),
+      coverage: snapshot.coverage.status,
+      sourceObservationCount: snapshot.coverage.sourceObservationCount,
+      publishedObservationCount: snapshot.coverage.publishedObservationCount,
+      omissions: snapshot.coverage.omissions,
+      requestCount: null,
+      nutritionRequests: null,
+      nutritionCacheHits: null,
+    },
     serviceDates: [snapshot.query.serviceDate],
     halls: [{ id: snapshot.query.hallId, displayName: "East / Findlay" }],
     mealPeriods: [{ id: snapshot.query.mealPeriodId, displayName: "Lunch" }],

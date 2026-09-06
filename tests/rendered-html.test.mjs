@@ -28,12 +28,12 @@ test("server-renders the unavailable live shell without a sample fallback", asyn
   assert.match(html, /rel="manifest" href="\.\/manifest\.webmanifest"/i);
   assert.match(html, /rel="apple-touch-icon"[^>]+href="\.\/icons\/apple-touch-icon\.png"/i);
   assert.match(html, /name="theme-color" content="#001E44"/i);
-  assert.match(html, /<html[^>]+data-lionlog-shell="v0\.2\.0-alpha\.3"/i);
+  assert.match(html, /<html[^>]+data-lionlog-shell="v0\.2\.0-alpha\.4"/i);
   const viewportTag = html.match(/<meta[^>]+name="viewport"[^>]*>/i)?.[0] ?? "";
   assert.match(viewportTag, /width=device-width/i);
   assert.match(viewportTag, /initial-scale=1/i);
   assert.match(viewportTag, /viewport-fit=cover/i);
-  assert.match(html, /v0\.2\.0-alpha\.3/i);
+  assert.match(html, /v0\.2\.0-alpha\.4/i);
   assert.match(html, /apple-mobile-web-app-status-bar-style" content="black-translucent"/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
 });

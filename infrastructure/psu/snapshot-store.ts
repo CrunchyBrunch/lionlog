@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { MenuQuery } from "../../domain/dining.ts";
+import { PSU_NUTRITION_CACHE_VERSION, PSU_SNAPSHOT_VERSION } from "./constants.ts";
 import { PsuStructuralError } from "./errors.ts";
 import type { PsuMenuSnapshot, PsuNutritionCacheEntry } from "./snapshot-schema.ts";
 import { validatePsuNutritionCacheEntry, validatePsuSnapshot } from "./snapshot-schema.ts";
@@ -46,8 +47,8 @@ export class FilePsuSnapshotStore implements PsuSnapshotStore {
 
   constructor(rootDirectory: string) {
     this.rootDirectory = rootDirectory;
-    this.menuDirectory = path.join(rootDirectory, "lionlog.psu-menu.v1");
-    this.nutritionDirectory = path.join(rootDirectory, "lionlog.psu-nutrition.v1");
+    this.menuDirectory = path.join(rootDirectory, PSU_SNAPSHOT_VERSION);
+    this.nutritionDirectory = path.join(rootDirectory, PSU_NUTRITION_CACHE_VERSION);
   }
 
   async readMenu(query: MenuQuery): Promise<PsuMenuSnapshot | null> {
