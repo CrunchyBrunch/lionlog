@@ -139,13 +139,13 @@ async function writeStaticShell(root: string): Promise<void> {
   await mkdir(path.join(root, "_next", "static"), { recursive: true });
   await mkdir(path.join(root, "icons"), { recursive: true });
   await writeFile(path.join(root, ".nojekyll"), "\n");
-  await writeFile(path.join(root, "index.html"), '<link href="/lionlog/_next/static/app.js"><link href="./manifest.webmanifest">');
+  await writeFile(path.join(root, "index.html"), '<html data-lionlog-shell="development"><link href="/lionlog/_next/static/app.js"><link href="./manifest.webmanifest"></html>');
   await writeFile(path.join(root, "_next", "static", "app.js"), "console.log('shell');");
   await writeFile(path.join(root, "icons", "icon-192.png"), "icon");
   await writeFile(path.join(root, "manifest.webmanifest"), JSON.stringify({
     id: "./", start_url: "./", scope: "./", icons: [{ src: "./icons/icon-192.png" }],
   }));
-  await writeFile(path.join(root, "sw.js"), "const CACHE='lionlog-shell-v1'; const EXCLUDED='menu-data';");
+  await writeFile(path.join(root, "sw.js"), "const SHELL_REVISION = \"development\"; const CACHE='lionlog-shell-development'; const EXCLUDED='menu-data';");
 }
 
 function fixture(name: string): Promise<string> {

@@ -1,7 +1,8 @@
 const CACHE_PREFIX = "lionlog-shell-";
-const CACHE_NAME = `${CACHE_PREFIX}v0.2.0-alpha.4`;
+const SHELL_REVISION = "__LIONLOG_SHELL_REVISION__";
+const CACHE_NAME = `${CACHE_PREFIX}${SHELL_REVISION}`;
 const SCOPE_URL = new URL("./", self.registration.scope).href;
-const APPLICATION_DOCUMENT_MARKER = 'data-lionlog-shell="v0.2.0-alpha.4"';
+const APPLICATION_DOCUMENT_MARKER = `data-lionlog-shell="${SHELL_REVISION}"`;
 const CORE_ASSETS = [
   SCOPE_URL,
   new URL("./manifest.webmanifest", self.registration.scope).href,
@@ -35,10 +36,13 @@ async function cacheApplicationShell() {
     .filter((url) => url.origin === self.location.origin)
     .map((url) => url.href);
 
-  await Promise.allSettled(
+  await Promise.all(
     [...new Set([...CORE_ASSETS.slice(1), ...assetUrls])].map(async (url) => {
       const response = await fetch(url, { cache: "reload" });
-      if (response.ok) await cache.put(url, response);
+      if (!response.ok || response.redirected || response.type === "opaqueredirect") {
+        throw new Error(`LionLog shell asset was unavailable: ${url}`);
+      }
+      await cache.put(url, response);
     }),
   );
 }
@@ -80,7 +84,10 @@ self.addEventListener("fetch", (event) => {
     event.respondWith((async () => {
       try {
         const response = await fetch(request);
-        if (!response.ok) return (await caches.match(SCOPE_URL)) ?? response;
+        if (!response.ok) {
+          const cache = await caches.open(CACHE_NAME);
+          return (await cache.match(SCOPE_URL)) ?? response;
+        }
 
         if (await isExpectedApplicationDocument(response)) {
           const cache = await caches.open(CACHE_NAME);
@@ -88,19 +95,20 @@ self.addEventListener("fetch", (event) => {
         }
         return response;
       } catch {
-        return (await caches.match(SCOPE_URL)) ?? Response.error();
+        const cache = await caches.open(CACHE_NAME);
+        return (await cache.match(SCOPE_URL)) ?? Response.error();
       }
     })());
     return;
   }
 
   event.respondWith((async () => {
-    const cached = await caches.match(request);
+    const cache = await caches.open(CACHE_NAME);
+    const cached = await cache.match(request);
     if (cached) return cached;
 
     const response = await fetch(request);
     if (response.ok) {
-      const cache = await caches.open(CACHE_NAME);
       await cache.put(request, response.clone());
     }
     return response;
