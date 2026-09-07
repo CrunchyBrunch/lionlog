@@ -1,7 +1,65 @@
-name: Deploy GitHub Pages (manual)
+name: Promote exact LionLog release to GitHub Pages
 
 on:
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Exact operation authorized by the Project Manager
+        required: true
+        type: choice
+        options: [promote, rollback, first-release-recovery]
+      source_run_id:
+        description: Exact successful candidate producer run ID
+        required: true
+        type: string
+      source_run_attempt:
+        description: Exact producer attempt; must be 1
+        required: true
+        type: string
+      source_artifact_id:
+        description: Exact candidate artifact ID
+        required: true
+        type: string
+      source_artifact_digest:
+        description: Exact sha256-prefixed GitHub artifact digest
+        required: true
+        type: string
+      source_manifest_digest:
+        description: Exact lowercase SHA-256 of release-manifest.json
+        required: true
+        type: string
+      expected_source_sha:
+        description: Exact trusted-main commit that produced the candidate
+        required: true
+        type: string
+      expected_service_date:
+        description: Exact YYYY-MM-DD, or NONE for first-release recovery
+        required: true
+        type: string
+      expected_current_release_id:
+        description: Exact public release ID, or NONE_FIRST_DEPLOYMENT
+        required: true
+        type: string
+      expected_current_deployment_id:
+        description: Exact Pages deployment ID, or NONE_FIRST_DEPLOYMENT
+        required: true
+        type: string
+      approval_expires_at:
+        description: Project Manager approval expiry as an ISO timestamp
+        required: true
+        type: string
+      partial_approval:
+        description: COMPLETE_ONLY or APPROVE_PARTIAL:<manifest digest>:<omission count>
+        required: true
+        type: string
+      expired_rollback_approval:
+        description: NONE or ALLOW_EXPIRED_ROLLBACK:<manifest digest>
+        required: true
+        type: string
+      confirmation:
+        description: Type PROMOTE_EXACT_LIONLOG_RELEASE
+        required: true
+        type: string
 
 permissions: {}
 
@@ -10,68 +68,300 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    if: github.repository == 'CrunchyBrunch/lionlog' && github.ref == 'refs/heads/main'
+  verify-and-stage:
+    if: >-
+      github.repository == 'CrunchyBrunch/lionlog' &&
+      github.ref == 'refs/heads/main' &&
+      github.run_attempt == 1 &&
+      inputs.confirmation == 'PROMOTE_EXACT_LIONLOG_RELEASE'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
+      actions: read
+    outputs:
+      release_id: ${{ steps.validated.outputs.release_id }}
+      release_kind: ${{ steps.validated.outputs.release_kind }}
+      site_tar_digest: ${{ steps.validated.outputs.site_tar_digest }}
+      staged_artifact_id: ${{ steps.stage.outputs.artifact-id }}
+      staged_artifact_digest: ${{ steps.stage.outputs.artifact-digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
           cache: npm
       - run: npm ci --ignore-scripts
-      - run: npm exec tsc -- --noEmit
-      - run: npm test
-      - run: npm run lint
-      - name: Build static project-site artifact
-        env:
-          LIONLOG_BASE_PATH: /lionlog
-          LIONLOG_PUBLIC_ORIGIN: https://crunchybrunch.github.io
-        run: npm run build
-      - name: Verify static Pages boundary
-        run: |
-          test -f dist/client/index.html
-          test -f dist/client/.nojekyll
-          test ! -e public/menu-data
-          test ! -e dist/client/menu-data
-      - name: Prepare isolated Pages artifact
-        run: >-
-          node --experimental-strip-types scripts/prepare-pages-artifact.ts
-          --source=dist/client
-          --output=work/pages-deployment/site
-      - name: Package and round-trip validate Pages artifact
+      - name: Validate immutable input shapes
         shell: bash
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
         run: |
           set -euo pipefail
-          tar --directory work/pages-deployment/site --dereference --hard-dereference -cf work/pages-deployment/artifact.tar .
-          mkdir work/pages-deployment/round-trip
-          tar -xf work/pages-deployment/artifact.tar -C work/pages-deployment/round-trip
-          node --experimental-strip-types scripts/prepare-pages-artifact.ts --validate=work/pages-deployment/round-trip
-          diff -qr work/pages-deployment/site work/pages-deployment/round-trip
-          test "$(tar -tf work/pages-deployment/artifact.tar | grep -c '^./.nojekyll$')" -eq 1
-      - name: Upload deployment artifact
+          [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_RUN_ATTEMPT" == "1" ]]
+          [[ "$SOURCE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_ARTIFACT_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "$SOURCE_MANIFEST_DIGEST" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$EXPECTED_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+      - name: Read exact GitHub provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/pages-promotion/metadata
+          gh api repos/${{ github.repository }} > work/pages-promotion/metadata/repository.json
+          gh api repos/${{ github.repository }}/commits/main > work/pages-promotion/metadata/main.json
+          gh api repos/${{ github.repository }}/actions/runs/$SOURCE_RUN_ID > work/pages-promotion/metadata/run.json
+          gh api repos/${{ github.repository }}/actions/artifacts/$SOURCE_ARTIFACT_ID > work/pages-promotion/metadata/artifact.json
+          gh api -H 'Accept: application/vnd.github+json' repos/${{ github.repository }}/commits/$EXPECTED_SOURCE_SHA/check-runs > work/pages-promotion/metadata/check-runs.json
+          jq -n '{repository: $repository[0], main: $main[0], run: $run[0], artifact: $artifact[0], checkRuns: $checks[0].check_runs}' \
+            --slurpfile repository work/pages-promotion/metadata/repository.json \
+            --slurpfile main work/pages-promotion/metadata/main.json \
+            --slurpfile run work/pages-promotion/metadata/run.json \
+            --slurpfile artifact work/pages-promotion/metadata/artifact.json \
+            --slurpfile checks work/pages-promotion/metadata/check-runs.json \
+            > work/pages-promotion/github-metadata.json
+      - name: Download exact candidate and enforce wrapper digest
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --proto '=https' --max-filesize 115343360 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$SOURCE_ARTIFACT_ID/zip" \
+            --output work/pages-promotion/candidate.zip
+          test "sha256:$(sha256sum work/pages-promotion/candidate.zip | cut -d ' ' -f 1)" = "$SOURCE_ARTIFACT_DIGEST"
+          test "$(unzip -Z1 work/pages-promotion/candidate.zip | wc -l)" -eq 2
+          unzip -Z1 work/pages-promotion/candidate.zip | sort | diff -u - <(printf '%s\n' release-manifest.json site.tar)
+          mkdir work/pages-promotion/bundle
+          unzip -p work/pages-promotion/candidate.zip release-manifest.json | head -c 1048577 > work/pages-promotion/bundle/release-manifest.json
+          test "$(wc -c < work/pages-promotion/bundle/release-manifest.json)" -le 1048576
+          unzip -p work/pages-promotion/candidate.zip site.tar | head -c 104857601 > work/pages-promotion/bundle/site.tar
+          test "$(wc -c < work/pages-promotion/bundle/site.tar)" -le 104857600
+      - name: Validate candidate, approval tuple, and exact site
+        id: validated
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_SERVICE_DATE: ${{ inputs.expected_service_date }}
+          APPROVAL_EXPIRES_AT: ${{ inputs.approval_expires_at }}
+          PARTIAL_APPROVAL: ${{ inputs.partial_approval }}
+          EXPIRED_ROLLBACK_APPROVAL: ${{ inputs.expired_rollback_approval }}
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types scripts/verify-publication-bundle.ts \
+            --bundle=work/pages-promotion/bundle \
+            --extract=work/pages-promotion/site \
+            --metadata=work/pages-promotion/github-metadata.json \
+            --operation="$OPERATION" \
+            --source-sha="$EXPECTED_SOURCE_SHA" \
+            --run-id="$SOURCE_RUN_ID" \
+            --run-attempt="$SOURCE_RUN_ATTEMPT" \
+            --artifact-id="$SOURCE_ARTIFACT_ID" \
+            --artifact-digest="$SOURCE_ARTIFACT_DIGEST" \
+            --manifest-digest="$SOURCE_MANIFEST_DIGEST" \
+            --service-date="$EXPECTED_SERVICE_DATE" \
+            --approval-expires-at="$APPROVAL_EXPIRES_AT" \
+            --partial-approval="$PARTIAL_APPROVAL" \
+            --expired-rollback-approval="$EXPIRED_ROLLBACK_APPROVAL" \
+            --workflow-sha=${{ github.sha }} > work/pages-promotion/validated.json
+          echo "release_id=$(jq -r .releaseId work/pages-promotion/validated.json)" >> "$GITHUB_OUTPUT"
+          echo "release_kind=$(jq -r .releaseKind work/pages-promotion/validated.json)" >> "$GITHUB_OUTPUT"
+          echo "site_tar_digest=$(sha256sum work/pages-promotion/bundle/site.tar | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Verify expected current production identity
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EXPECTED_CURRENT_RELEASE_ID: ${{ inputs.expected_current_release_id }}
+          EXPECTED_CURRENT_DEPLOYMENT_ID: ${{ inputs.expected_current_deployment_id }}
+        run: node scripts/verify-current-publication.mjs
+      - name: Stage exact Pages tar for protected deployment
+        id: stage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: github-pages
-          path: work/pages-deployment/artifact.tar
-          retention-days: 1
+          name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: work/pages-promotion/bundle/site.tar
           if-no-files-found: error
+          retention-days: 90
 
   deploy:
-    if: github.repository == 'CrunchyBrunch/lionlog' && github.ref == 'refs/heads/main'
-    needs: build
+    needs: verify-and-stage
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
+      contents: read
+      actions: read
       pages: write
       id-token: write
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.pages.outputs.page_url }}
+    outputs:
+      deployment_id: ${{ steps.pages.outputs.deployment_id }}
+      page_url: ${{ steps.pages.outputs.page_url }}
     steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Reverify main, approval lifetime, and current production
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          EXPECTED_CURRENT_RELEASE_ID: ${{ inputs.expected_current_release_id }}
+          EXPECTED_CURRENT_DEPLOYMENT_ID: ${{ inputs.expected_current_deployment_id }}
+          APPROVAL_EXPIRES_AT: ${{ inputs.approval_expires_at }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/${{ github.repository }}/commits/main --jq .sha)" = "${{ github.sha }}"
+          test "$(date -u +%s)" -le "$(date -u -d "$APPROVAL_EXPIRES_AT" +%s)"
+          test "$(gh api repos/${{ github.repository }}/actions/artifacts/$SOURCE_ARTIFACT_ID --jq .expired)" = "false"
+          test "$(gh api repos/${{ github.repository }}/actions/artifacts/$SOURCE_ARTIFACT_ID --jq .digest)" = "$SOURCE_ARTIFACT_DIGEST"
+          node scripts/verify-current-publication.mjs
+      - name: Reverify source manifest after protected approval
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          OPERATION: ${{ inputs.operation }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
+          PARTIAL_APPROVAL: ${{ inputs.partial_approval }}
+          EXPIRED_ROLLBACK_APPROVAL: ${{ inputs.expired_rollback_approval }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/pages-deployment
+          curl --fail --silent --show-error --location --proto '=https' --max-filesize 115343360 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$SOURCE_ARTIFACT_ID/zip" \
+            --output work/pages-deployment/source.zip
+          test "sha256:$(sha256sum work/pages-deployment/source.zip | cut -d ' ' -f 1)" = "$SOURCE_ARTIFACT_DIGEST"
+          test "$(unzip -Z1 work/pages-deployment/source.zip | wc -l)" -eq 2
+          unzip -Z1 work/pages-deployment/source.zip | sort | diff -u - <(printf '%s\n' release-manifest.json site.tar)
+          unzip -p work/pages-deployment/source.zip release-manifest.json | head -c 1048577 > work/pages-deployment/release-manifest.json
+          test "$(wc -c < work/pages-deployment/release-manifest.json)" -le 1048576
+          test "$(sha256sum work/pages-deployment/release-manifest.json | cut -d ' ' -f 1)" = "$SOURCE_MANIFEST_DIGEST"
+          if [[ "$OPERATION" == "promote" ]]; then
+            FRESH_UNTIL="$(jq -r .menu.earliestFreshUntil work/pages-deployment/release-manifest.json)"
+            FRESH_EPOCH="$(date -u -d "$FRESH_UNTIL" +%s)"
+            NOW_EPOCH="$(date -u +%s)"
+            test "$FRESH_EPOCH" -ge "$((NOW_EPOCH + 900))"
+          fi
+          if [[ "$(jq -r .menu.coverage work/pages-deployment/release-manifest.json)" == "partial" ]]; then
+            test "$PARTIAL_APPROVAL" = "APPROVE_PARTIAL:$SOURCE_MANIFEST_DIGEST:$(jq -r '.menu.omissions[\"invalid-name\"]' work/pages-deployment/release-manifest.json)"
+          fi
+          if [[ "$OPERATION" == "rollback" ]]; then
+            RETAIN_UNTIL="$(jq -r .menu.earliestRetainUntil work/pages-deployment/release-manifest.json)"
+            RETAIN_EPOCH="$(date -u -d "$RETAIN_UNTIL" +%s)"
+            NOW_EPOCH="$(date -u +%s)"
+            if [[ "$RETAIN_EPOCH" -lt "$NOW_EPOCH" ]]; then
+              test "$EXPIRED_ROLLBACK_APPROVAL" = "ALLOW_EXPIRED_ROLLBACK:$SOURCE_MANIFEST_DIGEST"
+            fi
+          fi
+      - name: Re-download and identify the exact staged artifact
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STAGED_ARTIFACT_ID: ${{ needs.verify-and-stage.outputs.staged_artifact_id }}
+          STAGED_ARTIFACT_DIGEST: ${{ needs.verify-and-stage.outputs.staged_artifact_digest }}
+          SITE_TAR_DIGEST: ${{ needs.verify-and-stage.outputs.site_tar_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/pages-deployment
+          test "$(gh api repos/${{ github.repository }}/actions/artifacts/$STAGED_ARTIFACT_ID --jq .digest)" = "$STAGED_ARTIFACT_DIGEST"
+          curl --fail --silent --show-error --location --proto '=https' --max-filesize 115343360 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$STAGED_ARTIFACT_ID/zip" \
+            --output work/pages-deployment/staged.zip
+          test "sha256:$(sha256sum work/pages-deployment/staged.zip | cut -d ' ' -f 1)" = "$STAGED_ARTIFACT_DIGEST"
+          test "$(unzip -Z1 work/pages-deployment/staged.zip | wc -l)" -eq 1
+          test "$(unzip -Z1 work/pages-deployment/staged.zip)" = "site.tar"
+          unzip -p work/pages-deployment/staged.zip site.tar | head -c 104857601 > work/pages-deployment/site.tar
+          test "$(wc -c < work/pages-deployment/site.tar)" -le 104857600
+          test "$(sha256sum work/pages-deployment/site.tar | cut -d ' ' -f 1)" = "$SITE_TAR_DIGEST"
+      - name: Deploy exact staged artifact
+        id: pages
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STAGED_ARTIFACT_ID: ${{ needs.verify-and-stage.outputs.staged_artifact_id }}
+        run: node scripts/deploy-exact-pages-artifact.mjs
+
+  smoke-and-record:
+    needs: [verify-and-stage, deploy]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Verify anonymous public release marker
+        shell: bash
+        env:
+          EXPECTED_RELEASE_ID: ${{ needs.verify-and-stage.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          for attempt in {1..12}; do
+            if curl --fail --silent --show-error --proto '=https' \
+              -H 'Cache-Control: no-cache' \
+              'https://crunchybrunch.github.io/lionlog/release.json' \
+              --output release.json \
+              && test "$(jq -r .releaseId release.json)" = "$EXPECTED_RELEASE_ID"; then
+              exit 0
+            fi
+            sleep 5
+          done
+          exit 1
+      - name: Record successful deployment identity
+        shell: bash
+        env:
+          RELEASE_ID: ${{ needs.verify-and-stage.outputs.release_id }}
+          RELEASE_KIND: ${{ needs.verify-and-stage.outputs.release_kind }}
+          DEPLOYMENT_ID: ${{ needs.deploy.outputs.deployment_id }}
+          PAGE_URL: ${{ needs.deploy.outputs.page_url }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
+        run: |
+          jq -n \
+            --arg receiptVersion lionlog.pages-deployment-receipt.v1 \
+            --arg releaseId "$RELEASE_ID" \
+            --arg releaseKind "$RELEASE_KIND" \
+            --arg deploymentId "$DEPLOYMENT_ID" \
+            --arg pageUrl "$PAGE_URL" \
+            --arg sourceArtifactId "$SOURCE_ARTIFACT_ID" \
+            --arg sourceArtifactDigest "$SOURCE_ARTIFACT_DIGEST" \
+            --arg sourceManifestDigest "$SOURCE_MANIFEST_DIGEST" \
+            --arg promotionRunId '${{ github.run_id }}' \
+            --arg promotionRunAttempt '${{ github.run_attempt }}' \
+            --arg recordedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{receiptVersion: $receiptVersion, releaseId: $releaseId, releaseKind: $releaseKind, deploymentId: $deploymentId, pageUrl: $pageUrl, sourceArtifactId: ($sourceArtifactId | tonumber), sourceArtifactDigest: $sourceArtifactDigest, sourceManifestDigest: $sourceManifestDigest, promotionRunId: ($promotionRunId | tonumber), promotionRunAttempt: ($promotionRunAttempt | tonumber), recordedAt: $recordedAt, pagesAccepted: true, anonymousSmokePassed: true, knownGood: true}' \
+            > deployment-receipt.json
+      - name: Retain exact deployment receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: lionlog-deployment-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: deployment-receipt.json
+          if-no-files-found: error
+          retention-days: 90

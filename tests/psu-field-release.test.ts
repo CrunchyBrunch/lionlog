@@ -21,9 +21,12 @@ const authorizedEnvironment = {
   GITHUB_ACTIONS: "true",
   GITHUB_EVENT_NAME: "workflow_dispatch",
   GITHUB_REPOSITORY: "CrunchyBrunch/lionlog",
-  GITHUB_REF: "refs/heads/feature/live-pages-field-release-alpha-4",
-  GITHUB_WORKFLOW_REF: "CrunchyBrunch/lionlog/.github/workflows/build-live-menu-artifact.yml@refs/heads/feature/live-pages-field-release-alpha-4",
+  GITHUB_REF: "refs/heads/main",
+  GITHUB_WORKFLOW_REF: "CrunchyBrunch/lionlog/.github/workflows/build-live-menu-artifact.yml@refs/heads/main",
   GITHUB_SHA: "a".repeat(40),
+  EXPECTED_SOURCE_SHA: "a".repeat(40),
+  GITHUB_RUN_ATTEMPT: "1",
+  EXPECTED_RUN_ATTEMPT: "1",
 } as const;
 
 test("trusted release guard requires the exact workflow, repository, ref, event, and confirmation", () => {
@@ -34,6 +37,8 @@ test("trusted release guard requires the exact workflow, repository, ref, event,
     ["GITHUB_REF", "refs/heads/untrusted"],
     ["LIONLOG_RELEASE_CONFIRMATION", "yes"],
     ["GITHUB_ACTIONS", "false"],
+    ["EXPECTED_SOURCE_SHA", "b".repeat(40)],
+    ["GITHUB_RUN_ATTEMPT", "2"],
   ] as const) {
     assert.throws(() => assertTrustedReleaseIngestionEnvironment({ ...authorizedEnvironment, [key]: value }));
   }
@@ -189,7 +194,11 @@ test("live release workflow is manual-only and has no deployment privilege or st
   const workflow = await readFile(path.resolve(".github/workflows/build-live-menu-artifact.yml"), "utf8");
   assert.match(workflow, /workflow_dispatch:/);
   assert.doesNotMatch(workflow, /^\s*schedule:/m);
-  assert.match(workflow, /permissions:\s*\r?\n\s*contents: read/);
+  assert.match(workflow, /^permissions: \{\}$/m);
+  assert.match(workflow, /github\.ref == 'refs\/heads\/main'/);
+  assert.doesNotMatch(workflow, /feature\/live-pages-field-release-alpha-4/);
+  assert.match(workflow, /expected_source_sha/);
+  assert.match(workflow, /expected_run_attempt/);
   assert.doesNotMatch(workflow, /pages:\s*write|id-token:\s*write|deploy-pages/);
   assert.match(workflow, /prepare:psu-field-release/);
   assert.doesNotMatch(workflow, /pull_request:|push:/);
@@ -197,6 +206,9 @@ test("live release workflow is manual-only and has no deployment privilege or st
   assert.match(workflow, /actions\/cache\/save@caa296126883cff596d87d8935842f9db880ef25/);
   assert.match(workflow, /restore-keys:[\s\S]*lionlog-psu-nutrition-v2-psu-html-v2-/);
   assert.match(workflow, /continue-on-error: true/);
+  assert.match(workflow, /create-publication-bundle\.ts/);
+  assert.match(workflow, /create-candidate-receipt\.ts/);
+  assert.match(workflow, /retention-days: 90/);
   assert.match(workflow, /hashFiles\('work\/psu-field-release-cache\/lionlog\.psu-nutrition\.v2\/\*\.json'\) != ''/);
   const ingestion = workflow.indexOf("id: ingestion");
   const cacheValidation = workflow.indexOf("id: nutrition-cache-validation");

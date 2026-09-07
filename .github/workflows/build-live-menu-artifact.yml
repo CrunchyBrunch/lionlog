@@ -11,20 +11,41 @@ on:
         description: Type PREPARE_LIVE_PAGES_FIELD_RELEASE to authorize public PSU requests
         required: true
         type: string
+      expected_source_sha:
+        description: Exact lowercase main commit SHA authorized for this candidate
+        required: true
+        type: string
+      expected_run_attempt:
+        description: Must be 1; workflow reruns are not eligible
+        required: true
+        type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   build-artifact:
     if: >-
       github.repository == 'CrunchyBrunch/lionlog' &&
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feature/live-pages-field-release-alpha-4') &&
-      inputs.confirmation == 'PREPARE_LIVE_PAGES_FIELD_RELEASE'
+      github.ref == 'refs/heads/main' &&
+      inputs.confirmation == 'PREPARE_LIVE_PAGES_FIELD_RELEASE' &&
+      inputs.expected_source_sha == github.sha &&
+      inputs.expected_run_attempt == '1' &&
+      github.run_attempt == 1
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      live_artifact_id: ${{ steps.upload-live.outputs.artifact-id }}
+      live_artifact_digest: ${{ steps.upload-live.outputs.artifact-digest }}
+      live_manifest_digest: ${{ steps.live-identity.outputs.manifest_digest }}
+      recovery_artifact_id: ${{ steps.upload-recovery.outputs.artifact-id }}
+      recovery_artifact_digest: ${{ steps.upload-recovery.outputs.artifact-digest }}
+      recovery_manifest_digest: ${{ steps.recovery-identity.outputs.manifest_digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
@@ -33,6 +54,20 @@ jobs:
       - run: npm exec tsc -- --noEmit
       - run: npm test
       - run: npm run lint
+      - name: Build first-release recovery shell
+        env:
+          LIONLOG_BASE_PATH: /lionlog
+          LIONLOG_PUBLIC_ORIGIN: https://crunchybrunch.github.io
+          LIONLOG_SHELL_REVISION: ${{ github.sha }}
+        run: npm run build
+      - name: Prepare first-release recovery bundle
+        run: |
+          node --experimental-strip-types scripts/prepare-pages-artifact.ts --source=dist/client --output=work/pages-field-release/recovery-site
+          node --experimental-strip-types scripts/create-publication-bundle.ts --kind=first-release-recovery --site=work/pages-field-release/recovery-site --output=work/pages-field-release/recovery-bundle --commit-sha=${{ github.sha }} --run-id=${{ github.run_id }} --run-attempt=${{ github.run_attempt }}
+      - name: Record recovery manifest identity
+        id: recovery-identity
+        shell: bash
+        run: echo "manifest_digest=$(sha256sum work/pages-field-release/recovery-bundle/release-manifest.json | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
       - name: Validate strict service-date input
         env:
           SERVICE_DATE: ${{ inputs.service_date }}
@@ -56,6 +91,8 @@ jobs:
           CI: "true"
           LIONLOG_ALLOW_PSU_NETWORK: "I_UNDERSTAND_THIS_CONTACTS_PSU"
           LIONLOG_RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_RUN_ATTEMPT: ${{ inputs.expected_run_attempt }}
           SERVICE_DATE: ${{ inputs.service_date }}
         run: >-
           npm run prepare:psu-field-release --
@@ -89,29 +126,96 @@ jobs:
         env:
           LIONLOG_BASE_PATH: /lionlog
           LIONLOG_PUBLIC_ORIGIN: https://crunchybrunch.github.io
+          LIONLOG_SHELL_REVISION: ${{ github.sha }}
         run: npm run build
       - name: Prepare isolated static artifact
         run: >-
           node --experimental-strip-types scripts/prepare-pages-artifact.ts
           --source=dist/client
           --output=work/pages-field-release/site
-      - name: Round-trip validate exact artifact
+      - name: Create immutable live release bundle
+        run: >-
+          node --experimental-strip-types scripts/create-publication-bundle.ts
+          --kind=live
+          --site=work/pages-field-release/site
+          --output=work/pages-field-release/live-bundle
+          --commit-sha=${{ github.sha }}
+          --run-id=${{ github.run_id }}
+          --run-attempt=${{ github.run_attempt }}
+      - name: Round-trip validate exact live artifact
         shell: bash
         run: |
           set -euo pipefail
-          node --experimental-strip-types scripts/prepare-pages-artifact.ts --validate=work/pages-field-release/site --require-menu-data
-          tar --directory work/pages-field-release/site --dereference --hard-dereference -cf work/pages-field-release/site.tar .
           mkdir work/pages-field-release/round-trip
-          tar -xf work/pages-field-release/site.tar -C work/pages-field-release/round-trip
+          tar -xf work/pages-field-release/live-bundle/site.tar -C work/pages-field-release/round-trip
           node --experimental-strip-types scripts/prepare-pages-artifact.ts --validate=work/pages-field-release/round-trip --require-menu-data
           diff -qr work/pages-field-release/site work/pages-field-release/round-trip
           find work/pages-field-release/site -type f -print0 | sort -z | xargs -0 sha256sum > work/pages-field-release/inventory.sha256
           cat work/pages-field-release/inventory.sha256
-      - name: Retain reviewable static site (does not deploy)
+      - name: Record live manifest identity
+        id: live-identity
+        shell: bash
+        run: echo "manifest_digest=$(sha256sum work/pages-field-release/live-bundle/release-manifest.json | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Retain immutable live candidate
+        id: upload-live
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: lionlog-alpha-4-field-release-${{ inputs.service_date }}
-          path: work/pages-field-release/site/
-          include-hidden-files: true
+          name: lionlog-live-${{ inputs.service_date }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: work/pages-field-release/live-bundle/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 90
+      - name: Retain exact first-release recovery candidate
+        id: upload-recovery
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: lionlog-first-release-recovery-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: work/pages-field-release/recovery-bundle/
+          if-no-files-found: error
+          retention-days: 90
+
+  record-receipts:
+    needs: build-artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.build-artifact.outputs.live_artifact_id }}
+          path: work/pages-field-release/downloaded-live
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.build-artifact.outputs.recovery_artifact_id }}
+          path: work/pages-field-release/downloaded-recovery
+          merge-multiple: true
+      - name: Read immutable artifact metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/${{ github.repository }}/actions/artifacts/${{ needs.build-artifact.outputs.live_artifact_id }} > work/pages-field-release/live-artifact.json
+          gh api repos/${{ github.repository }}/actions/artifacts/${{ needs.build-artifact.outputs.recovery_artifact_id }} > work/pages-field-release/recovery-artifact.json
+      - name: Create external candidate receipts
+        shell: bash
+        run: |
+          mkdir work/pages-field-release/receipts
+          RECORDED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          node --experimental-strip-types scripts/create-candidate-receipt.ts --manifest=work/pages-field-release/downloaded-live/release-manifest.json --artifact-metadata=work/pages-field-release/live-artifact.json --recorded-at="$RECORDED_AT" --output=work/pages-field-release/receipts/live.json
+          node --experimental-strip-types scripts/create-candidate-receipt.ts --manifest=work/pages-field-release/downloaded-recovery/release-manifest.json --artifact-metadata=work/pages-field-release/recovery-artifact.json --recorded-at="$RECORDED_AT" --output=work/pages-field-release/receipts/first-release-recovery.json
+      - name: Retain external candidate receipts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: lionlog-candidate-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: work/pages-field-release/receipts/
+          if-no-files-found: error
+          retention-days: 90
