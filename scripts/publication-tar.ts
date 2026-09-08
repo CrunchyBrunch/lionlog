@@ -16,11 +16,14 @@ export function createPublicationTar(entries: readonly TarFileEntry[]): Buffer {
   if (entries.length === 0 || entries.length > MAX_FILES) throw new Error("Publication tar file count is invalid.");
   const sorted = [...entries].sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
   const seen = new Set<string>();
+  const caseFolded = new Set<string>();
   const blocks: Buffer[] = [];
   for (const entry of sorted) {
     validatePublicationEntryPath(entry.path);
     if (seen.has(entry.path)) throw new Error(`Duplicate publication tar entry: ${entry.path}`);
+    if (caseFolded.has(entry.path.toLowerCase())) throw new Error(`Case-colliding publication tar entry: ${entry.path}`);
     seen.add(entry.path);
+    caseFolded.add(entry.path.toLowerCase());
     if (entry.data.byteLength > MAX_FILE_BYTES) throw new Error(`Publication tar entry is too large: ${entry.path}`);
     const { name, prefix } = splitTarPath(entry.path);
     const header = Buffer.alloc(BLOCK_BYTES);
@@ -56,6 +59,7 @@ export function parsePublicationTar(archive: Buffer): TarFileEntry[] {
   }
   const entries: TarFileEntry[] = [];
   const seen = new Set<string>();
+  const caseFolded = new Set<string>();
   let offset = 0;
   let zeroBlocks = 0;
   while (offset < archive.byteLength) {
@@ -85,7 +89,9 @@ export function parsePublicationTar(archive: Buffer): TarFileEntry[] {
     const entryPath = prefix === "" ? name : `${prefix}/${name}`;
     validatePublicationEntryPath(entryPath);
     if (seen.has(entryPath)) throw new Error(`Duplicate publication tar entry: ${entryPath}`);
+    if (caseFolded.has(entryPath.toLowerCase())) throw new Error(`Case-colliding publication tar entry: ${entryPath}`);
     seen.add(entryPath);
+    caseFolded.add(entryPath.toLowerCase());
     const size = readOctal(header, 124, 12);
     if (size > MAX_FILE_BYTES || offset + size > archive.byteLength) throw new Error(`Invalid publication tar size for ${entryPath}`);
     entries.push({ path: entryPath, data: Buffer.from(archive.subarray(offset, offset + size)) });

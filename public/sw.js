@@ -1,7 +1,10 @@
-const CACHE_PREFIX = "lionlog-shell-";
 const SHELL_REVISION = "__LIONLOG_SHELL_REVISION__";
-const CACHE_NAME = `${CACHE_PREFIX}${SHELL_REVISION}`;
 const SCOPE_URL = new URL("./", self.registration.scope).href;
+const SCOPE_PATH = new URL(SCOPE_URL).pathname;
+const API_PATH = new URL("./api/", SCOPE_URL).pathname;
+const SCOPE_KEY = SCOPE_PATH === "/" ? "root" : SCOPE_PATH.slice(1, -1).replace(/[^A-Za-z0-9._-]/g, "-");
+const CACHE_PREFIX = `lionlog-shell-${SCOPE_KEY}-`;
+const CACHE_NAME = `${CACHE_PREFIX}${SHELL_REVISION}`;
 const APPLICATION_DOCUMENT_MARKER = `data-lionlog-shell="${SHELL_REVISION}"`;
 const CORE_ASSETS = [
   SCOPE_URL,
@@ -11,12 +14,17 @@ const CORE_ASSETS = [
   new URL("./icons/apple-touch-icon.png", self.registration.scope).href,
 ];
 
+function isWithinApplicationScope(value) {
+  const url = value instanceof URL ? value : new URL(value);
+  return url.origin === self.location.origin && (url.pathname === SCOPE_PATH.slice(0, -1) || url.pathname.startsWith(SCOPE_PATH));
+}
+
 async function isExpectedApplicationDocument(response) {
   if (!response.ok || response.redirected || response.type === "opaqueredirect") return false;
 
   const responseUrl = new URL(response.url);
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-  if (responseUrl.origin !== self.location.origin || !contentType.includes("text/html")) return false;
+  if (!isWithinApplicationScope(responseUrl) || !contentType.includes("text/html")) return false;
 
   return (await response.clone().text()).includes(APPLICATION_DOCUMENT_MARKER);
 }
@@ -33,13 +41,18 @@ async function cacheApplicationShell() {
   const html = await shellResponse.text();
   const assetUrls = [...html.matchAll(/(?:src|href)=["']([^"']+)["']/g)]
     .map((match) => new URL(match[1], SCOPE_URL))
-    .filter((url) => url.origin === self.location.origin)
+    .filter(isWithinApplicationScope)
     .map((url) => url.href);
 
   await Promise.all(
     [...new Set([...CORE_ASSETS.slice(1), ...assetUrls])].map(async (url) => {
       const response = await fetch(url, { cache: "reload" });
-      if (!response.ok || response.redirected || response.type === "opaqueredirect") {
+      if (
+        !response.ok
+        || response.redirected
+        || response.type === "opaqueredirect"
+        || !isWithinApplicationScope(response.url)
+      ) {
         throw new Error(`LionLog shell asset was unavailable: ${url}`);
       }
       await cache.put(url, response);
@@ -73,8 +86,9 @@ self.addEventListener("fetch", (event) => {
 
   if (
     request.method !== "GET"
-    || url.origin !== self.location.origin
-    || url.pathname.startsWith("/api/")
+    || !isWithinApplicationScope(url)
+    || url.pathname === API_PATH.slice(0, -1)
+    || url.pathname.startsWith(API_PATH)
     || /(^|\/)menu-data\//.test(url.pathname)
   ) {
     return;
@@ -108,7 +122,7 @@ self.addEventListener("fetch", (event) => {
     if (cached) return cached;
 
     const response = await fetch(request);
-    if (response.ok) {
+    if (response.ok && !response.redirected && isWithinApplicationScope(response.url)) {
       await cache.put(request, response.clone());
     }
     return response;

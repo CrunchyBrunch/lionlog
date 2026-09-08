@@ -1,11 +1,16 @@
 import { z } from "zod";
 
-export const PUBLICATION_MANIFEST_VERSION = "lionlog.pages-release.v1";
-export const PUBLICATION_RECEIPT_VERSION = "lionlog.pages-candidate-receipt.v1";
+export const PUBLICATION_MANIFEST_VERSION = "lionlog.pages-release.v2";
+export const PUBLICATION_RECEIPT_VERSION = "lionlog.pages-candidate-receipt.v2";
 export const PUBLICATION_MARKER_VERSION = "lionlog.pages-release-marker.v1";
+export const PUBLICATION_DEPLOYMENT_RECEIPT_VERSION = "lionlog.pages-deployment-receipt.v2";
 export const LIONLOG_REPOSITORY = "CrunchyBrunch/lionlog";
 export const LIONLOG_REPOSITORY_ID = 1_346_360_244;
 export const LIVE_CANDIDATE_WORKFLOW = ".github/workflows/build-live-menu-artifact.yml";
+export const LIVE_CANDIDATE_WORKFLOW_ID = 347_085_467;
+export const REQUIRED_CI_WORKFLOW = ".github/workflows/ci.yml";
+export const REQUIRED_CI_WORKFLOW_ID = 346_680_782;
+export const PROMOTION_WORKFLOW_ID = 347_992_874;
 export const TARGET_ORIGIN = "https://crunchybrunch.github.io";
 export const TARGET_BASE_PATH = "/lionlog/";
 
@@ -61,6 +66,7 @@ export const publicationReleaseManifestSchema = z.object({
   source: z.object({
     commitSha: gitShaSchema,
     workflowPath: z.literal(LIVE_CANDIDATE_WORKFLOW),
+    workflowId: z.literal(LIVE_CANDIDATE_WORKFLOW_ID),
     workflowRunId: positiveIdentifierSchema,
     workflowRunAttempt: z.literal(1),
   }).strict(),
@@ -70,6 +76,12 @@ export const publicationReleaseManifestSchema = z.object({
   }).strict(),
   shellRevision: gitShaSchema,
   menu: menuMetadataSchema.nullable(),
+  recovery: z.object({
+    releaseId: sha256Schema,
+    manifestSha256: sha256Schema,
+    artifactId: positiveIdentifierSchema,
+    artifactDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  }).strict().nullable(),
   marker: z.object({ path: z.literal("release.json"), sha256: sha256Schema }).strict(),
   site: z.object({
     tarFile: z.literal("site.tar"),
@@ -83,6 +95,9 @@ export const publicationReleaseManifestSchema = z.object({
   }
   if ((manifest.releaseKind === "live") !== (manifest.menu !== null)) {
     context.addIssue({ code: "custom", message: "Only live releases may contain menu metadata." });
+  }
+  if ((manifest.releaseKind === "live") !== (manifest.recovery !== null)) {
+    context.addIssue({ code: "custom", message: "Live releases must bind one exact first-release recovery artifact." });
   }
   if (manifest.menu !== null && manifest.menu.serviceDate === "") {
     context.addIssue({ code: "custom", message: "Live release service date is missing." });
@@ -108,6 +123,7 @@ export const publicationCandidateReceiptSchema = z.object({
   repository: z.object({ id: z.literal(LIONLOG_REPOSITORY_ID), name: z.literal(LIONLOG_REPOSITORY) }).strict(),
   producer: z.object({
     workflowPath: z.literal(LIVE_CANDIDATE_WORKFLOW),
+    workflowId: z.literal(LIVE_CANDIDATE_WORKFLOW_ID),
     runId: positiveIdentifierSchema,
     runAttempt: z.literal(1),
     sourceCommitSha: gitShaSchema,
@@ -124,9 +140,55 @@ export const publicationCandidateReceiptSchema = z.object({
   }).strict(),
 }).strict();
 
+export const publicationDeploymentReceiptSchema = z.object({
+  receiptVersion: z.literal(PUBLICATION_DEPLOYMENT_RECEIPT_VERSION),
+  recordedAt: z.string().datetime({ offset: true }),
+  operation: z.enum(["promote", "rollback", "first-release-recovery"]),
+  releaseId: sha256Schema,
+  releaseKind: z.enum(["live", "first-release-recovery"]),
+  deploymentId: z.string().regex(/^[A-Za-z0-9._-]{1,200}$/).nullable(),
+  pageUrl: z.literal("https://crunchybrunch.github.io/lionlog/").nullable(),
+  previous: z.object({
+    releaseId: z.union([sha256Schema, z.literal("NONE_FIRST_DEPLOYMENT")]),
+    deploymentId: z.union([z.string().regex(/^[A-Za-z0-9._-]{1,200}$/), z.literal("NONE_FIRST_DEPLOYMENT")]),
+  }).strict(),
+  promotion: z.object({
+    workflowId: z.literal(PROMOTION_WORKFLOW_ID),
+    workflowSha: gitShaSchema,
+    runId: positiveIdentifierSchema,
+    runAttempt: z.literal(1),
+    approvalExpiresAt: z.string().datetime({ offset: true }),
+  }).strict(),
+  source: z.object({
+    artifactId: positiveIdentifierSchema,
+    artifactDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    manifestSha256: sha256Schema,
+  }).strict(),
+  staged: z.object({
+    artifactId: positiveIdentifierSchema,
+    artifactDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    artifactExpiresAt: z.string().datetime({ offset: true }),
+  }).strict(),
+  attemptPhase: z.enum(["submitting", "submission-uncertain", "submission-rejected", "accepted", "status-uncertain", "terminal"]),
+  pagesAccepted: z.boolean(),
+  pagesStatus: z.string().min(1).max(100).nullable(),
+  markerVerified: z.boolean(),
+  publicProductVerified: z.boolean(),
+  knownGood: z.boolean(),
+  uncertain: z.boolean(),
+}).strict().superRefine((receipt, context) => {
+  if (receipt.pagesAccepted !== (receipt.deploymentId !== null)) {
+    context.addIssue({ code: "custom", message: "Deployment acceptance identity is inconsistent." });
+  }
+  if (receipt.knownGood && !(receipt.attemptPhase === "terminal" && receipt.pagesAccepted && receipt.pagesStatus === "succeed" && receipt.markerVerified && receipt.publicProductVerified && !receipt.uncertain)) {
+    context.addIssue({ code: "custom", message: "Known-good requires terminal Pages success and full public verification." });
+  }
+});
+
 export type PublicationReleaseManifest = z.infer<typeof publicationReleaseManifestSchema>;
 export type PublicationReleaseMarker = z.infer<typeof publicationReleaseMarkerSchema>;
 export type PublicationCandidateReceipt = z.infer<typeof publicationCandidateReceiptSchema>;
+export type PublicationDeploymentReceipt = z.infer<typeof publicationDeploymentReceiptSchema>;
 
 export function validatePublicationReleaseManifest(value: unknown): PublicationReleaseManifest {
   return publicationReleaseManifestSchema.parse(value);

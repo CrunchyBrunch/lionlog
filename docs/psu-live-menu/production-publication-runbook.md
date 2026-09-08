@@ -1,6 +1,6 @@
 # LionLog v0.2 production publication runbook
 
-Date: 2026-09-07
+Date: 2026-09-08
 Status: implementation boundary; no Pages site or deployment is created by this document or by merging the implementation.
 
 LionLog publishes normalized public PSU menu data as a static project-site PWA. LionLog is independent and is not affiliated with or endorsed by Penn State. It does not use an official or private PSU API. Only the manually dispatched candidate workflow contacts PSU; browsers, CI, builds, promotion, rollback, and app opens do not.
@@ -12,9 +12,9 @@ Publication has four distinct gates:
 1. An owner authorizes one first-attempt candidate run on an exact `main` SHA and service date.
 2. The producer ingests, validates, builds, inventories, packages, and retains immutable live and first-release recovery candidates. It cannot deploy.
 3. An owner reviews the exact artifact ID, GitHub artifact digest, release-manifest digest, expiry, service date, versions, coverage, omissions, and inventory, then dispatches promotion with a time-bounded approval tuple.
-4. An unprivileged job independently validates the exact candidate. The protected `github-pages` environment then gates a separate job holding `pages: write` and `id-token: write`. That job rechecks main, approval time, current production identity, staged bytes, and submits exactly one Pages deployment request.
+4. An unprivileged job independently derives menu-policy evidence from the catalog and every snapshot, validates the exact recovery relationship, and stages exact bytes. The protected `github-pages` environment then gates a separate job holding `pages: write` and `id-token: write`. After all bounded downloads, that job immediately rechecks main, the numeric producer and CI workflow identities, approval time, freshness, current production receipt/deployment, and artifact retention before requesting OIDC and submitting exactly one Pages deployment request.
 
-The promotion workflow never ingests, builds, runs package scripts from the candidate, or executes candidate contents. It downloads by numeric artifact ID, requires the exact wrapper and manifest digests, allows only `release-manifest.json` and `site.tar`, parses the bounded ustar archive without following links, and validates the extracted static site, catalog, and snapshots.
+The promotion workflow never ingests, builds, runs package scripts from the candidate, or executes candidate contents. It downloads by numeric artifact ID, normalizes the upload-action and API SHA-256 representations before fatal comparison, validates ZIP central/local headers and regular-file metadata before extraction, allows only `release-manifest.json` and `site.tar`, parses the bounded ustar archive without following links, and rejects case-colliding paths before any write. It validates the extracted static site, catalog, and snapshots.
 
 ## Repository settings required before the first deployment
 
@@ -43,7 +43,7 @@ The producer retains three artifacts for up to 90 days, subject to repository po
 - an app-only first-release recovery bundle from the same source, with no menu data;
 - external receipts recording candidate artifact IDs, wrapper digests, manifest digests, release IDs, sizes, provenance, and exact expiry.
 
-The live manifest records repository identity, producer workflow/run/attempt, source SHA, target origin/base path, shell revision, service and retrieval times, parser/schema versions, coverage and omissions, catalog digest, every site file and hash, and the Pages tar digest. `release.json` inside the site exposes a non-secret release ID for current-production comparison and smoke tests.
+The live manifest records repository identity, numeric producer workflow ID/path/run/attempt, source SHA, target origin/base path, shell revision, service and retrieval times, parser/schema versions, coverage and omissions, catalog digest, every site file and hash, the Pages tar digest, and the exact retained recovery artifact ID/digest/manifest/release ID. Its 18-hour freshness and 48-hour retention claims are derived again from validated snapshot bytes. `release.json` inside the site exposes a non-secret release ID, but that marker alone is never treated as a known-good product.
 
 ## Promotion approval tuple
 
@@ -54,7 +54,9 @@ Dispatch `deploy-github-pages.yml` from the current `main` only after reviewing 
 - exact source artifact ID and `sha256:` GitHub artifact digest;
 - exact lowercase release-manifest SHA-256;
 - exact candidate source SHA and service date (`NONE` only for first-release recovery);
-- exact current public release ID and Pages deployment ID, or `NONE_FIRST_DEPLOYMENT` for both on the first deployment;
+- exact promotion-workflow SHA;
+- exact retained recovery artifact ID, wrapper digest, manifest digest, and release ID;
+- exact current public release ID, latest Pages deployment ID, and known-good receipt artifact ID/digest, or `NONE_FIRST_DEPLOYMENT` for all four sentinel fields on the first deployment;
 - an ISO approval expiry timestamp;
 - coverage approval and expired-rollback approval values described below;
 - confirmation: `PROMOTE_EXACT_LIONLOG_RELEASE`.
@@ -88,15 +90,15 @@ Such a rollback restores the application while the menu correctly appears unavai
 5. Record the live candidate and first-release recovery identities before enabling Pages.
 6. Obtain direct authorization to enable Pages with GitHub Actions and to promote the exact live tuple.
 7. Dispatch promotion and approve its protected environment job.
-8. Require the terminal Pages deployment ID plus an anonymous match of `release.json` before recording the release as known-good.
+8. Require a terminal successful Pages deployment plus anonymous byte-for-byte verification of every manifest inventory file before recording the release as known-good.
 
-Pages accepting a deployment is distinct from the public smoke check. The deployment receipt records both. A first deployment has no earlier live site, so its approved app-only recovery candidate is the bounded recovery target.
+Pages accepting a deployment, marker verification, and full public-product verification are distinct receipt fields. The always-run receipt collector records failures and uncertainty; `knownGood` is true only when the exact deployment succeeded and the complete served inventory matched. A first deployment is allowed only when both the public marker is absent and the Pages deployment collection is empty. Its exact app-only recovery candidate must already be retained and bound into the live manifest.
 
 ## Rollback and uncertain outcomes
 
-Rollback selects a retained, previously validated candidate by exact ID and digest. It uses the same serialized workflow and protected environment approval as promotion. It never rebuilds or re-scrapes. The public current release ID and prior deployment ID must match the approval tuple before replacement.
+Rollback selects a retained, previously validated candidate by exact ID and digest. It uses the same serialized workflow and protected environment approval as promotion. It never rebuilds or re-scrapes. The public release marker, exact known-good receipt, and latest successful Pages deployment must all identify the approved current production state before replacement. This rejects delayed A-to-B-to-A approvals that cite an older deployment of A.
 
-If deployment submission, polling, or the public smoke check has an uncertain outcome, do not rerun or submit another deployment blindly. Reconcile the Pages deployment ID, deployment status, public `release.json`, workflow run, and retained receipt first. Then obtain a new operation approval if another deployment is necessary.
+The deploy adapter writes attempt evidence before submission and updates it immediately when an accepted deployment ID is available. Polling, parse, timeout, and public-verification failures retain an incomplete or uncertain receipt rather than losing the ID or claiming success. If any outcome is uncertain, do not rerun or submit another deployment blindly. Reconcile the Pages deployment collection, deployment ID/status, complete public inventory, workflow run, and retained receipt first. Then obtain a new operation approval if another deployment is necessary.
 
 Rollback authority lasts only while the exact candidate bytes remain retrievable. GitHub artifact expiry or deletion is a hard stop. Keep the current known-good candidate and at least one approved rollback/recovery target; durable archival beyond GitHub's retention window is a later milestone.
 

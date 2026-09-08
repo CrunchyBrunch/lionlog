@@ -58,7 +58,7 @@ test("service worker refuses redirected, cross-origin, or unmarked navigation do
   assert.match(source, /isExpectedApplicationDocument/);
   assert.match(source, /response\.redirected/);
   assert.match(source, /response\.type === "opaqueredirect"/);
-  assert.match(source, /responseUrl\.origin !== self\.location\.origin/);
+  assert.match(source, /!isWithinApplicationScope\(responseUrl\)/);
   assert.match(source, /contentType\.includes\("text\/html"\)/);
   assert.match(source, /data-lionlog-shell="\$\{SHELL_REVISION\}"/);
   assert.match(source, /if \(await isExpectedApplicationDocument\(response\)\)/);
@@ -131,6 +131,7 @@ test("service-worker installation fails when any offline startup asset is unavai
         ok: !href.includes("_next/app.js"),
         redirected: false,
         type: "basic",
+        url: href,
         clone: () => ({}),
       };
     },
@@ -144,6 +145,97 @@ test("service-worker installation fails when any offline startup asset is unavai
   vm.runInNewContext(source, context);
   await assert.rejects(context.cacheApplicationShell(), /asset was unavailable/);
   assert.ok(cached.includes("https://lionlog.example/lionlog/"));
+});
+
+test("service-worker lifecycle scopes caches and preserves the active shell across interrupted update and rollback", async () => {
+  const sourceTemplate = await readFile(path.join(projectRoot, "public/sw.js"), "utf8");
+  const cacheNames = new Set(["lionlog-shell-other-project-a"]);
+  const cacheContents = new Map();
+  const deleted = [];
+  const caches = {
+    async open(name) {
+      cacheNames.add(name);
+      if (!cacheContents.has(name)) cacheContents.set(name, new Map());
+      const values = cacheContents.get(name);
+      return {
+        async put(key, response) { values.set(String(key), response); },
+        async match(key) { return values.get(String(key)) ?? null; },
+      };
+    },
+    async keys() { return [...cacheNames]; },
+    async delete(name) { deleted.push(name); cacheNames.delete(name); cacheContents.delete(name); return true; },
+  };
+
+  async function runLifecycle(revision, { failAsset = false } = {}) {
+    const handlers = {};
+    const source = sourceTemplate.replaceAll("__LIONLOG_SHELL_REVISION__", revision);
+    const context = {
+      URL,
+      Response,
+      caches,
+      fetch: async (input) => {
+        const href = String(input);
+        const isShell = href === "https://lionlog.example/lionlog/";
+        const body = isShell
+          ? `<html data-lionlog-shell="${revision}"><script src="/lionlog/_next/app.js"></script><script src="/other/app.js"></script></html>`
+          : "asset";
+        return {
+          ok: !(failAsset && href.includes("_next/app.js")),
+          redirected: false,
+          type: "basic",
+          url: href,
+          headers: new Headers({ "content-type": isShell ? "text/html" : "text/javascript" }),
+          clone: () => ({ text: async () => body }),
+          text: async () => body,
+        };
+      },
+      self: {
+        addEventListener(name, handler) { handlers[name] = handler; },
+        clients: { claim: async () => {} },
+        location: { origin: "https://lionlog.example" },
+        registration: { scope: "https://lionlog.example/lionlog/" },
+        skipWaiting: async () => {},
+      },
+    };
+    vm.runInNewContext(source, context);
+    let installation;
+    handlers.install({ waitUntil(value) { installation = value; } });
+    await installation;
+    let activation;
+    handlers.activate({ waitUntil(value) { activation = value; } });
+    await activation;
+    return handlers;
+  }
+
+  const revisionA = "a".repeat(40);
+  const revisionB = "b".repeat(40);
+  const handlersA = await runLifecycle(revisionA);
+  assert.ok(cacheNames.has(`lionlog-shell-lionlog-${revisionA}`));
+  assert.ok(cacheNames.has("lionlog-shell-other-project-a"));
+  assert.ok(!cacheContents.get(`lionlog-shell-lionlog-${revisionA}`).has("https://lionlog.example/other/app.js"));
+  for (const requestUrl of ["https://lionlog.example/lionlog/api", "https://lionlog.example/lionlog/api/menu", "https://lionlog.example/other/app.js"]) {
+    let responded = false;
+    handlersA.fetch({
+      request: { method: "GET", mode: "cors", url: requestUrl },
+      respondWith() { responded = true; },
+    });
+    assert.equal(responded, false, `service worker must ignore ${requestUrl}`);
+  }
+
+  await assert.rejects(runLifecycle(revisionB, { failAsset: true }), /asset was unavailable/);
+  assert.ok(cacheNames.has(`lionlog-shell-lionlog-${revisionA}`), "the old active shell survives interrupted installation");
+  assert.ok(cacheNames.has("lionlog-shell-other-project-a"));
+
+  await runLifecycle(revisionB);
+  assert.ok(!cacheNames.has(`lionlog-shell-lionlog-${revisionA}`));
+  assert.ok(cacheNames.has(`lionlog-shell-lionlog-${revisionB}`));
+  assert.ok(cacheNames.has("lionlog-shell-other-project-a"));
+
+  await runLifecycle(revisionA);
+  assert.ok(cacheNames.has(`lionlog-shell-lionlog-${revisionA}`));
+  assert.ok(!cacheNames.has(`lionlog-shell-lionlog-${revisionB}`));
+  assert.ok(cacheNames.has("lionlog-shell-other-project-a"));
+  assert.ok(deleted.every((name) => name.startsWith("lionlog-shell-lionlog-")));
 });
 
 test("release version and brand colors stay consistent across the PWA surface", async () => {

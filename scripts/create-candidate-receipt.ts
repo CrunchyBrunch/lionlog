@@ -49,6 +49,7 @@ const receipt = publicationCandidateReceiptSchema.parse({
   repository: { id: LIONLOG_REPOSITORY_ID, name: LIONLOG_REPOSITORY },
   producer: {
     workflowPath: manifest.source.workflowPath,
+    workflowId: manifest.source.workflowId,
     runId: manifest.source.workflowRunId,
     runAttempt: manifest.source.workflowRunAttempt,
     sourceCommitSha: manifest.source.commitSha,

@@ -4,14 +4,18 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   LIVE_CANDIDATE_WORKFLOW,
+  LIVE_CANDIDATE_WORKFLOW_ID,
   LIONLOG_REPOSITORY,
   LIONLOG_REPOSITORY_ID,
+  REQUIRED_CI_WORKFLOW,
+  REQUIRED_CI_WORKFLOW_ID,
   TARGET_BASE_PATH,
   TARGET_ORIGIN,
   validatePublicationReleaseManifest,
   validatePublicationReleaseMarker,
   type PublicationReleaseManifest,
 } from "../infrastructure/publication/release-contract.ts";
+import { deriveMenuEvidence } from "../infrastructure/publication/menu-evidence.ts";
 import { validatePagesArtifact } from "./prepare-pages-artifact.ts";
 import { createPublicationTar, extractPublicationTar, parsePublicationTar } from "./publication-tar.ts";
 import { computePublicationReleaseId, sha256 } from "./create-publication-bundle.ts";
@@ -39,8 +43,20 @@ interface GithubMetadata {
     status: string;
     conclusion: string;
     path: string;
+    workflow_id: number;
   };
-  checkRuns: Array<{ name: string; head_sha: string; status: string; conclusion: string }>;
+  ciRun: {
+    id: number;
+    workflow_id: number;
+    path: string;
+    event: string;
+    head_sha: string;
+    head_branch: string;
+    run_attempt: number;
+    status: string;
+    conclusion: string;
+  };
+  ciJobs: Array<{ name: string; head_sha: string; status: string; conclusion: string }>;
 }
 
 export interface PublicationVerificationOptions {
@@ -59,6 +75,11 @@ export interface PublicationVerificationOptions {
   partialApproval: string;
   expiredRollbackApproval: string;
   workflowSha: string;
+  expectedPromotionWorkflowSha: string;
+  expectedRecoveryArtifactId: number;
+  expectedRecoveryArtifactDigest: string;
+  expectedRecoveryManifestSha256: string;
+  expectedRecoveryReleaseId: string;
   now: Date;
 }
 
@@ -76,6 +97,7 @@ export async function verifyPublicationBundle(options: PublicationVerificationOp
     serviceDate: manifest.menu?.serviceDate ?? null,
     catalogSha256: manifest.menu?.catalogSha256 ?? null,
     shellRevision: manifest.shellRevision,
+    recoveryReleaseId: manifest.recovery?.releaseId ?? null,
   });
   if (manifest.releaseId !== computedReleaseId) throw new Error("Release identity does not match its manifest provenance.");
   validateApprovalAndProvenance(manifest, options);
@@ -86,6 +108,12 @@ export async function verifyPublicationBundle(options: PublicationVerificationOp
   }
   const entries = parsePublicationTar(tarBytes);
   if (!createPublicationTar(entries).equals(tarBytes)) throw new Error("Pages tar is not in canonical deterministic form.");
+  if (manifest.releaseKind === "live") {
+    const evidence = deriveMenuEvidence(entries, manifest.source.commitSha, sha256);
+    if (JSON.stringify(evidence.menu) !== JSON.stringify(manifest.menu)) {
+      throw new Error("Release manifest menu claims do not match validated catalog and snapshot bytes.");
+    }
+  }
   const actualInventory = entries.map((entry) => ({
     path: entry.path,
     bytes: entry.data.byteLength,
@@ -142,6 +170,7 @@ export function validateApprovalAndProvenance(
     || metadata.run.status !== "completed"
     || metadata.run.conclusion !== "success"
     || metadata.run.path !== LIVE_CANDIDATE_WORKFLOW
+    || metadata.run.workflow_id !== LIVE_CANDIDATE_WORKFLOW_ID
   ) throw new Error("Candidate producer run provenance mismatch.");
   if (
     metadata.artifact.id !== options.expectedArtifactId
@@ -161,15 +190,22 @@ export function validateApprovalAndProvenance(
     manifest.source.commitSha !== options.expectedSourceSha
     || manifest.source.workflowRunId !== options.expectedRunId
     || manifest.source.workflowRunAttempt !== options.expectedRunAttempt
+    || manifest.source.workflowId !== LIVE_CANDIDATE_WORKFLOW_ID
   ) throw new Error("Release manifest source provenance mismatch.");
   const expectedNamePrefix = manifest.releaseKind === "live" ? "lionlog-live-" : "lionlog-first-release-recovery-";
   if (!metadata.artifact.name.startsWith(expectedNamePrefix)) throw new Error("Candidate artifact name does not match its release kind.");
-  if (!metadata.checkRuns.some((check) => (
-    check.name === "verify"
-    && check.head_sha === options.expectedSourceSha
-    && check.status === "completed"
-    && check.conclusion === "success"
-  ))) throw new Error("Required CI did not pass on the candidate source commit.");
+  if (
+    options.expectedPromotionWorkflowSha !== options.workflowSha
+    || metadata.ciRun.workflow_id !== REQUIRED_CI_WORKFLOW_ID
+    || metadata.ciRun.path !== REQUIRED_CI_WORKFLOW
+    || metadata.ciRun.event !== "push"
+    || metadata.ciRun.head_sha !== options.expectedSourceSha
+    || metadata.ciRun.head_branch !== "main"
+    || metadata.ciRun.run_attempt !== 1
+    || metadata.ciRun.status !== "completed"
+    || metadata.ciRun.conclusion !== "success"
+    || !metadata.ciJobs.some((job) => job.name === "verify" && job.head_sha === options.expectedSourceSha && job.status === "completed" && job.conclusion === "success")
+  ) throw new Error("Required CI workflow identity did not pass on the candidate source commit.");
   if (manifest.target.origin !== TARGET_ORIGIN || manifest.target.basePath !== TARGET_BASE_PATH) {
     throw new Error("Candidate target identity mismatch.");
   }
@@ -181,11 +217,24 @@ export function validateApprovalAndProvenance(
     if (options.partialApproval !== "COMPLETE_ONLY" || options.expiredRollbackApproval !== "NONE") {
       throw new Error("First-release recovery approval fields are inconsistent.");
     }
+    if (
+      options.expectedRecoveryArtifactId !== options.expectedArtifactId
+      || options.expectedRecoveryArtifactDigest !== options.expectedArtifactDigest
+      || options.expectedRecoveryManifestSha256 !== options.expectedManifestSha256
+      || options.expectedRecoveryReleaseId !== manifest.releaseId
+    ) throw new Error("First-release recovery approval is not bound to the exact recovery bytes.");
     return;
   }
   if (manifest.releaseKind !== "live" || manifest.menu === null || manifest.menu.serviceDate !== options.expectedServiceDate) {
     throw new Error("Live publication approval does not match the candidate service date.");
   }
+  if (
+    manifest.recovery === null
+    || manifest.recovery.artifactId !== options.expectedRecoveryArtifactId
+    || manifest.recovery.artifactDigest !== options.expectedRecoveryArtifactDigest
+    || manifest.recovery.manifestSha256 !== options.expectedRecoveryManifestSha256
+    || manifest.recovery.releaseId !== options.expectedRecoveryReleaseId
+  ) throw new Error("Live publication approval does not match its exact recovery artifact.");
   if (manifest.menu.coverage === "partial") {
     const expected = `APPROVE_PARTIAL:${options.expectedManifestSha256}:${manifest.menu.omissions["invalid-name"]}`;
     if (options.partialApproval !== expected) throw new Error("Partial coverage lacks exact Project Manager approval.");
@@ -238,6 +287,11 @@ function parseArguments(): PublicationVerificationOptions {
     partialApproval: required("--partial-approval"),
     expiredRollbackApproval: required("--expired-rollback-approval"),
     workflowSha: required("--workflow-sha"),
+    expectedPromotionWorkflowSha: required("--expected-promotion-workflow-sha"),
+    expectedRecoveryArtifactId: Number(required("--recovery-artifact-id")),
+    expectedRecoveryArtifactDigest: required("--recovery-artifact-digest"),
+    expectedRecoveryManifestSha256: required("--recovery-manifest-digest"),
+    expectedRecoveryReleaseId: required("--recovery-release-id"),
     now: new Date(args.get("--now") ?? Date.now()),
   };
 }

@@ -4,6 +4,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   LIVE_CANDIDATE_WORKFLOW,
+  LIVE_CANDIDATE_WORKFLOW_ID,
   LIONLOG_REPOSITORY,
   LIONLOG_REPOSITORY_ID,
   PUBLICATION_MANIFEST_VERSION,
@@ -14,7 +15,7 @@ import {
   publicationReleaseMarkerSchema,
   type PublicationReleaseManifest,
 } from "../infrastructure/publication/release-contract.ts";
-import { validatePsuPublicationCatalog } from "../infrastructure/psu/publication-catalog.ts";
+import { deriveMenuEvidence } from "../infrastructure/publication/menu-evidence.ts";
 import { validatePagesArtifact } from "./prepare-pages-artifact.ts";
 import { createPublicationTar, readPublicationFiles } from "./publication-tar.ts";
 
@@ -26,6 +27,9 @@ interface BundleOptions {
   runId: number;
   runAttempt: number;
   createdAt: string;
+  recoveryManifest?: string;
+  recoveryArtifactId?: number;
+  recoveryArtifactDigest?: string;
 }
 
 interface PublicationReleaseIdentityInput {
@@ -36,6 +40,7 @@ interface PublicationReleaseIdentityInput {
   serviceDate: string | null;
   catalogSha256: string | null;
   shellRevision: string;
+  recoveryReleaseId: string | null;
 }
 
 export async function createPublicationBundle(options: BundleOptions): Promise<PublicationReleaseManifest> {
@@ -56,36 +61,30 @@ export async function createPublicationBundle(options: BundleOptions): Promise<P
     || !serviceWorker.includes(`const SHELL_REVISION = "${options.commitSha}";`)
   ) throw new Error("Candidate shell revision does not match its source commit.");
 
-  const catalogPath = path.join(site, "menu-data", "v2", "catalog.json");
   let menu: PublicationReleaseManifest["menu"] = null;
+  let recovery: PublicationReleaseManifest["recovery"] = null;
   let catalogSha256: string | null = null;
   if (options.releaseKind === "live") {
     if (!initialFiles.includes("menu-data/v2/catalog.json")) throw new Error("Live candidate is missing menu data.");
-    const catalogBytes = await readFile(catalogPath);
-    const catalog = validatePsuPublicationCatalog(JSON.parse(catalogBytes.toString("utf8")));
-    if (catalog.publication.mode !== "field-release" || catalog.publication.commitSha !== options.commitSha) {
-      throw new Error("Live candidate catalog provenance does not match the source commit.");
+    const evidence = deriveMenuEvidence(await readPublicationFiles(site, initialFiles), options.commitSha, sha256);
+    catalogSha256 = evidence.catalogSha256;
+    menu = evidence.menu;
+    if (!options.recoveryManifest || !Number.isSafeInteger(options.recoveryArtifactId) || !/^sha256:[a-f0-9]{64}$/.test(options.recoveryArtifactDigest ?? "")) {
+      throw new Error("Live candidate lacks an exact retained recovery artifact relationship.");
     }
-    catalogSha256 = sha256(catalogBytes);
-    const earliestFreshUntil = minimumIso(catalog.snapshots.map((entry) => entry.freshUntil));
-    const earliestRetainUntil = minimumIso(catalog.snapshots.map((entry) => entry.retainUntil));
-    menu = {
-      serviceDate: catalog.publication.serviceDate ?? "",
-      catalogPath: "menu-data/v2/catalog.json",
-      catalogSha256,
-      catalogVersion: catalog.catalogVersion,
-      snapshotSchemaVersion: catalog.snapshotSchemaVersion,
-      parserVersion: catalog.parserVersion,
-      generatedAt: catalog.generatedAt,
-      retrievalStartedAt: catalog.publication.retrievalStartedAt ?? "",
-      retrievalCompletedAt: catalog.publication.retrievalCompletedAt ?? "",
-      earliestFreshUntil,
-      earliestRetainUntil,
-      coverage: catalog.publication.coverage,
-      sourceObservationCount: catalog.publication.sourceObservationCount,
-      publishedObservationCount: catalog.publication.publishedObservationCount,
-      omissions: catalog.publication.omissions,
-      snapshotCount: catalog.snapshots.length,
+    const recoveryBytes = await readFile(options.recoveryManifest);
+    const recoveryManifest = publicationReleaseManifestSchema.parse(JSON.parse(recoveryBytes.toString("utf8")));
+    if (
+      recoveryManifest.releaseKind !== "first-release-recovery"
+      || recoveryManifest.source.commitSha !== options.commitSha
+      || recoveryManifest.source.workflowRunId !== options.runId
+      || recoveryManifest.source.workflowRunAttempt !== options.runAttempt
+    ) throw new Error("Recovery candidate does not match the live producer identity.");
+    recovery = {
+      releaseId: recoveryManifest.releaseId,
+      manifestSha256: sha256(recoveryBytes),
+      artifactId: options.recoveryArtifactId!,
+      artifactDigest: options.recoveryArtifactDigest!,
     };
   } else if (initialFiles.some((file) => file.startsWith("menu-data/"))) {
     throw new Error("First-release recovery candidate cannot contain menu data.");
@@ -99,6 +98,7 @@ export async function createPublicationBundle(options: BundleOptions): Promise<P
     serviceDate: menu?.serviceDate ?? null,
     catalogSha256,
     shellRevision: options.commitSha,
+    recoveryReleaseId: recovery?.releaseId ?? null,
   });
   const marker = publicationReleaseMarkerSchema.parse({
     markerVersion: PUBLICATION_MARKER_VERSION,
@@ -128,12 +128,14 @@ export async function createPublicationBundle(options: BundleOptions): Promise<P
     source: {
       commitSha: options.commitSha,
       workflowPath: LIVE_CANDIDATE_WORKFLOW,
+      workflowId: LIVE_CANDIDATE_WORKFLOW_ID,
       workflowRunId: options.runId,
       workflowRunAttempt: options.runAttempt,
     },
     target: { origin: TARGET_ORIGIN, basePath: TARGET_BASE_PATH },
     shellRevision: options.commitSha,
     menu,
+    recovery,
     marker: { path: "release.json", sha256: markerInventory.sha256 },
     site: { tarFile: "site.tar", tarSha256: sha256(tarBytes), bytes: tarBytes.byteLength, inventory },
   });
@@ -142,11 +144,6 @@ export async function createPublicationBundle(options: BundleOptions): Promise<P
   await writeFile(path.join(output, "site.tar"), tarBytes, { flag: "wx" });
   await writeFile(path.join(output, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx" });
   return manifest;
-}
-
-function minimumIso(values: readonly string[]): string {
-  if (values.length === 0) throw new Error("Live candidate contains no snapshots.");
-  return values.reduce((minimum, value) => Date.parse(value) < Date.parse(minimum) ? value : minimum);
 }
 
 export function sha256(value: Buffer | string): string {
@@ -166,6 +163,7 @@ export function computePublicationReleaseId(input: PublicationReleaseIdentityInp
     shellRevision: input.shellRevision,
     targetOrigin: TARGET_ORIGIN,
     targetBasePath: TARGET_BASE_PATH,
+    recoveryReleaseId: input.recoveryReleaseId,
   })));
 }
 
@@ -188,6 +186,9 @@ function parseArguments(): BundleOptions {
     runId: Number(args.get("--run-id")),
     runAttempt: Number(args.get("--run-attempt")),
     createdAt: args.get("--created-at") ?? new Date().toISOString(),
+    recoveryManifest: args.get("--recovery-manifest"),
+    recoveryArtifactId: args.has("--recovery-artifact-id") ? Number(args.get("--recovery-artifact-id")) : undefined,
+    recoveryArtifactDigest: args.get("--recovery-artifact-digest"),
   };
 }
 

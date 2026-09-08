@@ -68,6 +68,14 @@ jobs:
         id: recovery-identity
         shell: bash
         run: echo "manifest_digest=$(sha256sum work/pages-field-release/recovery-bundle/release-manifest.json | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Retain exact first-release recovery candidate before live preparation
+        id: upload-recovery
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: lionlog-first-release-recovery-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: work/pages-field-release/recovery-bundle/
+          if-no-files-found: error
+          retention-days: 90
       - name: Validate strict service-date input
         env:
           SERVICE_DATE: ${{ inputs.service_date }}
@@ -142,6 +150,9 @@ jobs:
           --commit-sha=${{ github.sha }}
           --run-id=${{ github.run_id }}
           --run-attempt=${{ github.run_attempt }}
+          --recovery-manifest=work/pages-field-release/recovery-bundle/release-manifest.json
+          --recovery-artifact-id=${{ steps.upload-recovery.outputs.artifact-id }}
+          --recovery-artifact-digest=sha256:${{ steps.upload-recovery.outputs.artifact-digest }}
       - name: Round-trip validate exact live artifact
         shell: bash
         run: |
@@ -164,15 +175,6 @@ jobs:
           path: work/pages-field-release/live-bundle/
           if-no-files-found: error
           retention-days: 90
-      - name: Retain exact first-release recovery candidate
-        id: upload-recovery
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: lionlog-first-release-recovery-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: work/pages-field-release/recovery-bundle/
-          if-no-files-found: error
-          retention-days: 90
-
   record-receipts:
     needs: build-artifact
     runs-on: ubuntu-latest
@@ -189,16 +191,33 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --ignore-scripts
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          artifact-ids: ${{ needs.build-artifact.outputs.live_artifact_id }}
-          path: work/pages-field-release/downloaded-live
-          merge-multiple: true
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          artifact-ids: ${{ needs.build-artifact.outputs.recovery_artifact_id }}
-          path: work/pages-field-release/downloaded-recovery
-          merge-multiple: true
+      - name: Download and validate exact candidate wrappers
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LIVE_ARTIFACT_ID: ${{ needs.build-artifact.outputs.live_artifact_id }}
+          LIVE_ARTIFACT_DIGEST: ${{ needs.build-artifact.outputs.live_artifact_digest }}
+          LIVE_MANIFEST_DIGEST: ${{ needs.build-artifact.outputs.live_manifest_digest }}
+          RECOVERY_ARTIFACT_ID: ${{ needs.build-artifact.outputs.recovery_artifact_id }}
+          RECOVERY_ARTIFACT_DIGEST: ${{ needs.build-artifact.outputs.recovery_artifact_digest }}
+          RECOVERY_MANIFEST_DIGEST: ${{ needs.build-artifact.outputs.recovery_manifest_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/pages-field-release/wrappers
+          for KIND in live recovery; do
+            if [[ "$KIND" == "live" ]]; then
+              ARTIFACT_ID="$LIVE_ARTIFACT_ID"; ARTIFACT_DIGEST="$LIVE_ARTIFACT_DIGEST"; MANIFEST_DIGEST="$LIVE_MANIFEST_DIGEST"
+            else
+              ARTIFACT_ID="$RECOVERY_ARTIFACT_ID"; ARTIFACT_DIGEST="$RECOVERY_ARTIFACT_DIGEST"; MANIFEST_DIGEST="$RECOVERY_MANIFEST_DIGEST"
+            fi
+            curl --fail --silent --show-error --location --proto '=https' --max-time 120 --max-filesize 115343360 \
+              -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' \
+              "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" \
+              --output "work/pages-field-release/wrappers/$KIND.zip"
+            node --experimental-strip-types scripts/artifact-digest.ts --expected="$ARTIFACT_DIGEST" --file="work/pages-field-release/wrappers/$KIND.zip"
+            node --experimental-strip-types scripts/artifact-zip.ts --zip="work/pages-field-release/wrappers/$KIND.zip" --output="work/pages-field-release/downloaded-$KIND" --expected=release-manifest.json,site.tar
+            node --experimental-strip-types scripts/artifact-digest.ts --expected="$MANIFEST_DIGEST" --file="work/pages-field-release/downloaded-$KIND/release-manifest.json"
+          done
       - name: Read immutable artifact metadata
         env:
           GH_TOKEN: ${{ github.token }}
