@@ -1,4 +1,9 @@
 import { pathToFileURL } from "node:url";
+import {
+  createRepositoryDeploymentLedger,
+  publicationLedgerPayload,
+  recordRepositoryDeploymentStatus,
+} from "./publication-deployment-ledger.mjs";
 
 const REPOSITORY = "CrunchyBrunch/lionlog";
 const API_ROOT = "https://api.github.com";
@@ -15,12 +20,16 @@ export async function deployExactPagesArtifact({
   timeoutMs = 10 * 60_000,
   approvalExpiresAt,
   minimumFreshUntil = undefined,
+  repositoryDeploymentId,
   now = () => Date.now(),
   recordAttempt = async (value) => { void value; },
+  recordAccepted = async (value) => { void value; },
 }) {
   if (!Number.isSafeInteger(artifactId) || artifactId <= 0) throw new Error("Pages artifact ID is invalid.");
   if (!/^[a-f0-9]{40}$/.test(buildVersion)) throw new Error("Pages build version must be an exact Git SHA.");
   if (environment !== "github-pages") throw new Error("Unexpected Pages environment.");
+  if (!Number.isSafeInteger(repositoryDeploymentId) || repositoryDeploymentId <= 0) throw new Error("Repository deployment ledger ID is invalid.");
+  const evidence = (value) => ({ ...value, repositoryDeploymentId });
   const assertTemporalAuthorization = () => {
     const current = now();
     if (!Number.isFinite(Date.parse(approvalExpiresAt ?? "")) || Date.parse(approvalExpiresAt) <= current) {
@@ -31,7 +40,7 @@ export async function deployExactPagesArtifact({
     }
   };
   assertTemporalAuthorization();
-  await recordAttempt({ phase: "submitting", artifactId, buildVersion, deploymentId: null, status: null, uncertain: true, recordedAt: new Date(now()).toISOString() });
+  await recordAttempt(evidence({ phase: "submitting", artifactId, buildVersion, deploymentId: null, status: null, uncertain: true, recordedAt: new Date(now()).toISOString() }));
   assertTemporalAuthorization();
   let response;
   try {
@@ -48,48 +57,60 @@ export async function deployExactPagesArtifact({
       }),
     });
   } catch (error) {
-    await recordAttempt({ phase: "submission-uncertain", artifactId, buildVersion, deploymentId: null, status: null, uncertain: true, recordedAt: new Date(now()).toISOString() });
+    await recordAttempt(evidence({ phase: "submission-uncertain", artifactId, buildVersion, deploymentId: null, status: null, uncertain: true, recordedAt: new Date(now()).toISOString() }));
     throw new Error("Pages deployment submission outcome is uncertain; reconcile before any retry.", { cause: error });
   }
   if (!response.ok || response.redirected) {
-    await recordAttempt({ phase: "submission-rejected", artifactId, buildVersion, deploymentId: null, status: `http-${response.status}`, uncertain: false, recordedAt: new Date(now()).toISOString() });
-    throw new Error(`Pages deployment submission failed with HTTP ${response.status}; do not retry blindly.`);
+    const uncertain = response.redirected || response.status >= 500 || new Set([408, 409, 425, 429]).has(response.status);
+    await recordAttempt(evidence({
+      phase: uncertain ? "submission-uncertain" : "submission-rejected",
+      artifactId,
+      buildVersion,
+      deploymentId: null,
+      status: `http-${response.status}`,
+      uncertain,
+      recordedAt: new Date(now()).toISOString(),
+    }));
+    throw new Error(uncertain
+      ? `Pages deployment submission returned HTTP ${response.status}; its outcome is uncertain and must be reconciled before retrying.`
+      : `Pages deployment submission was rejected with HTTP ${response.status}.`);
   }
   let created;
   try { created = await response.json(); } catch (error) {
-    await recordAttempt({ phase: "submission-uncertain", artifactId, buildVersion, deploymentId: null, status: "invalid-response", uncertain: true, recordedAt: new Date(now()).toISOString() });
+    await recordAttempt(evidence({ phase: "submission-uncertain", artifactId, buildVersion, deploymentId: null, status: "invalid-response", uncertain: true, recordedAt: new Date(now()).toISOString() }));
     throw new Error("Pages deployment submission response was unreadable; reconcile before retrying.", { cause: error });
   }
   if (!/^[A-Za-z0-9._-]{1,200}$/.test(created?.id ?? "")) {
-    await recordAttempt({ phase: "submission-uncertain", artifactId, buildVersion, deploymentId: null, status: "missing-deployment-id", uncertain: true, recordedAt: new Date(now()).toISOString() });
+    await recordAttempt(evidence({ phase: "submission-uncertain", artifactId, buildVersion, deploymentId: null, status: "missing-deployment-id", uncertain: true, recordedAt: new Date(now()).toISOString() }));
     throw new Error("Pages deployment response omitted a safe deployment ID; reconcile before retrying.");
   }
-  await recordAttempt({ phase: "accepted", artifactId, buildVersion, deploymentId: created.id, status: "accepted", uncertain: true, recordedAt: new Date(now()).toISOString() });
+  await recordAttempt(evidence({ phase: "accepted", artifactId, buildVersion, deploymentId: created.id, status: "accepted", uncertain: true, recordedAt: new Date(now()).toISOString() }));
   const statusUrl = new URL(created.status_url ?? "", API_ROOT);
   if (statusUrl.origin !== API_ROOT || statusUrl.pathname !== `/repos/${REPOSITORY}/pages/deployments/${created.id}/status`) {
     throw new Error("Pages deployment returned an unexpected status URL.");
   }
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  await recordAccepted({ repositoryDeploymentId, pagesDeploymentId: created.id });
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
     await wait(5_000);
     let statusResponse;
     try {
       statusResponse = await fetchImpl(statusUrl, { headers: apiHeaders(githubToken), redirect: "error", signal: AbortSignal.timeout(30_000) });
     } catch (error) {
-      await recordAttempt({ phase: "status-uncertain", artifactId, buildVersion, deploymentId: created.id, status: "request-failed", uncertain: true, recordedAt: new Date(now()).toISOString() });
+      await recordAttempt(evidence({ phase: "status-uncertain", artifactId, buildVersion, deploymentId: created.id, status: "request-failed", uncertain: true, recordedAt: new Date(now()).toISOString() }));
       throw new Error(`Pages deployment ${created.id} status request failed; reconcile before retrying.`, { cause: error });
     }
     if (!statusResponse.ok || statusResponse.redirected) {
-      await recordAttempt({ phase: "status-uncertain", artifactId, buildVersion, deploymentId: created.id, status: `http-${statusResponse.status}`, uncertain: true, recordedAt: new Date(now()).toISOString() });
+      await recordAttempt(evidence({ phase: "status-uncertain", artifactId, buildVersion, deploymentId: created.id, status: `http-${statusResponse.status}`, uncertain: true, recordedAt: new Date(now()).toISOString() }));
       throw new Error(`Pages deployment ${created.id} status became unavailable; reconcile before retrying.`);
     }
     let status;
     try { status = (await statusResponse.json())?.status; } catch (error) {
-      await recordAttempt({ phase: "status-uncertain", artifactId, buildVersion, deploymentId: created.id, status: "invalid-response", uncertain: true, recordedAt: new Date(now()).toISOString() });
+      await recordAttempt(evidence({ phase: "status-uncertain", artifactId, buildVersion, deploymentId: created.id, status: "invalid-response", uncertain: true, recordedAt: new Date(now()).toISOString() }));
       throw new Error(`Pages deployment ${created.id} status response was unreadable; reconcile before retrying.`, { cause: error });
     }
     if (status === "succeed") {
-      await recordAttempt({ phase: "terminal", artifactId, buildVersion, deploymentId: created.id, status, uncertain: true, recordedAt: new Date(now()).toISOString() });
+      await recordAttempt(evidence({ phase: "terminal", artifactId, buildVersion, deploymentId: created.id, status, uncertain: true, recordedAt: new Date(now()).toISOString() }));
       const pageUrl = new URL(created.page_url);
       if (
         pageUrl.origin !== "https://crunchybrunch.github.io"
@@ -99,15 +120,15 @@ export async function deployExactPagesArtifact({
       ) {
         throw new Error("Pages deployment returned an unexpected public URL.");
       }
-      await recordAttempt({ phase: "terminal", artifactId, buildVersion, deploymentId: created.id, status, uncertain: false, recordedAt: new Date(now()).toISOString() });
+      await recordAttempt(evidence({ phase: "terminal", artifactId, buildVersion, deploymentId: created.id, status, uncertain: false, recordedAt: new Date(now()).toISOString() }));
       return { deploymentId: created.id, pageUrl: pageUrl.href, status };
     }
     if (TERMINAL_FAILURES.has(status)) {
-      await recordAttempt({ phase: "terminal", artifactId, buildVersion, deploymentId: created.id, status, uncertain: false, recordedAt: new Date(now()).toISOString() });
+      await recordAttempt(evidence({ phase: "terminal", artifactId, buildVersion, deploymentId: created.id, status, uncertain: false, recordedAt: new Date(now()).toISOString() }));
       throw new Error(`Pages deployment ${created.id} failed with status ${status}.`);
     }
   }
-  await recordAttempt({ phase: "status-uncertain", artifactId, buildVersion, deploymentId: created.id, status: "timeout", uncertain: true, recordedAt: new Date(now()).toISOString() });
+  await recordAttempt(evidence({ phase: "status-uncertain", artifactId, buildVersion, deploymentId: created.id, status: "timeout", uncertain: true, recordedAt: new Date(now()).toISOString() }));
   throw new Error(`Pages deployment ${created.id} status timed out; reconcile before retrying.`);
 }
 
@@ -167,6 +188,31 @@ async function main() {
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`);
     await rename(temporary, attemptPath);
   };
+  const payload = publicationLedgerPayload({
+    promotionRunId: Number(process.env.GITHUB_RUN_ID),
+    runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+    releaseId: process.env.RELEASE_ID ?? "",
+    sourceArtifactId: Number(process.env.SOURCE_ARTIFACT_ID),
+    stagedArtifactId: Number(process.env.STAGED_ARTIFACT_ID),
+  });
+  const repositoryDeploymentId = await createRepositoryDeploymentLedger({
+    token: process.env.GITHUB_TOKEN ?? "",
+    workflowSha: process.env.GITHUB_SHA ?? "",
+    payload,
+  });
+  await recordRepositoryDeploymentStatus({
+    token: process.env.GITHUB_TOKEN ?? "",
+    repositoryDeploymentId,
+    state: "in_progress",
+    runId: Number(process.env.GITHUB_RUN_ID),
+  });
+  const recordAccepted = async ({ pagesDeploymentId }) => recordRepositoryDeploymentStatus({
+    token: process.env.GITHUB_TOKEN ?? "",
+    repositoryDeploymentId,
+    state: "in_progress",
+    pagesDeploymentId,
+    runId: Number(process.env.GITHUB_RUN_ID),
+  });
   const result = await deployExactPagesArtifact({
     artifactId: Number(process.env.STAGED_ARTIFACT_ID),
     buildVersion: process.env.GITHUB_SHA ?? "",
@@ -174,12 +220,14 @@ async function main() {
     oidcToken,
     approvalExpiresAt,
     minimumFreshUntil,
+    repositoryDeploymentId,
     recordAttempt,
+    recordAccepted,
   });
   const output = process.env.GITHUB_OUTPUT;
   if (!output) throw new Error("GITHUB_OUTPUT is unavailable.");
   const { appendFile } = await import("node:fs/promises");
-  await appendFile(output, `deployment_id=${result.deploymentId}\npage_url=${result.pageUrl}\nstatus=${result.status}\n`);
+  await appendFile(output, `repository_deployment_id=${repositoryDeploymentId}\ndeployment_id=${result.deploymentId}\npage_url=${result.pageUrl}\nstatus=${result.status}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

@@ -2,9 +2,11 @@ const SHELL_REVISION = "__LIONLOG_SHELL_REVISION__";
 const SCOPE_URL = new URL("./", self.registration.scope).href;
 const SCOPE_PATH = new URL(SCOPE_URL).pathname;
 const API_PATH = new URL("./api/", SCOPE_URL).pathname;
-const SCOPE_KEY = SCOPE_PATH === "/" ? "root" : SCOPE_PATH.slice(1, -1).replace(/[^A-Za-z0-9._-]/g, "-");
-const CACHE_PREFIX = `lionlog-shell-${SCOPE_KEY}-`;
-const CACHE_NAME = `${CACHE_PREFIX}${SHELL_REVISION}`;
+const SCOPE_KEY = [...new TextEncoder().encode(SCOPE_PATH)]
+  .map((byte) => byte.toString(16).padStart(2, "0"))
+  .join("");
+const CACHE_PREFIX = "lionlog-shell-v2-";
+const CACHE_NAME = `${CACHE_PREFIX}${SCOPE_KEY}-${SHELL_REVISION}`;
 const APPLICATION_DOCUMENT_MARKER = `data-lionlog-shell="${SHELL_REVISION}"`;
 const CORE_ASSETS = [
   SCOPE_URL,
@@ -69,7 +71,10 @@ self.addEventListener("activate", (event) => {
     const keys = await caches.keys();
     await Promise.all(
       keys
-        .filter((key) => key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME)
+        .filter((key) => {
+          const match = /^lionlog-shell-v2-([a-f0-9]+)-([a-f0-9]{40}|development)$/.exec(key);
+          return match?.[1] === SCOPE_KEY && key !== CACHE_NAME;
+        })
         .map((key) => caches.delete(key)),
     );
     await self.clients.claim();

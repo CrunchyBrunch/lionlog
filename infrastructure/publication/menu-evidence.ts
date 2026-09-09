@@ -25,6 +25,7 @@ export function deriveMenuEvidence(
   files: readonly PublicationFileEvidence[],
   sourceCommitSha: string,
   sha256: (value: Buffer | string) => string,
+  timing: { readonly bundleCreatedAt: string; readonly verificationTime: Date },
 ): DerivedMenuEvidence {
   const fileMap = new Map(files.map((file) => [file.path, file.data]));
   if (fileMap.size !== files.length) throw new Error("Publication files contain duplicate paths.");
@@ -59,6 +60,15 @@ export function deriveMenuEvidence(
   const snapshotPeriods = new Set<string>();
   const retrievalStartedAt = Date.parse(catalog.publication.retrievalStartedAt);
   const retrievalCompletedAt = Date.parse(catalog.publication.retrievalCompletedAt);
+  const catalogGeneratedAt = Date.parse(catalog.generatedAt);
+  const bundleCreatedAt = Date.parse(timing.bundleCreatedAt);
+  const verificationTime = timing.verificationTime.getTime();
+  if (
+    retrievalStartedAt > retrievalCompletedAt
+    || retrievalCompletedAt > catalogGeneratedAt
+    || catalogGeneratedAt > bundleCreatedAt
+    || bundleCreatedAt > verificationTime
+  ) throw new Error("Live candidate retrieval, catalog, bundle, and verification timestamps are incoherent.");
   let recognizedEmptySnapshotCount = 0;
   for (const entry of catalog.snapshots) {
     const snapshotPath = `${MENU_PREFIX}${entry.snapshotUrl.slice(2)}`;
@@ -75,8 +85,8 @@ export function deriveMenuEvidence(
     const cachedAt = Date.parse(snapshot.cachedAt);
     const freshUntil = Date.parse(snapshot.freshUntil);
     const retainUntil = Date.parse(snapshot.retainUntil);
-    if (retrievedAt < retrievalStartedAt || retrievedAt > retrievalCompletedAt) {
-      throw new Error("Live candidate snapshot retrieval time is outside its field-release window.");
+    if (retrievedAt < retrievalStartedAt || retrievedAt > cachedAt || cachedAt > retrievalCompletedAt || cachedAt > verificationTime) {
+      throw new Error("Live candidate snapshot retrieval/cache time is outside its original field-release window.");
     }
     if (freshUntil - cachedAt !== FIELD_RELEASE_FRESH_MS || retainUntil - cachedAt !== FIELD_RELEASE_RETAIN_MS) {
       throw new Error("Live candidate snapshot exceeds the approved 18-hour/48-hour timestamp policy.");

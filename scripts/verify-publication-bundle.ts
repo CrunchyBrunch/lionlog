@@ -109,7 +109,10 @@ export async function verifyPublicationBundle(options: PublicationVerificationOp
   const entries = parsePublicationTar(tarBytes);
   if (!createPublicationTar(entries).equals(tarBytes)) throw new Error("Pages tar is not in canonical deterministic form.");
   if (manifest.releaseKind === "live") {
-    const evidence = deriveMenuEvidence(entries, manifest.source.commitSha, sha256);
+    const evidence = deriveMenuEvidence(entries, manifest.source.commitSha, sha256, {
+      bundleCreatedAt: manifest.createdAt,
+      verificationTime: options.now,
+    });
     if (JSON.stringify(evidence.menu) !== JSON.stringify(manifest.menu)) {
       throw new Error("Release manifest menu claims do not match validated catalog and snapshot bytes.");
     }

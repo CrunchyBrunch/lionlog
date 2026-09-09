@@ -1,6 +1,6 @@
 # LionLog v0.2 production publication runbook
 
-Date: 2026-09-08
+Date: 2026-09-09
 Status: implementation boundary; no Pages site or deployment is created by this document or by merging the implementation.
 
 LionLog publishes normalized public PSU menu data as a static project-site PWA. LionLog is independent and is not affiliated with or endorsed by Penn State. It does not use an official or private PSU API. Only the manually dispatched candidate workflow contacts PSU; browsers, CI, builds, promotion, rollback, and app opens do not.
@@ -12,7 +12,7 @@ Publication has four distinct gates:
 1. An owner authorizes one first-attempt candidate run on an exact `main` SHA and service date.
 2. The producer ingests, validates, builds, inventories, packages, and retains immutable live and first-release recovery candidates. It cannot deploy.
 3. An owner reviews the exact artifact ID, GitHub artifact digest, release-manifest digest, expiry, service date, versions, coverage, omissions, and inventory, then dispatches promotion with a time-bounded approval tuple.
-4. An unprivileged job independently derives menu-policy evidence from the catalog and every snapshot, validates the exact recovery relationship, and stages exact bytes. The protected `github-pages` environment then gates a separate job holding `pages: write` and `id-token: write`. After all bounded downloads, that job immediately rechecks main, the numeric producer and CI workflow identities, approval time, freshness, current production receipt/deployment, and artifact retention before requesting OIDC and submitting exactly one Pages deployment request.
+4. An unprivileged job independently derives menu-policy evidence from the catalog and every snapshot, validates the exact recovery relationship, and stages exact bytes. The protected `github-pages` environment then gates a separate job holding `deployments: write`, `pages: write`, and `id-token: write`. After all bounded downloads, that job immediately rechecks main, the numeric producer and CI workflow identities, approval time, freshness, the latest attempt, the separate known-good rollback target, and artifact retention before requesting OIDC and submitting exactly one Pages deployment request.
 
 The promotion workflow never ingests, builds, runs package scripts from the candidate, or executes candidate contents. It downloads by numeric artifact ID, normalizes the upload-action and API SHA-256 representations before fatal comparison, validates ZIP central/local headers and regular-file metadata before extraction, allows only `release-manifest.json` and `site.tar`, parses the bounded ustar archive without following links, and rejects case-colliding paths before any write. It validates the extracted static site, catalog, and snapshots.
 
@@ -56,7 +56,8 @@ Dispatch `deploy-github-pages.yml` from the current `main` only after reviewing 
 - exact candidate source SHA and service date (`NONE` only for first-release recovery);
 - exact promotion-workflow SHA;
 - exact retained recovery artifact ID, wrapper digest, manifest digest, and release ID;
-- exact current public release ID, latest Pages deployment ID, and known-good receipt artifact ID/digest, or `NONE_FIRST_DEPLOYMENT` for all four sentinel fields on the first deployment;
+- exact latest-attempt release ID and receipt artifact ID/digest, or the first-deployment sentinel;
+- a separate exact known-good rollback target: release ID, repository deployment ID, Pages deployment ID, and receipt artifact ID/digest, or the first-deployment sentinel when no known-good release exists;
 - an ISO approval expiry timestamp;
 - coverage approval and expired-rollback approval values described below;
 - confirmation: `PROMOTE_EXACT_LIONLOG_RELEASE`.
@@ -92,13 +93,17 @@ Such a rollback restores the application while the menu correctly appears unavai
 7. Dispatch promotion and approve its protected environment job.
 8. Require a terminal successful Pages deployment plus anonymous byte-for-byte verification of every manifest inventory file before recording the release as known-good.
 
-Pages accepting a deployment, marker verification, and full public-product verification are distinct receipt fields. The always-run receipt collector records failures and uncertainty; `knownGood` is true only when the exact deployment succeeded and the complete served inventory matched. A first deployment is allowed only when both the public marker is absent and the Pages deployment collection is empty. Its exact app-only recovery candidate must already be retained and bound into the live manifest.
+Pages accepting a deployment, marker verification, and full public-product verification are distinct receipt fields. The always-run receipt collector records failures and uncertainty; `knownGood` is true only when the exact deployment succeeded and the complete served inventory matched. A first deployment is allowed only when both the public marker is absent and the supported repository Deployments collection has no LionLog publication ledger entry. Its exact app-only recovery candidate must already be retained and bound into the live manifest.
 
 ## Rollback and uncertain outcomes
 
-Rollback selects a retained, previously validated candidate by exact ID and digest. It uses the same serialized workflow and protected environment approval as promotion. It never rebuilds or re-scrapes. The public release marker, exact known-good receipt, and latest successful Pages deployment must all identify the approved current production state before replacement. This rejects delayed A-to-B-to-A approvals that cite an older deployment of A.
+Rollback selects a retained, previously validated candidate by exact ID and digest. It uses the same serialized workflow and protected environment approval as promotion. It never rebuilds or re-scrapes. Authorization binds the latest attempt separately from the exact historical known-good rollback target. The latest supported repository deployment ledger entry must identify the current attempt, while the rollback receipt, repository deployment ID, Pages deployment ID, and source-site hash must all identify the target. This permits a reviewed A-to-B-to-A recovery with distinct deployment IDs and rejects an approval that merely cites an older deployment of A.
 
-The deploy adapter writes attempt evidence before submission and updates it immediately when an accepted deployment ID is available. Polling, parse, timeout, and public-verification failures retain an incomplete or uncertain receipt rather than losing the ID or claiming success. If any outcome is uncertain, do not rerun or submit another deployment blindly. Reconcile the Pages deployment collection, deployment ID/status, complete public inventory, workflow run, and retained receipt first. Then obtain a new operation approval if another deployment is necessary.
+The workflow creates a supported repository Deployment ledger entry before the Pages request. Once GitHub returns a Pages deployment ID, the adapter writes it locally and immediately records it in a repository deployment status before long polling. The collector can therefore recover the ID through supported repository Deployment list/get/status APIs and the exact Pages status endpoint even if the deploy job times out before uploading local evidence. A ledger created without its first status is retained as an uncertain attempt and can still authorize the bounded recovery path; a successfully re-read collection with no exact attempt ledger proves that this workflow never reached its Pages request. A transport or HTTP 5xx response from the Pages submission remains uncertain, never proven rejected. There is still an unavoidable small interval between receiving the Pages response and completing the server-side status write; a runner loss in that interval must remain uncertain and be reconciled before retry.
+
+If Pages succeeds but marker or complete-inventory verification fails, the failed current-attempt receipt is retained and the repository deployment is marked failed. A later directly approved rollback may pair that receipt with the preceding known-good target. On a failed first launch, `first-release-recovery` instead requires the exact recovery tuple already bound into the failed live receipt and no known-good target. Neither path weakens `knownGood`.
+
+Current-state verification intentionally uses two GitHub API families. General [repository Deployments](https://docs.github.com/en/rest/deployments/deployments) and [deployment statuses](https://docs.github.com/en/rest/deployments/statuses) provide the listable, task/environment-scoped publication ledger and require `deployments: read` or `deployments: write`. [Pages deployments](https://docs.github.com/en/rest/pages/pages) provide creation and exact-ID status; LionLog does not issue an unsupported Pages collection GET. The protected deploy job has `deployments: write`, `pages: write`, and `id-token: write`; the final collector has `deployments: write`; preapproval state verification has `deployments: read`. Environment review, branch protection, Pages source configuration, and administrator-bypass policy remain owner prerequisites and are not attested by this repository.
 
 Rollback authority lasts only while the exact candidate bytes remain retrievable. GitHub artifact expiry or deletion is a hard stop. Keep the current known-good candidate and at least one approved rollback/recovery target; durable archival beyond GitHub's retention window is a later milestone.
 

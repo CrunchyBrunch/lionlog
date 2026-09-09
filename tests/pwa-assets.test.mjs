@@ -70,6 +70,7 @@ test("application-document verification accepts only the marked LionLog response
     .replaceAll("__LIONLOG_SHELL_REVISION__", shellRevision);
   const context = {
     URL,
+    TextEncoder,
     self: {
       addEventListener() {},
       location: { origin: "https://lionlog.example" },
@@ -111,6 +112,7 @@ test("service-worker installation fails when any offline startup asset is unavai
   const cache = { put: async (url) => cached.push(String(url)), match: async () => null };
   const context = {
     URL,
+    TextEncoder,
     Response,
     caches: { open: async () => cache, keys: async () => [] },
     fetch: async (url) => {
@@ -149,7 +151,14 @@ test("service-worker installation fails when any offline startup asset is unavai
 
 test("service-worker lifecycle scopes caches and preserves the active shell across interrupted update and rollback", async () => {
   const sourceTemplate = await readFile(path.join(projectRoot, "public/sw.js"), "utf8");
-  const cacheNames = new Set(["lionlog-shell-other-project-a"]);
+  const cacheName = (scope, revision) => `lionlog-shell-v2-${Buffer.from(scope).toString("hex")}-${revision}`;
+  const foreignCaches = [
+    cacheName("/lionlog-other/", "c".repeat(40)),
+    cacheName("/", "d".repeat(40)),
+    cacheName("/root/", "e".repeat(40)),
+    "lionlog-shell-unrelated-a",
+  ];
+  const cacheNames = new Set(foreignCaches);
   const cacheContents = new Map();
   const deleted = [];
   const caches = {
@@ -166,18 +175,19 @@ test("service-worker lifecycle scopes caches and preserves the active shell acro
     async delete(name) { deleted.push(name); cacheNames.delete(name); cacheContents.delete(name); return true; },
   };
 
-  async function runLifecycle(revision, { failAsset = false } = {}) {
+  async function runLifecycle(revision, { failAsset = false, scopePath = "/lionlog/" } = {}) {
     const handlers = {};
     const source = sourceTemplate.replaceAll("__LIONLOG_SHELL_REVISION__", revision);
     const context = {
       URL,
+      TextEncoder,
       Response,
       caches,
       fetch: async (input) => {
         const href = String(input);
-        const isShell = href === "https://lionlog.example/lionlog/";
+        const isShell = href === `https://lionlog.example${scopePath}`;
         const body = isShell
-          ? `<html data-lionlog-shell="${revision}"><script src="/lionlog/_next/app.js"></script><script src="/other/app.js"></script></html>`
+          ? `<html data-lionlog-shell="${revision}"><script src="${scopePath}_next/app.js"></script><script src="/other/app.js"></script></html>`
           : "asset";
         return {
           ok: !(failAsset && href.includes("_next/app.js")),
@@ -193,7 +203,7 @@ test("service-worker lifecycle scopes caches and preserves the active shell acro
         addEventListener(name, handler) { handlers[name] = handler; },
         clients: { claim: async () => {} },
         location: { origin: "https://lionlog.example" },
-        registration: { scope: "https://lionlog.example/lionlog/" },
+        registration: { scope: `https://lionlog.example${scopePath}` },
         skipWaiting: async () => {},
       },
     };
@@ -210,9 +220,9 @@ test("service-worker lifecycle scopes caches and preserves the active shell acro
   const revisionA = "a".repeat(40);
   const revisionB = "b".repeat(40);
   const handlersA = await runLifecycle(revisionA);
-  assert.ok(cacheNames.has(`lionlog-shell-lionlog-${revisionA}`));
-  assert.ok(cacheNames.has("lionlog-shell-other-project-a"));
-  assert.ok(!cacheContents.get(`lionlog-shell-lionlog-${revisionA}`).has("https://lionlog.example/other/app.js"));
+  assert.ok(cacheNames.has(cacheName("/lionlog/", revisionA)));
+  assert.ok(foreignCaches.every((name) => cacheNames.has(name)));
+  assert.ok(!cacheContents.get(cacheName("/lionlog/", revisionA)).has("https://lionlog.example/other/app.js"));
   for (const requestUrl of ["https://lionlog.example/lionlog/api", "https://lionlog.example/lionlog/api/menu", "https://lionlog.example/other/app.js"]) {
     let responded = false;
     handlersA.fetch({
@@ -223,19 +233,26 @@ test("service-worker lifecycle scopes caches and preserves the active shell acro
   }
 
   await assert.rejects(runLifecycle(revisionB, { failAsset: true }), /asset was unavailable/);
-  assert.ok(cacheNames.has(`lionlog-shell-lionlog-${revisionA}`), "the old active shell survives interrupted installation");
-  assert.ok(cacheNames.has("lionlog-shell-other-project-a"));
+  assert.ok(cacheNames.has(cacheName("/lionlog/", revisionA)), "the old active shell survives interrupted installation");
+  assert.ok(foreignCaches.every((name) => cacheNames.has(name)));
 
   await runLifecycle(revisionB);
-  assert.ok(!cacheNames.has(`lionlog-shell-lionlog-${revisionA}`));
-  assert.ok(cacheNames.has(`lionlog-shell-lionlog-${revisionB}`));
-  assert.ok(cacheNames.has("lionlog-shell-other-project-a"));
+  assert.ok(!cacheNames.has(cacheName("/lionlog/", revisionA)));
+  assert.ok(cacheNames.has(cacheName("/lionlog/", revisionB)));
+  assert.ok(foreignCaches.every((name) => cacheNames.has(name)));
 
   await runLifecycle(revisionA);
-  assert.ok(cacheNames.has(`lionlog-shell-lionlog-${revisionA}`));
-  assert.ok(!cacheNames.has(`lionlog-shell-lionlog-${revisionB}`));
-  assert.ok(cacheNames.has("lionlog-shell-other-project-a"));
-  assert.ok(deleted.every((name) => name.startsWith("lionlog-shell-lionlog-")));
+  assert.ok(cacheNames.has(cacheName("/lionlog/", revisionA)));
+  assert.ok(!cacheNames.has(cacheName("/lionlog/", revisionB)));
+  assert.ok(foreignCaches.every((name) => cacheNames.has(name)));
+
+  const rootOld = cacheName("/", "f".repeat(40));
+  cacheNames.add(rootOld);
+  await runLifecycle(revisionA, { scopePath: "/" });
+  assert.ok(!cacheNames.has(rootOld));
+  assert.ok(cacheNames.has(cacheName("/", revisionA)));
+  assert.ok(cacheNames.has(cacheName("/root/", "e".repeat(40))));
+  assert.ok(deleted.every((name) => [cacheName("/lionlog/", revisionA), cacheName("/lionlog/", revisionB), cacheName("/", "d".repeat(40)), rootOld].includes(name)));
 });
 
 test("release version and brand colors stay consistent across the PWA surface", async () => {
@@ -254,7 +271,7 @@ test("release version and brand colors stay consistent across the PWA surface", 
   assert.match(mealBuilder, new RegExp(`v${releaseVersion.replaceAll(".", "\\.")}`));
   assert.match(mealBuilder, /snapshot is partial/i);
   assert.match(mealBuilder, /trustworthy display name/i);
-  assert.match(serviceWorker, /CACHE_NAME = `\$\{CACHE_PREFIX\}\$\{SHELL_REVISION\}`/);
+  assert.match(serviceWorker, /CACHE_NAME = `\$\{CACHE_PREFIX\}\$\{SCOPE_KEY\}-\$\{SHELL_REVISION\}`/);
   assert.match(pwaRegister, /retained validated menus remain available when saved/i);
   assert.doesNotMatch(pwaRegister, /installed sample menu remains available/i);
   assert.equal(manifest.theme_color, "#001E44");
@@ -352,7 +369,10 @@ test("live and Pages workflows are explicit, bounded, and ordinary CI cannot inv
   assert.match(deploymentWorkflow, /source_artifact_id/);
   assert.match(deploymentWorkflow, /source_artifact_digest/);
   assert.match(deploymentWorkflow, /source_manifest_digest/);
-  assert.match(deploymentWorkflow, /expected_current_release_id/);
+  assert.match(deploymentWorkflow, /expected_current_attempt_release_id/);
+  assert.match(deploymentWorkflow, /rollback_target_receipt_artifact_id/);
+  assert.match(deploymentWorkflow, /deployments: write/);
+  assert.match(deploymentWorkflow, /final-promotion-gate\.mjs/);
   assert.match(deploymentWorkflow, /verify-publication-bundle\.ts/);
   assert.match(deploymentWorkflow, /deploy-exact-pages-artifact\.mjs/);
   assert.match(deploymentWorkflow, /cancel-in-progress: false/);

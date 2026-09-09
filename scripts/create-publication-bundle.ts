@@ -66,7 +66,10 @@ export async function createPublicationBundle(options: BundleOptions): Promise<P
   let catalogSha256: string | null = null;
   if (options.releaseKind === "live") {
     if (!initialFiles.includes("menu-data/v2/catalog.json")) throw new Error("Live candidate is missing menu data.");
-    const evidence = deriveMenuEvidence(await readPublicationFiles(site, initialFiles), options.commitSha, sha256);
+    const evidence = deriveMenuEvidence(await readPublicationFiles(site, initialFiles), options.commitSha, sha256, {
+      bundleCreatedAt: options.createdAt,
+      verificationTime: new Date(options.createdAt),
+    });
     catalogSha256 = evidence.catalogSha256;
     menu = evidence.menu;
     if (!options.recoveryManifest || !Number.isSafeInteger(options.recoveryArtifactId) || !/^sha256:[a-f0-9]{64}$/.test(options.recoveryArtifactDigest ?? "")) {

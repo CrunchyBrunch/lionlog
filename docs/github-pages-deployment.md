@@ -1,11 +1,11 @@
 # Manual GitHub Pages deployment handoff
 
-Date: 2026-09-01  
+Date: 2026-09-09
 Expected project URL: `https://crunchybrunch.github.io/lionlog/`
 
 ## Current state
 
-The repository contains a least-privilege, manual-only workflow at `.github/workflows/deploy-github-pages.yml`. The workflow was introduced in commit `bb46104e4bb222e2f01c638f9a148f8d7dd6e337`. It has not been dispatched, GitHub Pages has not been activated by this change, and no deployment has occurred.
+The repository contains a manual-only production publication workflow at `.github/workflows/deploy-github-pages.yml`. It has not been dispatched, GitHub Pages has not been activated by this change, and no deployment has occurred. The authoritative v0.2 operational contract is the [production publication runbook](psu-live-menu/production-publication-runbook.md).
 
 The separate review-artifact boundary was proven at commit `6858a885f12484e5843daaf68de6c14fbd61d424` by GitHub Actions run `33567755269`. The downloaded tar had SHA-256 `F3A9EF4DA047856D18FAEFFB35084267EBB007EF7D719CBC0207813C43B9CA43`. It retained `.nojekyll`, project-prefixed framework and self-hosted font URLs, and no menu publication.
 
@@ -14,14 +14,15 @@ The separate review-artifact boundary was proven at commit `6858a885f12484e5843d
 - Trigger: `workflow_dispatch` only. There is no `push`, pull-request, or cron trigger.
 - Repository/ref guard: only `CrunchyBrunch/lionlog` on `refs/heads/main` can run its jobs.
 - Default permissions: none.
-- Build job permission: `contents: read` only.
-- Deploy job permissions: `pages: write` and `id-token: write` only.
+- Verification job permissions: `contents: read`, `actions: read`, and `deployments: read`.
+- Protected deploy job permissions: `contents: read`, `actions: read`, `deployments: write`, `pages: write`, and `id-token: write`.
+- Receipt collector permissions: `contents: read`, `actions: read`, and `deployments: write`; public-product requests are anonymous.
 - The deploy job waits for the validated build artifact and targets the protected `github-pages` environment.
 - Official actions are pinned to immutable commit SHAs.
 - The workflow contains no PSU ingestion command, ingestion authorization variable, schedule, DNS operation, custom-domain file, Pages-settings mutation, or repository-visibility mutation.
-- The artifact validator rejects menu data, source maps, raw ingestion/browser retrieval code, secrets, private-key patterns, local paths, hidden files other than the empty `.nojekyll`, and same-origin root paths that would break `/lionlog/` hosting.
+- The artifact validator rejects raw HTML, source maps, browser retrieval code, secrets, private-key patterns, local paths, hidden files other than the empty `.nojekyll`, and same-origin root paths that would break `/lionlog/` hosting. A live candidate may contain only validated normalized public menu JSON covered by its versioned manifest.
 
-The workflow publishes only the application shell. Publishing live menu snapshots and choosing a retrieval cadence are separate, explicitly authorized operational milestones.
+Candidate ingestion and publication remain separate explicit manual operations. The promotion workflow never contacts PSU and never rebuilds candidate bytes.
 
 ## Owner activation checklist
 
@@ -32,16 +33,16 @@ Do not perform these steps until the deployment PR is reviewed and merged and it
 3. In **Settings → Pages**, select **GitHub Actions** as the build/deployment source.
 4. Leave **Custom domain** blank and enable **Enforce HTTPS**.
 5. Optionally configure required reviewers on the `github-pages` environment for a human approval gate.
-6. From the Actions tab, select **Deploy GitHub Pages (manual)**, choose `main`, verify the displayed commit SHA, and dispatch it intentionally.
+6. From the Actions tab, select **Promote exact LionLog release to GitHub Pages**, choose `main`, verify every candidate/current-attempt/rollback-target identity and deadline, and dispatch it intentionally.
 7. Verify the resulting deployment reports `https://crunchybrunch.github.io/lionlog/`, then perform the iPhone/PWA checklist in `docs/iphone-pwa-verification.md`.
 
 Selecting GitHub Actions as the Pages source does not itself run this workflow. No automated deployment or ingestion is introduced.
 
 ## Rollback
 
-For an application regression, revert the offending change on `main` through the normal reviewed Git process, verify the restored tree with the review-artifact workflow, and manually dispatch the deployment workflow at the new revert commit. Do not rewrite shared history or deploy an unreviewed branch.
+For a publication regression, use the runbook's exact-byte rollback path with the latest attempt receipt and a separately identified known-good target receipt. Do not rebuild, re-scrape, rewrite shared history, or deploy an unreviewed branch.
 
-For an urgent publication stop, an owner may disable Pages in repository settings. That is a separate administrative action; the workflow does not change settings itself. Restoring a prior deployment does not restore or publish menu data because menu publication is outside this artifact.
+For an urgent publication stop, an owner may disable Pages in repository settings. That is a separate administrative action; the workflow does not change settings itself. Restoring a prior live release restores its exact normalized menu snapshot bytes; retained data still displays according to its original freshness and retention deadlines.
 
 ## License and scope
 
