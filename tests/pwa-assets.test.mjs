@@ -324,11 +324,13 @@ test("browser bundle contains static delivery but no PSU retrieval or Node-only 
 });
 
 test("live and Pages workflows are explicit, bounded, and ordinary CI cannot invoke ingestion or deployment", async () => {
-  const [manualWorkflow, pagesWorkflow, deploymentWorkflow, ciWorkflow] = await Promise.all([
+  const [manualWorkflow, pagesWorkflow, deploymentWorkflow, ciWorkflow, pagesAdapter, finalGate] = await Promise.all([
     readFile(path.join(projectRoot, ".github/workflows/build-live-menu-artifact.yml"), "utf8"),
     readFile(path.join(projectRoot, ".github/workflows/build-pages-artifact.yml"), "utf8"),
     readFile(path.join(projectRoot, ".github/workflows/deploy-github-pages.yml"), "utf8"),
     readFile(path.join(projectRoot, ".github/workflows/ci.yml"), "utf8"),
+    readFile(path.join(projectRoot, "scripts/deploy-exact-pages-artifact.mjs"), "utf8"),
+    readFile(path.join(projectRoot, "scripts/final-promotion-gate.mjs"), "utf8"),
   ]);
   assert.match(manualWorkflow, /workflow_dispatch:/);
   assert.match(manualWorkflow, /PREPARE_LIVE_PAGES_FIELD_RELEASE/);
@@ -373,9 +375,16 @@ test("live and Pages workflows are explicit, bounded, and ordinary CI cannot inv
   assert.match(deploymentWorkflow, /rollback_target_receipt_artifact_id/);
   assert.match(deploymentWorkflow, /deployments: write/);
   assert.match(deploymentWorkflow, /final-promotion-gate\.mjs/);
+  assert.match(deploymentWorkflow, /site:\$manifest\[0\]\.site/);
+  assert.match(deploymentWorkflow, /ci:\{runId:\$ciRunId\}/);
+  assert.match(deploymentWorkflow, /PREAPPROVAL_SUMMARY_PATH: work\/pages-deployment\/preapproval\/pre-approval-summary\.json/);
   assert.match(deploymentWorkflow, /verify-publication-bundle\.ts/);
   assert.match(deploymentWorkflow, /deploy-exact-pages-artifact\.mjs/);
   assert.match(deploymentWorkflow, /cancel-in-progress: false/);
+  assert.match(pagesAdapter, /executeFinalPromotionGate/);
+  assert.match(pagesAdapter, /readFinalPromotionState/);
+  assert.match(pagesAdapter, /verifyCurrentPublication/);
+  assert.match(finalGate, /await checkpoint\(\);[\s\S]*requestOidc\(\)[\s\S]*await checkpoint\(\);[\s\S]*submit\(oidcToken\)/);
   assert.doesNotMatch(deploymentWorkflow, /npm run build|vinext build|prepare:psu-field-release/);
   assert.doesNotMatch(deploymentWorkflow, /ingest:psu|LIONLOG_ALLOW_PSU_NETWORK|LIVE_PSU_INGESTION/);
   assert.doesNotMatch(deploymentWorkflow, /^\s*(?:schedule|push|pull_request):/m);

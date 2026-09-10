@@ -4,6 +4,8 @@ import { pathToFileURL } from "node:url";
 const SHA256 = /^[a-f0-9]{64}$/;
 const GIT_SHA = /^[a-f0-9]{40}$/;
 const ARTIFACT_DIGEST = /^sha256:[a-f0-9]{64}$/;
+const API_ROOT = "https://api.github.com";
+const REPOSITORY = "CrunchyBrunch/lionlog";
 
 export function validateFinalPromotionState(expected, actual, now = new Date()) {
   if (!Number.isFinite(now.getTime())) throw new Error("Final verification time is invalid.");
@@ -22,6 +24,7 @@ export function validateFinalPromotionState(expected, actual, now = new Date()) 
   }
   validateRun(expected.source, actual.sourceRun);
   validateCi(expected, actual);
+  validateApprovedInventory(expected.site);
   const expectedArtifacts = expected.artifacts;
   const actualArtifacts = actual.artifacts;
   if (!Array.isArray(expectedArtifacts) || !Array.isArray(actualArtifacts) || expectedArtifacts.length !== actualArtifacts.length) {
@@ -32,11 +35,44 @@ export function validateFinalPromotionState(expected, actual, now = new Date()) 
   return { verifiedAt: now.toISOString(), promotionWorkflowSha: expected.promotionWorkflowSha };
 }
 
-export async function executeFinalPromotionGate({ expected, actual, now, requestOidc, submit }) {
-  validateFinalPromotionState(expected, actual, now);
+export async function executeFinalPromotionGate({ expected, readActual, verifyCurrentState, clock = () => Date.now(), requestOidc, submit }) {
+  const checkpoint = async () => {
+    const actual = await readActual();
+    const now = new Date(clock());
+    validateFinalPromotionState(expected, actual, now);
+    await verifyCurrentState();
+  };
+  await checkpoint();
   const oidcToken = await requestOidc();
-  validateFinalPromotionState(expected, actual, now);
+  await checkpoint();
   return submit(oidcToken);
+}
+
+export async function readFinalPromotionState({ expected, githubToken, checkoutSha, fetchImpl = fetch }) {
+  if (!GIT_SHA.test(checkoutSha ?? "")) throw new Error("Checked-out promotion SHA is invalid.");
+  if (!Number.isSafeInteger(expected?.ci?.runId) || expected.ci.runId <= 0) {
+    throw new Error("Approved CI run identity is unavailable.");
+  }
+  const [main, sourceRun, ciRun, ciJobs, ...artifacts] = await Promise.all([
+    readJson(`${API_ROOT}/repos/${REPOSITORY}/commits/main`, githubToken, fetchImpl, "Main commit"),
+    readJson(`${API_ROOT}/repos/${REPOSITORY}/actions/runs/${expected.source.runId}`, githubToken, fetchImpl, "Candidate producer run"),
+    readJson(`${API_ROOT}/repos/${REPOSITORY}/actions/runs/${expected.ci.runId}`, githubToken, fetchImpl, "Required CI run"),
+    readJson(`${API_ROOT}/repos/${REPOSITORY}/actions/runs/${expected.ci.runId}/jobs?per_page=100`, githubToken, fetchImpl, "Required CI jobs"),
+    ...expected.artifacts.map((artifact) => readJson(
+      `${API_ROOT}/repos/${REPOSITORY}/actions/artifacts/${artifact.id}`,
+      githubToken,
+      fetchImpl,
+      `Artifact ${artifact.id}`,
+    )),
+  ]);
+  return {
+    checkoutSha,
+    mainSha: main?.sha,
+    sourceRun,
+    ciRun,
+    ciJobs: ciJobs?.jobs,
+    artifacts,
+  };
 }
 
 function validateRun(expected, actual) {
@@ -58,7 +94,10 @@ function validateRun(expected, actual) {
 
 function validateCi(expected, actual) {
   if (
-    actual?.ciRun?.workflow_id !== 346_680_782
+    !Number.isSafeInteger(expected?.ci?.runId)
+    || expected.ci.runId <= 0
+    || actual?.ciRun?.id !== expected.ci.runId
+    || actual.ciRun.workflow_id !== 346_680_782
     || actual.ciRun.path !== ".github/workflows/ci.yml"
     || actual.ciRun.event !== "push"
     || actual.ciRun.head_sha !== expected.source.sourceSha
@@ -69,6 +108,32 @@ function validateCi(expected, actual) {
     || !Array.isArray(actual.ciJobs)
     || actual.ciJobs.filter((job) => job?.name === "verify" && job.head_sha === expected.source.sourceSha && job.status === "completed" && job.conclusion === "success").length !== 1
   ) throw new Error("Required main-branch CI state changed after approval.");
+}
+
+function validateApprovedInventory(site) {
+  if (
+    site === null
+    || typeof site !== "object"
+    || !SHA256.test(site.tarSha256 ?? "")
+    || !Number.isSafeInteger(site.bytes)
+    || site.bytes <= 0
+    || !Array.isArray(site.inventory)
+    || site.inventory.length === 0
+  ) throw new Error("Approved site inventory is unavailable.");
+  const paths = new Set();
+  for (const entry of site.inventory) {
+    if (
+      typeof entry?.path !== "string"
+      || entry.path.length === 0
+      || entry.path.startsWith("/")
+      || entry.path.split("/").some((part) => part === "" || part === "." || part === "..")
+      || paths.has(entry.path.toLowerCase())
+      || !Number.isSafeInteger(entry.bytes)
+      || entry.bytes < 0
+      || !SHA256.test(entry.sha256 ?? "")
+    ) throw new Error("Approved site inventory is invalid.");
+    paths.add(entry.path.toLowerCase());
+  }
 }
 
 function validateArtifact(expected, actual) {
@@ -90,6 +155,20 @@ function normalizeDigest(value) {
   if (typeof value !== "string") return "";
   const normalized = value.startsWith("sha256:") ? value : `sha256:${value}`;
   return SHA256.test(normalized.slice(7)) ? normalized : "";
+}
+
+async function readJson(url, token, fetchImpl, label) {
+  const response = await fetchImpl(url, {
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${token}`,
+      "x-github-api-version": "2022-11-28",
+    },
+    redirect: "error",
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok || response.redirected) throw new Error(`${label} is unavailable (HTTP ${response.status}).`);
+  try { return await response.json(); } catch (error) { throw new Error(`${label} response is invalid.`, { cause: error }); }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

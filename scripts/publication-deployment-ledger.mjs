@@ -6,6 +6,8 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const GIT_SHA = /^[a-f0-9]{40}$/;
 const PAGES_ID = /^[A-Za-z0-9._-]{1,200}$/;
 const TERMINAL_PAGES_FAILURES = new Set(["deployment_failed", "deployment_content_failed", "deployment_cancelled", "deployment_lost"]);
+const DEPLOYMENT_PAGE_SIZE = 100;
+const MAX_DEPLOYMENT_HISTORY_PAGES = 10;
 
 export function publicationLedgerPayload({ promotionRunId, runAttempt, releaseId, sourceArtifactId, stagedArtifactId }) {
   const payload = {
@@ -78,13 +80,7 @@ export async function recordRepositoryDeploymentStatus({ token, repositoryDeploy
 }
 
 export async function readRepositoryDeploymentAuthority({ token, receipt, requireCurrent = true, fetchImpl = fetch }) {
-  const deployments = await readJson(
-    `${API_ROOT}/repos/${REPOSITORY}/deployments?task=${encodeURIComponent(PUBLICATION_DEPLOYMENT_TASK)}&environment=${encodeURIComponent(PUBLICATION_ENVIRONMENT)}&per_page=100`,
-    token,
-    fetchImpl,
-    "Repository deployment collection",
-  );
-  if (!Array.isArray(deployments)) throw new Error("Repository deployment collection is invalid.");
+  const deployments = await readRepositoryDeploymentHistory({ token, fetchImpl });
   if (receipt === null) return { deployments, current: null, status: null, pagesStatus: null };
   const expectedPayload = publicationLedgerPayload({
     promotionRunId: receipt.promotion.runId,
@@ -97,11 +93,12 @@ export async function readRepositoryDeploymentAuthority({ token, receipt, requir
   if (expectedId === null) {
     const candidates = deployments.filter((deployment) => samePayload(deployment?.payload, expectedPayload));
     if (candidates.length > 1) throw new Error("Current attempt has ambiguous repository deployment ledger entries.");
-    if (candidates.length === 0) return { deployments, current: null, status: null, pagesStatus: null, pagesDeploymentId: null };
+    if (candidates.length === 0) throw new Error("Current attempt has no exact repository deployment ledger match.");
     expectedId = candidates[0].id;
   }
   if (!Number.isSafeInteger(expectedId) || expectedId <= 0) throw new Error("Current attempt lacks a repository deployment identity.");
-  if (requireCurrent && deployments[0]?.id !== expectedId) throw new Error("Expected repository deployment is historical rather than current.");
+  const latestDeploymentId = deployments.reduce((latest, deployment) => Math.max(latest, deployment.id), 0);
+  if (requireCurrent && latestDeploymentId !== expectedId) throw new Error("Expected repository deployment is historical rather than current.");
   const deployment = await readJson(`${API_ROOT}/repos/${REPOSITORY}/deployments/${expectedId}`, token, fetchImpl, "Repository deployment");
   validateDeployment(deployment, {
     workflowSha: receipt.promotion.workflowSha,
@@ -135,13 +132,7 @@ export function pagesDeploymentIdFromLedgerStatus(status, repositoryDeploymentId
 export async function recoverRepositoryDeploymentAttempt({ token, expectedPayload, expectedWorkflowSha, fetchImpl = fetch, now = () => Date.now() }) {
   validatePayload(expectedPayload);
   if (!GIT_SHA.test(expectedWorkflowSha)) throw new Error("Expected promotion workflow SHA is invalid.");
-  const deployments = await readJson(
-    `${API_ROOT}/repos/${REPOSITORY}/deployments?task=${encodeURIComponent(PUBLICATION_DEPLOYMENT_TASK)}&environment=${encodeURIComponent(PUBLICATION_ENVIRONMENT)}&per_page=100`,
-    token,
-    fetchImpl,
-    "Repository deployment collection",
-  );
-  if (!Array.isArray(deployments)) throw new Error("Repository deployment collection is invalid.");
+  const deployments = await readRepositoryDeploymentHistory({ token, fetchImpl });
   const candidates = deployments.filter((deployment) => samePayload(deployment?.payload, expectedPayload));
   if (candidates.length !== 1) throw new Error("Publication attempt does not have one exact repository deployment ledger entry.");
   const summary = candidates[0];
@@ -173,6 +164,29 @@ export async function recoverRepositoryDeploymentAttempt({ token, expectedPayloa
     repositoryState: latest?.state ?? "pending",
     repositoryStatusRecorded: latest !== null,
   };
+}
+
+export async function readRepositoryDeploymentHistory({ token, fetchImpl = fetch }) {
+  const deployments = [];
+  const seen = new Set();
+  for (let page = 1; page <= MAX_DEPLOYMENT_HISTORY_PAGES; page += 1) {
+    const values = await readJson(
+      `${API_ROOT}/repos/${REPOSITORY}/deployments?task=${encodeURIComponent(PUBLICATION_DEPLOYMENT_TASK)}&environment=${encodeURIComponent(PUBLICATION_ENVIRONMENT)}&per_page=${DEPLOYMENT_PAGE_SIZE}&page=${page}`,
+      token,
+      fetchImpl,
+      `Repository deployment collection page ${page}`,
+    );
+    if (!Array.isArray(values)) throw new Error("Repository deployment collection is invalid.");
+    for (const deployment of values) {
+      if (!Number.isSafeInteger(deployment?.id) || deployment.id <= 0 || seen.has(deployment.id)) {
+        throw new Error("Repository deployment history contains an invalid or duplicate identity.");
+      }
+      seen.add(deployment.id);
+      deployments.push(deployment);
+    }
+    if (values.length < DEPLOYMENT_PAGE_SIZE) return deployments;
+  }
+  throw new Error(`Repository deployment history exceeds the ${MAX_DEPLOYMENT_HISTORY_PAGES * DEPLOYMENT_PAGE_SIZE}-entry verification bound.`);
 }
 
 function validateDeployment(value, { workflowSha, payload }) {

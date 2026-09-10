@@ -1,9 +1,12 @@
 import { pathToFileURL } from "node:url";
+import { readFile } from "node:fs/promises";
 import {
   createRepositoryDeploymentLedger,
   publicationLedgerPayload,
   recordRepositoryDeploymentStatus,
 } from "./publication-deployment-ledger.mjs";
+import { executeFinalPromotionGate, readFinalPromotionState } from "./final-promotion-gate.mjs";
+import { verifyCurrentPublication } from "./verify-current-publication.mjs";
 
 const REPOSITORY = "CrunchyBrunch/lionlog";
 const API_ROOT = "https://api.github.com";
@@ -39,9 +42,25 @@ export async function deployExactPagesArtifact({
       throw new Error("Live release freshness margin elapsed before submission.");
     }
   };
-  assertTemporalAuthorization();
+  const assertBeforeSubmission = async () => {
+    try {
+      assertTemporalAuthorization();
+    } catch (error) {
+      await recordAttempt(evidence({
+        phase: "submission-rejected",
+        artifactId,
+        buildVersion,
+        deploymentId: null,
+        status: "authorization-expired",
+        uncertain: false,
+        recordedAt: new Date(now()).toISOString(),
+      }));
+      throw error;
+    }
+  };
+  await assertBeforeSubmission();
   await recordAttempt(evidence({ phase: "submitting", artifactId, buildVersion, deploymentId: null, status: null, uncertain: true, recordedAt: new Date(now()).toISOString() }));
-  assertTemporalAuthorization();
+  await assertBeforeSubmission();
   let response;
   try {
     response = await fetchImpl(`${API_ROOT}/repos/${REPOSITORY}/pages/deployments`, {
@@ -169,65 +188,91 @@ async function main() {
   }
   const approvalExpiresAt = process.env.APPROVAL_EXPIRES_AT ?? "";
   const minimumFreshUntil = process.env.MINIMUM_FRESH_UNTIL || undefined;
-  const assertCurrentTime = () => {
-    const current = Date.now();
-    if (!Number.isFinite(Date.parse(approvalExpiresAt)) || Date.parse(approvalExpiresAt) <= current) throw new Error("Pages approval expired before OIDC.");
-    if (minimumFreshUntil && Date.parse(minimumFreshUntil) < current + 15 * 60_000) throw new Error("Live release freshness margin elapsed before OIDC.");
-  };
-  assertCurrentTime();
-  const oidcToken = await requestOidcToken({
-    requestUrl: process.env.ACTIONS_ID_TOKEN_REQUEST_URL ?? "",
-    requestToken: process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN ?? "",
-  });
-  assertCurrentTime();
   const attemptPath = process.env.DEPLOYMENT_ATTEMPT_PATH;
   if (!attemptPath) throw new Error("DEPLOYMENT_ATTEMPT_PATH is unavailable.");
+  const summaryPath = process.env.PREAPPROVAL_SUMMARY_PATH;
+  const sourceManifestPath = process.env.RELEASE_MANIFEST_PATH;
+  if (!summaryPath || !sourceManifestPath) throw new Error("Final promotion evidence paths are unavailable.");
+  const expected = JSON.parse(await readFile(summaryPath, "utf8"));
+  const sourceManifest = JSON.parse(await readFile(sourceManifestPath, "utf8"));
+  const readReceipt = async (releaseId, relativePath) => releaseId === "NONE_FIRST_DEPLOYMENT"
+    ? null
+    : JSON.parse(await readFile(relativePath, "utf8"));
+  const currentReceipt = await readReceipt(process.env.CURRENT_RELEASE_ID, "work/pages-deployment/current/deployment-receipt.json");
+  const rollbackTargetReceipt = await readReceipt(process.env.TARGET_RELEASE_ID, "work/pages-deployment/target/deployment-receipt.json");
   const { rename, writeFile } = await import("node:fs/promises");
   const recordAttempt = async (value) => {
     const temporary = `${attemptPath}.tmp`;
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`);
     await rename(temporary, attemptPath);
   };
-  const payload = publicationLedgerPayload({
-    promotionRunId: Number(process.env.GITHUB_RUN_ID),
-    runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
-    releaseId: process.env.RELEASE_ID ?? "",
-    sourceArtifactId: Number(process.env.SOURCE_ARTIFACT_ID),
-    stagedArtifactId: Number(process.env.STAGED_ARTIFACT_ID),
-  });
-  const repositoryDeploymentId = await createRepositoryDeploymentLedger({
-    token: process.env.GITHUB_TOKEN ?? "",
-    workflowSha: process.env.GITHUB_SHA ?? "",
-    payload,
-  });
-  await recordRepositoryDeploymentStatus({
-    token: process.env.GITHUB_TOKEN ?? "",
-    repositoryDeploymentId,
-    state: "in_progress",
-    runId: Number(process.env.GITHUB_RUN_ID),
-  });
-  const recordAccepted = async ({ pagesDeploymentId }) => recordRepositoryDeploymentStatus({
-    token: process.env.GITHUB_TOKEN ?? "",
-    repositoryDeploymentId,
-    state: "in_progress",
-    pagesDeploymentId,
-    runId: Number(process.env.GITHUB_RUN_ID),
-  });
-  const result = await deployExactPagesArtifact({
-    artifactId: Number(process.env.STAGED_ARTIFACT_ID),
-    buildVersion: process.env.GITHUB_SHA ?? "",
-    githubToken: process.env.GITHUB_TOKEN ?? "",
-    oidcToken,
-    approvalExpiresAt,
-    minimumFreshUntil,
-    repositoryDeploymentId,
-    recordAttempt,
-    recordAccepted,
+  const githubToken = process.env.GITHUB_TOKEN ?? "";
+  const result = await executeFinalPromotionGate({
+    expected,
+    readActual: () => readFinalPromotionState({ expected, githubToken, checkoutSha: process.env.GITHUB_SHA, fetchImpl: fetch }),
+    verifyCurrentState: () => verifyCurrentPublication({
+      operation: process.env.OPERATION ?? "",
+      currentReceipt,
+      rollbackTargetReceipt,
+      sourceManifest,
+      sourceIdentity: {
+        artifactId: Number(process.env.SOURCE_ARTIFACT_ID),
+        artifactDigest: process.env.SOURCE_ARTIFACT_DIGEST ?? "",
+        manifestSha256: process.env.SOURCE_MANIFEST_DIGEST ?? "",
+      },
+      token: githubToken,
+      fetchImpl: fetch,
+    }),
+    clock: () => Date.now(),
+    requestOidc: () => requestOidcToken({
+      requestUrl: process.env.ACTIONS_ID_TOKEN_REQUEST_URL ?? "",
+      requestToken: process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN ?? "",
+    }),
+    submit: async (oidcToken) => {
+      const payload = publicationLedgerPayload({
+        promotionRunId: Number(process.env.GITHUB_RUN_ID),
+        runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+        releaseId: process.env.RELEASE_ID ?? "",
+        sourceArtifactId: Number(process.env.SOURCE_ARTIFACT_ID),
+        stagedArtifactId: Number(process.env.STAGED_ARTIFACT_ID),
+      });
+      const repositoryDeploymentId = await createRepositoryDeploymentLedger({
+        token: githubToken,
+        workflowSha: process.env.GITHUB_SHA ?? "",
+        payload,
+      });
+      await recordRepositoryDeploymentStatus({
+        token: githubToken,
+        repositoryDeploymentId,
+        state: "in_progress",
+        runId: Number(process.env.GITHUB_RUN_ID),
+      });
+      const recordAccepted = async ({ pagesDeploymentId }) => recordRepositoryDeploymentStatus({
+        token: githubToken,
+        repositoryDeploymentId,
+        state: "in_progress",
+        pagesDeploymentId,
+        runId: Number(process.env.GITHUB_RUN_ID),
+      });
+      const deployment = await deployExactPagesArtifact({
+        artifactId: Number(process.env.STAGED_ARTIFACT_ID),
+        buildVersion: process.env.GITHUB_SHA ?? "",
+        githubToken,
+        oidcToken,
+        approvalExpiresAt,
+        minimumFreshUntil,
+        repositoryDeploymentId,
+        recordAttempt,
+        recordAccepted,
+        now: () => Date.now(),
+      });
+      return { ...deployment, repositoryDeploymentId };
+    },
   });
   const output = process.env.GITHUB_OUTPUT;
   if (!output) throw new Error("GITHUB_OUTPUT is unavailable.");
   const { appendFile } = await import("node:fs/promises");
-  await appendFile(output, `repository_deployment_id=${repositoryDeploymentId}\ndeployment_id=${result.deploymentId}\npage_url=${result.pageUrl}\nstatus=${result.status}\n`);
+  await appendFile(output, `repository_deployment_id=${result.repositoryDeploymentId}\ndeployment_id=${result.deploymentId}\npage_url=${result.pageUrl}\nstatus=${result.status}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

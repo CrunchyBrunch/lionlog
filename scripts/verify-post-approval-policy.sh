@@ -7,7 +7,10 @@ set -euo pipefail
 : "${PARTIAL_APPROVAL:?PARTIAL_APPROVAL is required}"
 : "${EXPIRED_ROLLBACK_APPROVAL:?EXPIRED_ROLLBACK_APPROVAL is required}"
 
+RELEASE_KIND="$(jq -er '.releaseKind | strings' "$MANIFEST_PATH")"
+
 if [[ "$OPERATION" == "promote" ]]; then
+  test "$RELEASE_KIND" = "live"
   FRESH_UNTIL="$(jq -er '.menu.earliestFreshUntil | strings' "$MANIFEST_PATH")"
   FRESH_EPOCH="$(date -u -d "$FRESH_UNTIL" +%s)"
   NOW_EPOCH="$(date -u +%s)"
@@ -22,7 +25,7 @@ else
   test "$PARTIAL_APPROVAL" = "COMPLETE_ONLY"
 fi
 
-if [[ "$OPERATION" == "rollback" ]]; then
+if [[ "$OPERATION" == "rollback" && "$RELEASE_KIND" == "live" ]]; then
   RETAIN_UNTIL="$(jq -er '.menu.earliestRetainUntil | strings' "$MANIFEST_PATH")"
   RETAIN_EPOCH="$(date -u -d "$RETAIN_UNTIL" +%s)"
   NOW_EPOCH="$(date -u +%s)"

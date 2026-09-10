@@ -53,7 +53,7 @@ on:
         required: true
         type: string
       expected_service_date:
-        description: Exact YYYY-MM-DD, or NONE for first-release recovery
+        description: Exact YYYY-MM-DD, or NONE for first-release recovery/app-only rollback
         required: true
         type: string
       expected_current_attempt_release_id:
@@ -278,41 +278,53 @@ jobs:
           node --experimental-strip-types scripts/artifact-digest.ts --expected="$RECOVERY_MANIFEST_DIGEST" --file=work/pages-promotion/recovery-bundle/release-manifest.json
       - name: Validate the exact recovery relationship
         shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
+          RECOVERY_ARTIFACT_ID: ${{ inputs.recovery_artifact_id }}
+          RECOVERY_ARTIFACT_DIGEST: ${{ inputs.recovery_artifact_digest }}
+          RECOVERY_MANIFEST_DIGEST: ${{ inputs.recovery_manifest_digest }}
+          RECOVERY_RELEASE_ID: ${{ inputs.recovery_release_id }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          APPROVAL_EXPIRES_AT: ${{ inputs.approval_expires_at }}
         run: |
           set -euo pipefail
           test "$(jq -r .releaseKind work/pages-promotion/recovery-bundle/release-manifest.json)" = "first-release-recovery"
-          test "$(jq -r .releaseId work/pages-promotion/recovery-bundle/release-manifest.json)" = "${{ inputs.recovery_release_id }}"
-          test "$(jq -r .source.commitSha work/pages-promotion/recovery-bundle/release-manifest.json)" = "${{ inputs.expected_source_sha }}"
-          if [[ "${{ inputs.operation }}" == "first-release-recovery" ]]; then
-            test "${{ inputs.source_artifact_id }}" = "${{ inputs.recovery_artifact_id }}"
-            test "${{ inputs.source_artifact_digest }}" = "${{ inputs.recovery_artifact_digest }}"
-            test "${{ inputs.source_manifest_digest }}" = "${{ inputs.recovery_manifest_digest }}"
+          test "$(jq -r .releaseId work/pages-promotion/recovery-bundle/release-manifest.json)" = "$RECOVERY_RELEASE_ID"
+          test "$(jq -r .source.commitSha work/pages-promotion/recovery-bundle/release-manifest.json)" = "$EXPECTED_SOURCE_SHA"
+          SOURCE_RELEASE_KIND="$(jq -r .releaseKind work/pages-promotion/bundle/release-manifest.json)"
+          if [[ "$OPERATION" == "first-release-recovery" || "$SOURCE_RELEASE_KIND" == "first-release-recovery" ]]; then
+            test "$SOURCE_ARTIFACT_ID" = "$RECOVERY_ARTIFACT_ID"
+            test "$SOURCE_ARTIFACT_DIGEST" = "$RECOVERY_ARTIFACT_DIGEST"
+            test "$SOURCE_MANIFEST_DIGEST" = "$RECOVERY_MANIFEST_DIGEST"
           else
-            test "$(jq -r .recovery.artifactId work/pages-promotion/bundle/release-manifest.json)" = "${{ inputs.recovery_artifact_id }}"
-            test "$(jq -r .recovery.artifactDigest work/pages-promotion/bundle/release-manifest.json)" = "${{ inputs.recovery_artifact_digest }}"
-            test "$(jq -r .recovery.manifestSha256 work/pages-promotion/bundle/release-manifest.json)" = "${{ inputs.recovery_manifest_digest }}"
-            test "$(jq -r .recovery.releaseId work/pages-promotion/bundle/release-manifest.json)" = "${{ inputs.recovery_release_id }}"
+            test "$(jq -r .recovery.artifactId work/pages-promotion/bundle/release-manifest.json)" = "$RECOVERY_ARTIFACT_ID"
+            test "$(jq -r .recovery.artifactDigest work/pages-promotion/bundle/release-manifest.json)" = "$RECOVERY_ARTIFACT_DIGEST"
+            test "$(jq -r .recovery.manifestSha256 work/pages-promotion/bundle/release-manifest.json)" = "$RECOVERY_MANIFEST_DIGEST"
+            test "$(jq -r .recovery.releaseId work/pages-promotion/bundle/release-manifest.json)" = "$RECOVERY_RELEASE_ID"
           fi
           node --experimental-strip-types scripts/verify-publication-bundle.ts \
             --bundle=work/pages-promotion/recovery-bundle \
             --metadata=work/pages-promotion/recovery-github-metadata.json \
             --operation=first-release-recovery \
-            --source-sha=${{ inputs.expected_source_sha }} \
+            --source-sha="$EXPECTED_SOURCE_SHA" \
             --run-id=${{ inputs.source_run_id }} \
             --run-attempt=${{ inputs.source_run_attempt }} \
-            --artifact-id=${{ inputs.recovery_artifact_id }} \
-            --artifact-digest=${{ inputs.recovery_artifact_digest }} \
-            --manifest-digest=${{ inputs.recovery_manifest_digest }} \
+            --artifact-id="$RECOVERY_ARTIFACT_ID" \
+            --artifact-digest="$RECOVERY_ARTIFACT_DIGEST" \
+            --manifest-digest="$RECOVERY_MANIFEST_DIGEST" \
             --service-date=NONE \
-            --approval-expires-at=${{ inputs.approval_expires_at }} \
+            --approval-expires-at="$APPROVAL_EXPIRES_AT" \
             --partial-approval=COMPLETE_ONLY \
             --expired-rollback-approval=NONE \
             --workflow-sha=${{ github.sha }} \
             --expected-promotion-workflow-sha=${{ inputs.expected_promotion_workflow_sha }} \
-            --recovery-artifact-id=${{ inputs.recovery_artifact_id }} \
-            --recovery-artifact-digest=${{ inputs.recovery_artifact_digest }} \
-            --recovery-manifest-digest=${{ inputs.recovery_manifest_digest }} \
-            --recovery-release-id=${{ inputs.recovery_release_id }}
+            --recovery-artifact-id="$RECOVERY_ARTIFACT_ID" \
+            --recovery-artifact-digest="$RECOVERY_ARTIFACT_DIGEST" \
+            --recovery-manifest-digest="$RECOVERY_MANIFEST_DIGEST" \
+            --recovery-release-id="$RECOVERY_RELEASE_ID"
       - name: Validate candidate, approval tuple, and exact site
         id: validated
         shell: bash
@@ -444,6 +456,10 @@ jobs:
           TARGET_RELEASE_ID: ${{ inputs.rollback_target_release_id }}
           TARGET_RECEIPT_ID: ${{ inputs.rollback_target_receipt_artifact_id }}
           TARGET_RECEIPT_DIGEST: ${{ inputs.rollback_target_receipt_artifact_digest }}
+          OPERATION: ${{ inputs.operation }}
+          APPROVAL_EXPIRES_AT: ${{ inputs.approval_expires_at }}
+          PARTIAL_APPROVAL: ${{ inputs.partial_approval }}
+          EXPIRED_ROLLBACK_APPROVAL: ${{ inputs.expired_rollback_approval }}
         run: |
           set -euo pipefail
           CURRENT_ARTIFACT='null'
@@ -459,9 +475,9 @@ jobs:
             TARGET_STATE="$(jq --argjson receiptArtifact "$TARGET_ARTIFACT" '{releaseId,repositoryDeploymentId:.repositoryDeployment.id,pagesDeploymentId:.deploymentId,attemptPhase,repositoryState:.repositoryDeployment.state,repositoryStatusRecorded:.repositoryDeployment.statusRecorded,pagesStatus,markerVerified,publicProductVerified,reconciliation,knownGood,uncertain,receipt:$receiptArtifact}' work/pages-promotion/target/deployment-receipt.json)"
           fi
           jq -n \
-            --arg operation '${{ inputs.operation }}' \
+            --arg operation "$OPERATION" \
             --arg promotionWorkflowSha '${{ inputs.expected_promotion_workflow_sha }}' \
-            --arg approvalExpiresAt '${{ inputs.approval_expires_at }}' \
+            --arg approvalExpiresAt "$APPROVAL_EXPIRES_AT" \
             --arg minimumFreshUntil "$(jq -r '.menu.earliestFreshUntil // "NONE"' work/pages-promotion/bundle/release-manifest.json)" \
             --arg releaseId '${{ steps.validated.outputs.release_id }}' \
             --argjson sourceRunId '${{ inputs.source_run_id }}' \
@@ -475,14 +491,15 @@ jobs:
             --argjson stagedArtifactId '${{ steps.stage.outputs.artifact-id }}' \
             --arg stagedArtifactDigest '${{ steps.staged-metadata.outputs.digest }}' \
             --arg stagedArtifactExpiresAt '${{ steps.staged-metadata.outputs.expires_at }}' \
-            --arg partialApproval '${{ inputs.partial_approval }}' \
-            --arg expiredRollbackApproval '${{ inputs.expired_rollback_approval }}' \
+            --argjson ciRunId "$(jq -r .ciRun.id work/pages-promotion/github-metadata.json)" \
+            --arg partialApproval "$PARTIAL_APPROVAL" \
+            --arg expiredRollbackApproval "$EXPIRED_ROLLBACK_APPROVAL" \
             --argjson currentState "$CURRENT_STATE" \
             --argjson targetState "$TARGET_STATE" \
             --argjson currentArtifact "$CURRENT_ARTIFACT" \
             --argjson targetArtifact "$TARGET_ARTIFACT" \
             --slurpfile manifest work/pages-promotion/bundle/release-manifest.json \
-            '{operation:$operation,promotionWorkflowSha:$promotionWorkflowSha,approvalExpiresAt:$approvalExpiresAt,minimumFreshUntil:$minimumFreshUntil,releaseId:$releaseId,source:{runId:$sourceRunId,sourceSha:$sourceSha,artifactId:$sourceArtifactId,artifactDigest:$sourceArtifactDigest,manifestSha256:$sourceManifestDigest},recovery:{artifactId:$recoveryArtifactId,artifactDigest:$recoveryArtifactDigest,manifestSha256:$recoveryManifestDigest},staged:{artifactId:$stagedArtifactId,digest:$stagedArtifactDigest,artifactExpiresAt:$stagedArtifactExpiresAt},currentAttempt:$currentState,rollbackTarget:$targetState,authorization:{partialApproval:$partialApproval,expiredRollbackApproval:$expiredRollbackApproval},menu:($manifest[0].menu // null),artifacts:([{id:$sourceArtifactId,digest:$sourceArtifactDigest,runId:$sourceRunId,headSha:$sourceSha,role:"source"},{id:$recoveryArtifactId,digest:$recoveryArtifactDigest,runId:$sourceRunId,headSha:$sourceSha,role:"recovery"},{id:$stagedArtifactId,digest:$stagedArtifactDigest,runId:env.GITHUB_RUN_ID|tonumber,headSha:$promotionWorkflowSha,role:"staged"}] + (if $currentArtifact == null then [] else [$currentArtifact] end) + (if $targetArtifact == null then [] else [$targetArtifact] end))}' \
+            '{operation:$operation,promotionWorkflowSha:$promotionWorkflowSha,approvalExpiresAt:$approvalExpiresAt,minimumFreshUntil:$minimumFreshUntil,releaseId:$releaseId,source:{runId:$sourceRunId,sourceSha:$sourceSha,artifactId:$sourceArtifactId,artifactDigest:$sourceArtifactDigest,manifestSha256:$sourceManifestDigest},ci:{runId:$ciRunId},recovery:{artifactId:$recoveryArtifactId,artifactDigest:$recoveryArtifactDigest,manifestSha256:$recoveryManifestDigest},staged:{artifactId:$stagedArtifactId,digest:$stagedArtifactDigest,artifactExpiresAt:$stagedArtifactExpiresAt},currentAttempt:$currentState,rollbackTarget:$targetState,authorization:{partialApproval:$partialApproval,expiredRollbackApproval:$expiredRollbackApproval},menu:($manifest[0].menu // null),site:$manifest[0].site,artifacts:([{id:$sourceArtifactId,digest:$sourceArtifactDigest,runId:$sourceRunId,headSha:$sourceSha,role:"source"},{id:$recoveryArtifactId,digest:$recoveryArtifactDigest,runId:$sourceRunId,headSha:$sourceSha,role:"recovery"},{id:$stagedArtifactId,digest:$stagedArtifactDigest,runId:env.GITHUB_RUN_ID|tonumber,headSha:$promotionWorkflowSha,role:"staged"}] + (if $currentArtifact == null then [] else [$currentArtifact] end) + (if $targetArtifact == null then [] else [$targetArtifact] end))}' \
             > pre-approval-summary.json
       - name: Retain the pre-approval summary
         id: summary-upload
@@ -639,7 +656,8 @@ jobs:
           test "$(jq -r .conclusion <<< "$RUN")" = "success"
           test "$(jq -r .releaseId work/pages-deployment/recovery-bundle/release-manifest.json)" = "${{ inputs.recovery_release_id }}"
           test "$(jq -r .releaseKind work/pages-deployment/recovery-bundle/release-manifest.json)" = "first-release-recovery"
-          if [[ "$OPERATION" == "first-release-recovery" ]]; then
+          SOURCE_RELEASE_KIND="$(jq -r .releaseKind "$MANIFEST_PATH")"
+          if [[ "$OPERATION" == "first-release-recovery" || "$SOURCE_RELEASE_KIND" == "first-release-recovery" ]]; then
             test "$SOURCE_ARTIFACT_ID" = "$RECOVERY_ARTIFACT_ID"
             test "$SOURCE_ARTIFACT_DIGEST" = "$RECOVERY_ARTIFACT_DIGEST"
           else
@@ -647,7 +665,7 @@ jobs:
             test "$(jq -r .recovery.artifactDigest "$MANIFEST_PATH")" = "$RECOVERY_ARTIFACT_DIGEST"
             test "$(jq -r .recovery.releaseId "$MANIFEST_PATH")" = "${{ inputs.recovery_release_id }}"
           fi
-          CI_RUN_ID="$(gh api "repos/${{ github.repository }}/actions/workflows/346680782/runs?head_sha=$EXPECTED_SOURCE_SHA&branch=main&event=push&status=success&per_page=10" --jq '[.workflow_runs[] | select(.run_attempt == 1 and .path == ".github/workflows/ci.yml")] | first | .id')"
+          CI_RUN_ID="$(jq -r .ci.runId work/pages-deployment/preapproval/pre-approval-summary.json)"
           [[ "$CI_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           CI_VERIFY_COUNT="$(gh api repos/${{ github.repository }}/actions/runs/$CI_RUN_ID/jobs --jq '[.jobs[] | select(.name == "verify" and .head_sha == env.EXPECTED_SOURCE_SHA and .status == "completed" and .conclusion == "success")] | length')"
           test "$CI_VERIFY_COUNT" = "1"
@@ -723,6 +741,13 @@ jobs:
           MINIMUM_FRESH_UNTIL: ${{ env.MINIMUM_FRESH_UNTIL }}
           EXPECTED_PROMOTION_WORKFLOW_SHA: ${{ inputs.expected_promotion_workflow_sha }}
           DEPLOYMENT_ATTEMPT_PATH: deployment-attempt.json
+          PREAPPROVAL_SUMMARY_PATH: work/pages-deployment/preapproval/pre-approval-summary.json
+          RELEASE_MANIFEST_PATH: work/pages-deployment/source-bundle/release-manifest.json
+          OPERATION: ${{ inputs.operation }}
+          CURRENT_RELEASE_ID: ${{ inputs.expected_current_attempt_release_id }}
+          TARGET_RELEASE_ID: ${{ inputs.rollback_target_release_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
         run: node scripts/deploy-exact-pages-artifact.mjs
       - name: Preserve deployment attempt evidence
         id: attempt-upload
@@ -855,6 +880,8 @@ jobs:
           PUBLIC_PRODUCT_VERIFIED: ${{ steps.public-product.outcome == 'success' }}
           DEPLOYMENT_ATTEMPT_PATH: deployment-attempt.json
           DEPLOYMENT_RECEIPT_PATH: deployment-receipt.json
+          OPERATION: ${{ inputs.operation }}
+          APPROVAL_EXPIRES_AT: ${{ inputs.approval_expires_at }}
         run: |
           set -euo pipefail
           PUBLIC_RELEASE_ID=UNKNOWN
@@ -865,14 +892,14 @@ jobs:
           fi
           export DEPLOYMENT_RECEIPT_INPUT="$(jq -cn \
             --arg recordedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg operation '${{ inputs.operation }}' \
+            --arg operation "$OPERATION" \
             --arg releaseId '${{ needs.verify-and-stage.outputs.release_id }}' \
             --arg releaseKind '${{ needs.verify-and-stage.outputs.release_kind }}' \
             --arg previousKnownGoodReleaseId '${{ inputs.rollback_target_release_id }}' \
             --arg previousKnownGoodRepositoryDeploymentId '${{ inputs.rollback_target_repository_deployment_id }}' \
             --arg previousKnownGoodPagesDeploymentId '${{ inputs.rollback_target_pages_deployment_id }}' \
             --arg workflowSha '${{ inputs.expected_promotion_workflow_sha }}' \
-            --arg approvalExpiresAt '${{ inputs.approval_expires_at }}' \
+            --arg approvalExpiresAt "$APPROVAL_EXPIRES_AT" \
             --arg sourceArtifactDigest '${{ inputs.source_artifact_digest }}' \
             --arg sourceManifestSha256 '${{ inputs.source_manifest_digest }}' \
             --arg sourceSiteTarSha256 '${{ needs.verify-and-stage.outputs.site_tar_digest }}' \

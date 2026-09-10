@@ -6,6 +6,7 @@ const RELEASE_URL = "https://crunchybrunch.github.io/lionlog/release.json";
 const SHA256 = /^[a-f0-9]{64}$/;
 const ARTIFACT_DIGEST = /^sha256:[a-f0-9]{64}$/;
 const PAGES_ID = /^[A-Za-z0-9._-]{1,200}$/;
+const TERMINAL_PAGES_STATUSES = new Set(["succeed", "deployment_failed", "deployment_content_failed", "deployment_cancelled", "deployment_lost"]);
 
 /** @param {any} options */
 export async function verifyCurrentPublication(options) {
@@ -109,25 +110,23 @@ function assertPreviousKnownGood(current, target) {
 }
 
 function validateAuthorityAgainstReceipt(authority, receipt) {
-  if (authority.current === null) {
-    if (
-      receipt.repositoryDeployment.id !== null
-      || receipt.repositoryDeployment.statusRecorded
-      || receipt.deploymentId !== null
-      || !receipt.uncertain
-    ) throw new Error("Current attempt lacks its required repository deployment authority.");
-    return;
-  }
+  if (authority.current === null) throw new Error("Current attempt lacks its required repository deployment authority.");
   const repositoryState = authority.status?.state;
   if (receipt.repositoryDeployment.statusRecorded && repositoryState !== receipt.repositoryDeployment.state) {
     throw new Error("Repository deployment status changed after the receipt was recorded.");
   }
   if (receipt.knownGood && repositoryState !== "success") throw new Error("Known-good repository deployment is not successful.");
-  if (receipt.deploymentId !== null) {
-    if (typeof authority.pagesStatus?.status !== "string") throw new Error("Pages deployment status is unavailable.");
-    if (receipt.knownGood && authority.pagesStatus.status !== "succeed") throw new Error("Known-good Pages deployment is not successful.");
-    if (!receipt.uncertain && receipt.pagesStatus !== authority.pagesStatus.status) throw new Error("Pages deployment status changed after terminal evidence.");
+  const pagesDeploymentId = authority.pagesDeploymentId ?? receipt.deploymentId;
+  if (pagesDeploymentId === null) {
+    if (!(receipt.attemptPhase === "submission-rejected" && receipt.uncertain === false && receipt.pagesAccepted === false)) {
+      throw new Error("Prior Pages submission is unresolved because definitive non-submission was not established.");
+    }
+    return;
   }
+  const pagesStatus = authority.pagesStatus?.status;
+  if (!TERMINAL_PAGES_STATUSES.has(pagesStatus)) throw new Error("Prior Pages operation has not reached a recognized terminal state.");
+  if (receipt.knownGood && pagesStatus !== "succeed") throw new Error("Known-good Pages deployment is not successful.");
+  if (!receipt.uncertain && receipt.pagesStatus !== pagesStatus) throw new Error("Pages deployment status changed after terminal evidence.");
 }
 
 async function readPublicReleaseId(fetchImpl) {

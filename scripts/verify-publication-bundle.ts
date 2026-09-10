@@ -228,6 +228,19 @@ export function validateApprovalAndProvenance(
     ) throw new Error("First-release recovery approval is not bound to the exact recovery bytes.");
     return;
   }
+  if (options.operation === "rollback" && manifest.releaseKind === "first-release-recovery") {
+    if (options.expectedServiceDate !== "NONE") throw new Error("App-only rollback must use the NONE service-date sentinel.");
+    if (options.partialApproval !== "COMPLETE_ONLY" || options.expiredRollbackApproval !== "NONE") {
+      throw new Error("App-only rollback cannot carry menu-coverage or expiry waivers.");
+    }
+    if (
+      options.expectedRecoveryArtifactId !== options.expectedArtifactId
+      || options.expectedRecoveryArtifactDigest !== options.expectedArtifactDigest
+      || options.expectedRecoveryManifestSha256 !== options.expectedManifestSha256
+      || options.expectedRecoveryReleaseId !== manifest.releaseId
+    ) throw new Error("App-only rollback is not bound to the exact recovery bytes.");
+    return;
+  }
   if (manifest.releaseKind !== "live" || manifest.menu === null || manifest.menu.serviceDate !== options.expectedServiceDate) {
     throw new Error("Live publication approval does not match the candidate service date.");
   }
