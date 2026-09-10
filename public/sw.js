@@ -1,7 +1,13 @@
-const CACHE_PREFIX = "lionlog-shell-";
-const CACHE_NAME = `${CACHE_PREFIX}v0.2.0-alpha.4`;
+const SHELL_REVISION = "__LIONLOG_SHELL_REVISION__";
 const SCOPE_URL = new URL("./", self.registration.scope).href;
-const APPLICATION_DOCUMENT_MARKER = 'data-lionlog-shell="v0.2.0-alpha.4"';
+const SCOPE_PATH = new URL(SCOPE_URL).pathname;
+const API_PATH = new URL("./api/", SCOPE_URL).pathname;
+const SCOPE_KEY = [...new TextEncoder().encode(SCOPE_PATH)]
+  .map((byte) => byte.toString(16).padStart(2, "0"))
+  .join("");
+const CACHE_PREFIX = "lionlog-shell-v2-";
+const CACHE_NAME = `${CACHE_PREFIX}${SCOPE_KEY}-${SHELL_REVISION}`;
+const APPLICATION_DOCUMENT_MARKER = `data-lionlog-shell="${SHELL_REVISION}"`;
 const CORE_ASSETS = [
   SCOPE_URL,
   new URL("./manifest.webmanifest", self.registration.scope).href,
@@ -10,12 +16,17 @@ const CORE_ASSETS = [
   new URL("./icons/apple-touch-icon.png", self.registration.scope).href,
 ];
 
+function isWithinApplicationScope(value) {
+  const url = value instanceof URL ? value : new URL(value);
+  return url.origin === self.location.origin && (url.pathname === SCOPE_PATH.slice(0, -1) || url.pathname.startsWith(SCOPE_PATH));
+}
+
 async function isExpectedApplicationDocument(response) {
   if (!response.ok || response.redirected || response.type === "opaqueredirect") return false;
 
   const responseUrl = new URL(response.url);
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-  if (responseUrl.origin !== self.location.origin || !contentType.includes("text/html")) return false;
+  if (!isWithinApplicationScope(responseUrl) || !contentType.includes("text/html")) return false;
 
   return (await response.clone().text()).includes(APPLICATION_DOCUMENT_MARKER);
 }
@@ -32,13 +43,21 @@ async function cacheApplicationShell() {
   const html = await shellResponse.text();
   const assetUrls = [...html.matchAll(/(?:src|href)=["']([^"']+)["']/g)]
     .map((match) => new URL(match[1], SCOPE_URL))
-    .filter((url) => url.origin === self.location.origin)
+    .filter(isWithinApplicationScope)
     .map((url) => url.href);
 
-  await Promise.allSettled(
+  await Promise.all(
     [...new Set([...CORE_ASSETS.slice(1), ...assetUrls])].map(async (url) => {
       const response = await fetch(url, { cache: "reload" });
-      if (response.ok) await cache.put(url, response);
+      if (
+        !response.ok
+        || response.redirected
+        || response.type === "opaqueredirect"
+        || !isWithinApplicationScope(response.url)
+      ) {
+        throw new Error(`LionLog shell asset was unavailable: ${url}`);
+      }
+      await cache.put(url, response);
     }),
   );
 }
@@ -52,7 +71,10 @@ self.addEventListener("activate", (event) => {
     const keys = await caches.keys();
     await Promise.all(
       keys
-        .filter((key) => key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME)
+        .filter((key) => {
+          const match = /^lionlog-shell-v2-([a-f0-9]+)-([a-f0-9]{40}|development)$/.exec(key);
+          return match?.[1] === SCOPE_KEY && key !== CACHE_NAME;
+        })
         .map((key) => caches.delete(key)),
     );
     await self.clients.claim();
@@ -69,8 +91,9 @@ self.addEventListener("fetch", (event) => {
 
   if (
     request.method !== "GET"
-    || url.origin !== self.location.origin
-    || url.pathname.startsWith("/api/")
+    || !isWithinApplicationScope(url)
+    || url.pathname === API_PATH.slice(0, -1)
+    || url.pathname.startsWith(API_PATH)
     || /(^|\/)menu-data\//.test(url.pathname)
   ) {
     return;
@@ -80,7 +103,10 @@ self.addEventListener("fetch", (event) => {
     event.respondWith((async () => {
       try {
         const response = await fetch(request);
-        if (!response.ok) return (await caches.match(SCOPE_URL)) ?? response;
+        if (!response.ok) {
+          const cache = await caches.open(CACHE_NAME);
+          return (await cache.match(SCOPE_URL)) ?? response;
+        }
 
         if (await isExpectedApplicationDocument(response)) {
           const cache = await caches.open(CACHE_NAME);
@@ -88,19 +114,20 @@ self.addEventListener("fetch", (event) => {
         }
         return response;
       } catch {
-        return (await caches.match(SCOPE_URL)) ?? Response.error();
+        const cache = await caches.open(CACHE_NAME);
+        return (await cache.match(SCOPE_URL)) ?? Response.error();
       }
     })());
     return;
   }
 
   event.respondWith((async () => {
-    const cached = await caches.match(request);
+    const cache = await caches.open(CACHE_NAME);
+    const cached = await cache.match(request);
     if (cached) return cached;
 
     const response = await fetch(request);
-    if (response.ok) {
-      const cache = await caches.open(CACHE_NAME);
+    if (response.ok && !response.redirected && isWithinApplicationScope(response.url)) {
       await cache.put(request, response.clone());
     }
     return response;

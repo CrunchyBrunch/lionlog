@@ -112,6 +112,13 @@ async function validatePagesArtifactTree(root: string, omitRootBuildMetadata: bo
   if (!serviceWorker.includes("lionlog-shell-") || !serviceWorker.includes("menu-data")) {
     throw new Error("Service worker shell/menu-data separation is missing.");
   }
+  if (serviceWorker.includes("__LIONLOG_SHELL_REVISION__")) {
+    throw new Error("Service worker shell revision was not finalized.");
+  }
+  const shellRevision = serviceWorker.match(/const SHELL_REVISION = "([a-f0-9]{40}|development)";/)?.[1];
+  if (!shellRevision || !index.includes(`data-lionlog-shell="${shellRevision}"`)) {
+    throw new Error("Application and service-worker shell revisions do not match.");
+  }
 
   for (const relativePath of files) {
     validatePublicationEntryPath(relativePath);

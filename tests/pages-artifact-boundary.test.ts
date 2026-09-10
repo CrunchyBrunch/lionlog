@@ -77,7 +77,10 @@ test("Pages artifact validation requires an empty .nojekyll and rejects obsolete
     await writeFile(path.join(root, ".nojekyll"), "private data");
     await assert.rejects(validatePagesArtifact(root), /must not contain publication data/);
     await writeFile(path.join(root, ".nojekyll"), "\n");
-    await writeFile(path.join(root, "index.html"), '<a href="https://example.chatgpt.site/">old host</a> /lionlog/_next/ <link href="./manifest.webmanifest">');
+    await writeFile(
+      path.join(root, "index.html"),
+      '<html data-lionlog-shell="development"><a href="https://example.chatgpt.site/">old host</a> /lionlog/_next/ <link href="./manifest.webmanifest"></html>',
+    );
     await assert.rejects(validatePagesArtifact(root), /Forbidden publication text/);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -165,7 +168,7 @@ test("Pages root-reference validation rejects same-origin roots in every generat
       ["_next/static/app.css", "@font-face{src:url('/_next/static/font.woff2')}"],
       ["_next/static/app.js", 'const chunks=["/_next/static/root.js"]'],
       ["index.rsc", String.raw`{\"href\":\"/_next/static/root.css\"}`],
-      ["sw.js", "const SHELL = '/icons/icon-192.png'; const CACHE = 'lionlog-shell-v1'; const EXCLUDED = 'menu-data';"],
+      ["sw.js", "const SHELL_REVISION = \"development\"; const SHELL = '/icons/icon-192.png'; const CACHE = 'lionlog-shell-development'; const EXCLUDED = 'menu-data';"],
     ] as const) {
       await writeSiteFixture(root);
       const target = path.join(root, ...relativePath.split("/"));
@@ -183,7 +186,7 @@ async function writeSiteFixture(root: string): Promise<void> {
   await mkdir(path.join(root, "_next", "static"), { recursive: true });
   await mkdir(path.join(root, "icons"), { recursive: true });
   await writeFile(path.join(root, ".nojekyll"), "\n");
-  await writeFile(path.join(root, "index.html"), '<link href="/lionlog/_next/static/app.js"><link href="./manifest.webmanifest">');
+  await writeFile(path.join(root, "index.html"), '<html data-lionlog-shell="development"><link href="/lionlog/_next/static/app.js"><link href="./manifest.webmanifest"></html>');
   await writeFile(path.join(root, "404.html"), "not found");
   await writeFile(path.join(root, "_next", "static", "app.js"), "console.log('shell');");
   await writeFile(path.join(root, "icons", "icon-192.png"), "icon");
@@ -193,5 +196,5 @@ async function writeSiteFixture(root: string): Promise<void> {
     scope: "./",
     icons: [{ src: "./icons/icon-192.png" }],
   }));
-  await writeFile(path.join(root, "sw.js"), "const CACHE = 'lionlog-shell-v1'; const EXCLUDED = 'menu-data';");
+  await writeFile(path.join(root, "sw.js"), "const SHELL_REVISION = \"development\"; const CACHE = 'lionlog-shell-development'; const EXCLUDED = 'menu-data';");
 }

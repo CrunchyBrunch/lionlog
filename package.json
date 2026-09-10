@@ -13,6 +13,8 @@
     "export:psu-static": "node --experimental-strip-types scripts/export-psu-static.ts",
     "prepare:psu-field-release": "node --experimental-strip-types scripts/prepare-live-field-release.ts",
     "validate:psu-release-cache": "node --experimental-strip-types scripts/validate-psu-release-cache.ts",
+    "create:publication-bundle": "node --experimental-strip-types scripts/create-publication-bundle.ts",
+    "verify:publication-bundle": "node --experimental-strip-types scripts/verify-publication-bundle.ts",
     "test": "vinext build && node --test --experimental-strip-types tests/*.test.ts && node --test tests/*.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern work"
   },

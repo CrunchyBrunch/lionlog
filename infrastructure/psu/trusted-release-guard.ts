@@ -2,10 +2,7 @@ const AUTHORIZATION = "I_UNDERSTAND_THIS_CONTACTS_PSU";
 const CONFIRMATION = "PREPARE_LIVE_PAGES_FIELD_RELEASE";
 const REPOSITORY = "CrunchyBrunch/lionlog";
 const WORKFLOW_PATH = ".github/workflows/build-live-menu-artifact.yml";
-const ALLOWED_REFS = new Set([
-  "refs/heads/main",
-  "refs/heads/feature/live-pages-field-release-alpha-4",
-]);
+const ALLOWED_REF = "refs/heads/main";
 
 export function assertTrustedReleaseIngestionEnvironment(
   environment: Readonly<Record<string, string | undefined>> = process.env,
@@ -26,8 +23,8 @@ export function assertTrustedReleaseIngestionEnvironment(
     throw new Error("Trusted release ingestion is restricted to the LionLog repository.");
   }
   const ref = environment.GITHUB_REF ?? "";
-  if (!ALLOWED_REFS.has(ref)) {
-    throw new Error("Trusted release ingestion is restricted to an authorized branch ref.");
+  if (ref !== ALLOWED_REF) {
+    throw new Error("Trusted release ingestion is restricted to main.");
   }
   const expectedWorkflowRef = `${REPOSITORY}/${WORKFLOW_PATH}@${ref}`;
   if (environment.GITHUB_WORKFLOW_REF !== expectedWorkflowRef) {
@@ -35,6 +32,12 @@ export function assertTrustedReleaseIngestionEnvironment(
   }
   if (!/^[a-f0-9]{40}$/.test(environment.GITHUB_SHA ?? "")) {
     throw new Error("Trusted release ingestion requires an exact Git commit SHA.");
+  }
+  if (environment.EXPECTED_SOURCE_SHA !== environment.GITHUB_SHA) {
+    throw new Error("Trusted release ingestion source SHA does not match the authorized SHA.");
+  }
+  if (environment.GITHUB_RUN_ATTEMPT !== "1" || environment.EXPECTED_RUN_ATTEMPT !== "1") {
+    throw new Error("Trusted release ingestion does not permit workflow reruns.");
   }
 }
 

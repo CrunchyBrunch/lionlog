@@ -1,7 +1,109 @@
-name: Deploy GitHub Pages (manual)
+name: Promote exact LionLog release to GitHub Pages
 
 on:
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Exact operation authorized by the Project Manager
+        required: true
+        type: choice
+        options: [promote, rollback, first-release-recovery]
+      source_run_id:
+        description: Exact successful candidate producer run ID
+        required: true
+        type: string
+      source_run_attempt:
+        description: Exact producer attempt; must be 1
+        required: true
+        type: string
+      source_artifact_id:
+        description: Exact candidate artifact ID
+        required: true
+        type: string
+      source_artifact_digest:
+        description: Exact sha256-prefixed GitHub artifact digest
+        required: true
+        type: string
+      source_manifest_digest:
+        description: Exact lowercase SHA-256 of release-manifest.json
+        required: true
+        type: string
+      expected_source_sha:
+        description: Exact trusted-main commit that produced the candidate
+        required: true
+        type: string
+      expected_promotion_workflow_sha:
+        description: Exact main SHA containing the reviewed promotion workflow
+        required: true
+        type: string
+      recovery_artifact_id:
+        description: Exact retained first-release recovery artifact ID
+        required: true
+        type: string
+      recovery_artifact_digest:
+        description: Exact sha256-prefixed retained recovery artifact digest
+        required: true
+        type: string
+      recovery_manifest_digest:
+        description: Exact lowercase SHA-256 of the recovery manifest
+        required: true
+        type: string
+      recovery_release_id:
+        description: Exact recovery release ID
+        required: true
+        type: string
+      expected_service_date:
+        description: Exact YYYY-MM-DD, or NONE for first-release recovery/app-only rollback
+        required: true
+        type: string
+      expected_current_attempt_release_id:
+        description: Exact latest attempt release ID, or NONE_FIRST_DEPLOYMENT
+        required: true
+        type: string
+      current_attempt_receipt_artifact_id:
+        description: Exact latest attempt receipt artifact ID, or NONE_FIRST_DEPLOYMENT
+        required: true
+        type: string
+      current_attempt_receipt_artifact_digest:
+        description: Exact latest attempt receipt wrapper digest, or NONE_FIRST_DEPLOYMENT
+        required: true
+        type: string
+      rollback_target_release_id:
+        description: Exact known-good rollback release ID, or NONE_FIRST_DEPLOYMENT
+        required: true
+        type: string
+      rollback_target_repository_deployment_id:
+        description: Exact known-good repository deployment ID, or NONE_FIRST_DEPLOYMENT
+        required: true
+        type: string
+      rollback_target_pages_deployment_id:
+        description: Exact known-good Pages deployment ID, or NONE_FIRST_DEPLOYMENT
+        required: true
+        type: string
+      rollback_target_receipt_artifact_id:
+        description: Exact known-good rollback receipt artifact ID, or NONE_FIRST_DEPLOYMENT
+        required: true
+        type: string
+      rollback_target_receipt_artifact_digest:
+        description: Exact known-good rollback receipt wrapper digest, or NONE_FIRST_DEPLOYMENT
+        required: true
+        type: string
+      approval_expires_at:
+        description: Project Manager approval expiry as an ISO timestamp
+        required: true
+        type: string
+      partial_approval:
+        description: COMPLETE_ONLY or APPROVE_PARTIAL:<manifest digest>:<omission count>
+        required: true
+        type: string
+      expired_rollback_approval:
+        description: NONE or ALLOW_EXPIRED_ROLLBACK:<manifest digest>
+        required: true
+        type: string
+      confirmation:
+        description: Type PROMOTE_EXACT_LIONLOG_RELEASE
+        required: true
+        type: string
 
 permissions: {}
 
@@ -10,68 +112,818 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    if: github.repository == 'CrunchyBrunch/lionlog' && github.ref == 'refs/heads/main'
+  verify-and-stage:
+    if: >-
+      github.repository == 'CrunchyBrunch/lionlog' &&
+      github.ref == 'refs/heads/main' &&
+      github.run_attempt == 1 &&
+      inputs.expected_promotion_workflow_sha == github.sha &&
+      inputs.confirmation == 'PROMOTE_EXACT_LIONLOG_RELEASE'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
+      actions: read
+      deployments: read
+    outputs:
+      release_id: ${{ steps.validated.outputs.release_id }}
+      release_kind: ${{ steps.validated.outputs.release_kind }}
+      site_tar_digest: ${{ steps.validated.outputs.site_tar_digest }}
+      staged_artifact_id: ${{ steps.stage.outputs.artifact-id }}
+      staged_artifact_digest: ${{ steps.staged-metadata.outputs.digest }}
+      staged_artifact_expires_at: ${{ steps.staged-metadata.outputs.expires_at }}
+      preapproval_artifact_id: ${{ steps.summary-upload.outputs.artifact-id }}
+      preapproval_artifact_digest: ${{ steps.summary-upload.outputs.artifact-digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
           cache: npm
       - run: npm ci --ignore-scripts
-      - run: npm exec tsc -- --noEmit
-      - run: npm test
-      - run: npm run lint
-      - name: Build static project-site artifact
-        env:
-          LIONLOG_BASE_PATH: /lionlog
-          LIONLOG_PUBLIC_ORIGIN: https://crunchybrunch.github.io
-        run: npm run build
-      - name: Verify static Pages boundary
-        run: |
-          test -f dist/client/index.html
-          test -f dist/client/.nojekyll
-          test ! -e public/menu-data
-          test ! -e dist/client/menu-data
-      - name: Prepare isolated Pages artifact
-        run: >-
-          node --experimental-strip-types scripts/prepare-pages-artifact.ts
-          --source=dist/client
-          --output=work/pages-deployment/site
-      - name: Package and round-trip validate Pages artifact
+      - name: Validate immutable input shapes
         shell: bash
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_PROMOTION_WORKFLOW_SHA: ${{ inputs.expected_promotion_workflow_sha }}
+          RECOVERY_ARTIFACT_ID: ${{ inputs.recovery_artifact_id }}
+          RECOVERY_ARTIFACT_DIGEST: ${{ inputs.recovery_artifact_digest }}
+          RECOVERY_MANIFEST_DIGEST: ${{ inputs.recovery_manifest_digest }}
+          RECOVERY_RELEASE_ID: ${{ inputs.recovery_release_id }}
+          CURRENT_ATTEMPT_RELEASE_ID: ${{ inputs.expected_current_attempt_release_id }}
+          CURRENT_ATTEMPT_RECEIPT_ID: ${{ inputs.current_attempt_receipt_artifact_id }}
+          CURRENT_ATTEMPT_RECEIPT_DIGEST: ${{ inputs.current_attempt_receipt_artifact_digest }}
+          ROLLBACK_TARGET_RELEASE_ID: ${{ inputs.rollback_target_release_id }}
+          ROLLBACK_TARGET_REPOSITORY_ID: ${{ inputs.rollback_target_repository_deployment_id }}
+          ROLLBACK_TARGET_PAGES_ID: ${{ inputs.rollback_target_pages_deployment_id }}
+          ROLLBACK_TARGET_RECEIPT_ID: ${{ inputs.rollback_target_receipt_artifact_id }}
+          ROLLBACK_TARGET_RECEIPT_DIGEST: ${{ inputs.rollback_target_receipt_artifact_digest }}
         run: |
           set -euo pipefail
-          tar --directory work/pages-deployment/site --dereference --hard-dereference -cf work/pages-deployment/artifact.tar .
-          mkdir work/pages-deployment/round-trip
-          tar -xf work/pages-deployment/artifact.tar -C work/pages-deployment/round-trip
-          node --experimental-strip-types scripts/prepare-pages-artifact.ts --validate=work/pages-deployment/round-trip
-          diff -qr work/pages-deployment/site work/pages-deployment/round-trip
-          test "$(tar -tf work/pages-deployment/artifact.tar | grep -c '^./.nojekyll$')" -eq 1
-      - name: Upload deployment artifact
+          [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_RUN_ATTEMPT" == "1" ]]
+          [[ "$SOURCE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_ARTIFACT_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "$SOURCE_MANIFEST_DIGEST" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$EXPECTED_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$EXPECTED_PROMOTION_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$RECOVERY_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$RECOVERY_ARTIFACT_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "$RECOVERY_MANIFEST_DIGEST" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$RECOVERY_RELEASE_ID" =~ ^[a-f0-9]{64}$ ]]
+          for VALUE in "$CURRENT_ATTEMPT_RELEASE_ID" "$ROLLBACK_TARGET_RELEASE_ID"; do
+            [[ "$VALUE" == "NONE_FIRST_DEPLOYMENT" || "$VALUE" =~ ^[a-f0-9]{64}$ ]]
+          done
+          if [[ "$ROLLBACK_TARGET_RELEASE_ID" == "NONE_FIRST_DEPLOYMENT" ]]; then
+            test "$ROLLBACK_TARGET_REPOSITORY_ID" = "NONE_FIRST_DEPLOYMENT"
+            test "$ROLLBACK_TARGET_PAGES_ID" = "NONE_FIRST_DEPLOYMENT"
+          else
+            [[ "$ROLLBACK_TARGET_REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]]
+            [[ "$ROLLBACK_TARGET_PAGES_ID" =~ ^[A-Za-z0-9._-]{1,200}$ ]]
+          fi
+          for PAIR in "$CURRENT_ATTEMPT_RECEIPT_ID:$CURRENT_ATTEMPT_RECEIPT_DIGEST" "$ROLLBACK_TARGET_RECEIPT_ID:$ROLLBACK_TARGET_RECEIPT_DIGEST"; do
+            ID="${PAIR%%:*}"; DIGEST="${PAIR#*:}"
+            if [[ "$ID" == "NONE_FIRST_DEPLOYMENT" ]]; then
+              test "$DIGEST" = "NONE_FIRST_DEPLOYMENT"
+            else
+              [[ "$ID" =~ ^[1-9][0-9]*$ ]]
+              [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+            fi
+          done
+          if [[ "$CURRENT_ATTEMPT_RELEASE_ID" == "NONE_FIRST_DEPLOYMENT" ]]; then
+            test "$CURRENT_ATTEMPT_RECEIPT_ID" = "NONE_FIRST_DEPLOYMENT"
+          else
+            [[ "$CURRENT_ATTEMPT_RECEIPT_ID" =~ ^[1-9][0-9]*$ ]]
+          fi
+          if [[ "$ROLLBACK_TARGET_RELEASE_ID" == "NONE_FIRST_DEPLOYMENT" ]]; then
+            test "$ROLLBACK_TARGET_RECEIPT_ID" = "NONE_FIRST_DEPLOYMENT"
+          else
+            [[ "$ROLLBACK_TARGET_RECEIPT_ID" =~ ^[1-9][0-9]*$ ]]
+          fi
+      - name: Read exact GitHub provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          RECOVERY_ARTIFACT_ID: ${{ inputs.recovery_artifact_id }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/pages-promotion/metadata
+          gh api repos/${{ github.repository }} > work/pages-promotion/metadata/repository.json
+          gh api repos/${{ github.repository }}/commits/main > work/pages-promotion/metadata/main.json
+          gh api repos/${{ github.repository }}/actions/runs/$SOURCE_RUN_ID > work/pages-promotion/metadata/run.json
+          gh api repos/${{ github.repository }}/actions/artifacts/$SOURCE_ARTIFACT_ID > work/pages-promotion/metadata/artifact.json
+          gh api repos/${{ github.repository }}/actions/artifacts/$RECOVERY_ARTIFACT_ID > work/pages-promotion/metadata/recovery-artifact.json
+          gh api "repos/${{ github.repository }}/actions/workflows/346680782/runs?head_sha=$EXPECTED_SOURCE_SHA&branch=main&event=push&status=success&per_page=10" \
+            --jq '[.workflow_runs[] | select(.run_attempt == 1 and .head_sha == env.EXPECTED_SOURCE_SHA and .head_branch == "main" and .path == ".github/workflows/ci.yml")] | first' \
+            > work/pages-promotion/metadata/ci-run.json
+          CI_RUN_ID="$(jq -r .id work/pages-promotion/metadata/ci-run.json)"
+          test "$CI_RUN_ID" != "null"
+          gh api repos/${{ github.repository }}/actions/runs/$CI_RUN_ID/jobs --jq .jobs > work/pages-promotion/metadata/ci-jobs.json
+          jq -n '{repository: $repository[0], main: $main[0], run: $run[0], artifact: $artifact[0], ciRun: $ciRun[0], ciJobs: $ciJobs[0]}' \
+            --slurpfile repository work/pages-promotion/metadata/repository.json \
+            --slurpfile main work/pages-promotion/metadata/main.json \
+            --slurpfile run work/pages-promotion/metadata/run.json \
+            --slurpfile artifact work/pages-promotion/metadata/artifact.json \
+            --slurpfile ciRun work/pages-promotion/metadata/ci-run.json \
+            --slurpfile ciJobs work/pages-promotion/metadata/ci-jobs.json \
+            > work/pages-promotion/github-metadata.json
+          jq -n '{repository: $repository[0], main: $main[0], run: $run[0], artifact: $artifact[0], ciRun: $ciRun[0], ciJobs: $ciJobs[0]}' \
+            --slurpfile repository work/pages-promotion/metadata/repository.json \
+            --slurpfile main work/pages-promotion/metadata/main.json \
+            --slurpfile run work/pages-promotion/metadata/run.json \
+            --slurpfile artifact work/pages-promotion/metadata/recovery-artifact.json \
+            --slurpfile ciRun work/pages-promotion/metadata/ci-run.json \
+            --slurpfile ciJobs work/pages-promotion/metadata/ci-jobs.json \
+            > work/pages-promotion/recovery-github-metadata.json
+      - name: Download exact candidate and enforce wrapper digest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --proto '=https' --max-time 120 --max-filesize 115343360 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$SOURCE_ARTIFACT_ID/zip" \
+            --output work/pages-promotion/candidate.zip
+          node --experimental-strip-types scripts/artifact-digest.ts --expected="$SOURCE_ARTIFACT_DIGEST" --file=work/pages-promotion/candidate.zip
+          node --experimental-strip-types scripts/artifact-zip.ts --zip=work/pages-promotion/candidate.zip --output=work/pages-promotion/bundle --expected=release-manifest.json,site.tar
+      - name: Download exact recovery candidate and enforce wrapper digest
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RECOVERY_ARTIFACT_ID: ${{ inputs.recovery_artifact_id }}
+          RECOVERY_ARTIFACT_DIGEST: ${{ inputs.recovery_artifact_digest }}
+          RECOVERY_MANIFEST_DIGEST: ${{ inputs.recovery_manifest_digest }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --proto '=https' --max-time 120 --max-filesize 115343360 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$RECOVERY_ARTIFACT_ID/zip" \
+            --output work/pages-promotion/recovery.zip
+          node --experimental-strip-types scripts/artifact-digest.ts --expected="$RECOVERY_ARTIFACT_DIGEST" --file=work/pages-promotion/recovery.zip
+          node --experimental-strip-types scripts/artifact-zip.ts --zip=work/pages-promotion/recovery.zip --output=work/pages-promotion/recovery-bundle --expected=release-manifest.json,site.tar
+          node --experimental-strip-types scripts/artifact-digest.ts --expected="$RECOVERY_MANIFEST_DIGEST" --file=work/pages-promotion/recovery-bundle/release-manifest.json
+      - name: Validate the exact recovery relationship
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
+          RECOVERY_ARTIFACT_ID: ${{ inputs.recovery_artifact_id }}
+          RECOVERY_ARTIFACT_DIGEST: ${{ inputs.recovery_artifact_digest }}
+          RECOVERY_MANIFEST_DIGEST: ${{ inputs.recovery_manifest_digest }}
+          RECOVERY_RELEASE_ID: ${{ inputs.recovery_release_id }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          APPROVAL_EXPIRES_AT: ${{ inputs.approval_expires_at }}
+        run: |
+          set -euo pipefail
+          test "$(jq -r .releaseKind work/pages-promotion/recovery-bundle/release-manifest.json)" = "first-release-recovery"
+          test "$(jq -r .releaseId work/pages-promotion/recovery-bundle/release-manifest.json)" = "$RECOVERY_RELEASE_ID"
+          test "$(jq -r .source.commitSha work/pages-promotion/recovery-bundle/release-manifest.json)" = "$EXPECTED_SOURCE_SHA"
+          SOURCE_RELEASE_KIND="$(jq -r .releaseKind work/pages-promotion/bundle/release-manifest.json)"
+          if [[ "$OPERATION" == "first-release-recovery" || "$SOURCE_RELEASE_KIND" == "first-release-recovery" ]]; then
+            test "$SOURCE_ARTIFACT_ID" = "$RECOVERY_ARTIFACT_ID"
+            test "$SOURCE_ARTIFACT_DIGEST" = "$RECOVERY_ARTIFACT_DIGEST"
+            test "$SOURCE_MANIFEST_DIGEST" = "$RECOVERY_MANIFEST_DIGEST"
+          else
+            test "$(jq -r .recovery.artifactId work/pages-promotion/bundle/release-manifest.json)" = "$RECOVERY_ARTIFACT_ID"
+            test "$(jq -r .recovery.artifactDigest work/pages-promotion/bundle/release-manifest.json)" = "$RECOVERY_ARTIFACT_DIGEST"
+            test "$(jq -r .recovery.manifestSha256 work/pages-promotion/bundle/release-manifest.json)" = "$RECOVERY_MANIFEST_DIGEST"
+            test "$(jq -r .recovery.releaseId work/pages-promotion/bundle/release-manifest.json)" = "$RECOVERY_RELEASE_ID"
+          fi
+          node --experimental-strip-types scripts/verify-publication-bundle.ts \
+            --bundle=work/pages-promotion/recovery-bundle \
+            --metadata=work/pages-promotion/recovery-github-metadata.json \
+            --operation=first-release-recovery \
+            --source-sha="$EXPECTED_SOURCE_SHA" \
+            --run-id=${{ inputs.source_run_id }} \
+            --run-attempt=${{ inputs.source_run_attempt }} \
+            --artifact-id="$RECOVERY_ARTIFACT_ID" \
+            --artifact-digest="$RECOVERY_ARTIFACT_DIGEST" \
+            --manifest-digest="$RECOVERY_MANIFEST_DIGEST" \
+            --service-date=NONE \
+            --approval-expires-at="$APPROVAL_EXPIRES_AT" \
+            --partial-approval=COMPLETE_ONLY \
+            --expired-rollback-approval=NONE \
+            --workflow-sha=${{ github.sha }} \
+            --expected-promotion-workflow-sha=${{ inputs.expected_promotion_workflow_sha }} \
+            --recovery-artifact-id="$RECOVERY_ARTIFACT_ID" \
+            --recovery-artifact-digest="$RECOVERY_ARTIFACT_DIGEST" \
+            --recovery-manifest-digest="$RECOVERY_MANIFEST_DIGEST" \
+            --recovery-release-id="$RECOVERY_RELEASE_ID"
+      - name: Validate candidate, approval tuple, and exact site
+        id: validated
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_SERVICE_DATE: ${{ inputs.expected_service_date }}
+          APPROVAL_EXPIRES_AT: ${{ inputs.approval_expires_at }}
+          PARTIAL_APPROVAL: ${{ inputs.partial_approval }}
+          EXPIRED_ROLLBACK_APPROVAL: ${{ inputs.expired_rollback_approval }}
+          EXPECTED_PROMOTION_WORKFLOW_SHA: ${{ inputs.expected_promotion_workflow_sha }}
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types scripts/verify-publication-bundle.ts \
+            --bundle=work/pages-promotion/bundle \
+            --extract=work/pages-promotion/site \
+            --metadata=work/pages-promotion/github-metadata.json \
+            --operation="$OPERATION" \
+            --source-sha="$EXPECTED_SOURCE_SHA" \
+            --run-id="$SOURCE_RUN_ID" \
+            --run-attempt="$SOURCE_RUN_ATTEMPT" \
+            --artifact-id="$SOURCE_ARTIFACT_ID" \
+            --artifact-digest="$SOURCE_ARTIFACT_DIGEST" \
+            --manifest-digest="$SOURCE_MANIFEST_DIGEST" \
+            --service-date="$EXPECTED_SERVICE_DATE" \
+            --approval-expires-at="$APPROVAL_EXPIRES_AT" \
+            --partial-approval="$PARTIAL_APPROVAL" \
+            --expired-rollback-approval="$EXPIRED_ROLLBACK_APPROVAL" \
+            --workflow-sha=${{ github.sha }} \
+            --expected-promotion-workflow-sha="$EXPECTED_PROMOTION_WORKFLOW_SHA" \
+            --recovery-artifact-id=${{ inputs.recovery_artifact_id }} \
+            --recovery-artifact-digest=${{ inputs.recovery_artifact_digest }} \
+            --recovery-manifest-digest=${{ inputs.recovery_manifest_digest }} \
+            --recovery-release-id=${{ inputs.recovery_release_id }} \
+            > work/pages-promotion/validated.json
+          echo "release_id=$(jq -r .releaseId work/pages-promotion/validated.json)" >> "$GITHUB_OUTPUT"
+          echo "release_kind=$(jq -r .releaseKind work/pages-promotion/validated.json)" >> "$GITHUB_OUTPUT"
+          echo "site_tar_digest=$(sha256sum work/pages-promotion/bundle/site.tar | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Verify current attempt separately from the known-good rollback target
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CURRENT_RELEASE_ID: ${{ inputs.expected_current_attempt_release_id }}
+          CURRENT_RECEIPT_ID: ${{ inputs.current_attempt_receipt_artifact_id }}
+          CURRENT_RECEIPT_DIGEST: ${{ inputs.current_attempt_receipt_artifact_digest }}
+          TARGET_RELEASE_ID: ${{ inputs.rollback_target_release_id }}
+          TARGET_RECEIPT_ID: ${{ inputs.rollback_target_receipt_artifact_id }}
+          TARGET_RECEIPT_DIGEST: ${{ inputs.rollback_target_receipt_artifact_digest }}
+          OPERATION: ${{ inputs.operation }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
+          RELEASE_MANIFEST_PATH: work/pages-promotion/bundle/release-manifest.json
+        run: |
+          set -euo pipefail
+          mkdir -p work/pages-promotion
+          for KIND in current target; do
+            if [[ "$KIND" == "current" ]]; then
+              RELEASE_ID="$CURRENT_RELEASE_ID"; RECEIPT_ID="$CURRENT_RECEIPT_ID"; RECEIPT_DIGEST="$CURRENT_RECEIPT_DIGEST"
+            else
+              RELEASE_ID="$TARGET_RELEASE_ID"; RECEIPT_ID="$TARGET_RECEIPT_ID"; RECEIPT_DIGEST="$TARGET_RECEIPT_DIGEST"
+            fi
+            if [[ "$RELEASE_ID" == "NONE_FIRST_DEPLOYMENT" ]]; then
+              test "$RECEIPT_ID" = "NONE_FIRST_DEPLOYMENT"
+              test "$RECEIPT_DIGEST" = "NONE_FIRST_DEPLOYMENT"
+              continue
+            fi
+            METADATA="$(gh api repos/${{ github.repository }}/actions/artifacts/$RECEIPT_ID)"
+            test "$(jq -r .expired <<< "$METADATA")" = "false"
+            node --experimental-strip-types scripts/artifact-digest.ts --expected="$RECEIPT_DIGEST" --actual="$(jq -r .digest <<< "$METADATA")"
+            curl --fail --silent --show-error --location --proto '=https' --max-time 120 --max-filesize 2097152 \
+              -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json'  \
+              "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$RECEIPT_ID/zip" --output "work/pages-promotion/$KIND.zip"
+            node --experimental-strip-types scripts/artifact-digest.ts --expected="$RECEIPT_DIGEST" --file="work/pages-promotion/$KIND.zip"
+            node --experimental-strip-types scripts/artifact-zip.ts --zip="work/pages-promotion/$KIND.zip" --output="work/pages-promotion/$KIND" --expected=deployment-receipt.json
+            RECEIPT="work/pages-promotion/$KIND/deployment-receipt.json"
+            test "$(jq -r .releaseId "$RECEIPT")" = "$RELEASE_ID"
+            test "$(jq -r .name <<< "$METADATA")" = "lionlog-deployment-receipt-$(jq -r .promotion.runId "$RECEIPT")-1"
+            test "$(jq -r .workflow_run.id <<< "$METADATA")" = "$(jq -r .promotion.runId "$RECEIPT")"
+            test "$(jq -r .workflow_run.head_sha <<< "$METADATA")" = "$(jq -r .promotion.workflowSha "$RECEIPT")"
+            test "$(jq -r .workflow_run.head_branch <<< "$METADATA")" = "main"
+            test "$(jq -r .workflow_run.head_repository_id <<< "$METADATA")" = "1346360244"
+            RUN="$(gh api repos/${{ github.repository }}/actions/runs/$(jq -r .promotion.runId "$RECEIPT"))"
+            test "$(jq -r .workflow_id <<< "$RUN")" = "347992874"
+            test "$(jq -r .path <<< "$RUN")" = ".github/workflows/deploy-github-pages.yml"
+            test "$(jq -r .head_sha <<< "$RUN")" = "$(jq -r .promotion.workflowSha "$RECEIPT")"
+            test "$(jq -r .run_attempt <<< "$RUN")" = "1"
+            test "$(jq -r .status <<< "$RUN")" = "completed"
+          done
+          if [[ "$TARGET_RELEASE_ID" != "NONE_FIRST_DEPLOYMENT" ]]; then
+            test "$(jq -r .repositoryDeployment.id work/pages-promotion/target/deployment-receipt.json)" = "${{ inputs.rollback_target_repository_deployment_id }}"
+            test "$(jq -r .deploymentId work/pages-promotion/target/deployment-receipt.json)" = "${{ inputs.rollback_target_pages_deployment_id }}"
+          fi
+          export EXPECTED_CURRENT_RECEIPT_PATH="$([[ "$CURRENT_RELEASE_ID" == "NONE_FIRST_DEPLOYMENT" ]] && echo NONE_FIRST_DEPLOYMENT || echo work/pages-promotion/current/deployment-receipt.json)"
+          export ROLLBACK_TARGET_RECEIPT_PATH="$([[ "$TARGET_RELEASE_ID" == "NONE_FIRST_DEPLOYMENT" ]] && echo NONE_FIRST_DEPLOYMENT || echo work/pages-promotion/target/deployment-receipt.json)"
+          node scripts/verify-current-publication.mjs
+      - name: Stage exact Pages tar for protected deployment
+        id: stage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: github-pages
-          path: work/pages-deployment/artifact.tar
-          retention-days: 1
+          name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: work/pages-promotion/bundle/site.tar
           if-no-files-found: error
+          retention-days: 90
+      - name: Capture staged artifact metadata before approval
+        id: staged-metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGED_ARTIFACT_ID: ${{ steps.stage.outputs.artifact-id }}
+          UPLOAD_DIGEST: ${{ steps.stage.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          STAGED="$(gh api repos/${{ github.repository }}/actions/artifacts/$STAGED_ARTIFACT_ID)"
+          DIGEST="$(node --experimental-strip-types scripts/artifact-digest.ts --expected="$UPLOAD_DIGEST" --actual="$(jq -r .digest <<< "$STAGED")")"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "expires_at=$(jq -r .expires_at <<< "$STAGED")" >> "$GITHUB_OUTPUT"
+      - name: Record the exact pre-approval summary
+        shell: bash
+        env:
+          CURRENT_RELEASE_ID: ${{ inputs.expected_current_attempt_release_id }}
+          CURRENT_RECEIPT_ID: ${{ inputs.current_attempt_receipt_artifact_id }}
+          CURRENT_RECEIPT_DIGEST: ${{ inputs.current_attempt_receipt_artifact_digest }}
+          TARGET_RELEASE_ID: ${{ inputs.rollback_target_release_id }}
+          TARGET_RECEIPT_ID: ${{ inputs.rollback_target_receipt_artifact_id }}
+          TARGET_RECEIPT_DIGEST: ${{ inputs.rollback_target_receipt_artifact_digest }}
+          OPERATION: ${{ inputs.operation }}
+          APPROVAL_EXPIRES_AT: ${{ inputs.approval_expires_at }}
+          PARTIAL_APPROVAL: ${{ inputs.partial_approval }}
+          EXPIRED_ROLLBACK_APPROVAL: ${{ inputs.expired_rollback_approval }}
+        run: |
+          set -euo pipefail
+          CURRENT_ARTIFACT='null'
+          TARGET_ARTIFACT='null'
+          CURRENT_STATE='{"releaseId":"NONE_FIRST_DEPLOYMENT","repositoryDeploymentId":"NONE_FIRST_DEPLOYMENT","pagesDeploymentId":"NONE_FIRST_DEPLOYMENT","attemptPhase":null,"repositoryState":null,"knownGood":false,"uncertain":false,"receipt":null}'
+          TARGET_STATE='{"releaseId":"NONE_FIRST_DEPLOYMENT","repositoryDeploymentId":"NONE_FIRST_DEPLOYMENT","pagesDeploymentId":"NONE_FIRST_DEPLOYMENT","knownGood":false,"receipt":null}'
+          if [[ "$CURRENT_RELEASE_ID" != "NONE_FIRST_DEPLOYMENT" ]]; then
+            CURRENT_ARTIFACT="$(jq -cn --argjson id "$CURRENT_RECEIPT_ID" --arg digest "$CURRENT_RECEIPT_DIGEST" --argjson runId "$(jq -r .promotion.runId work/pages-promotion/current/deployment-receipt.json)" --arg headSha "$(jq -r .promotion.workflowSha work/pages-promotion/current/deployment-receipt.json)" '{id:$id,digest:$digest,runId:$runId,headSha:$headSha,role:"current-attempt-receipt"}')"
+            CURRENT_STATE="$(jq --argjson receiptArtifact "$CURRENT_ARTIFACT" '{releaseId,repositoryDeploymentId:.repositoryDeployment.id,pagesDeploymentId:.deploymentId,attemptPhase,repositoryState:.repositoryDeployment.state,repositoryStatusRecorded:.repositoryDeployment.statusRecorded,pagesStatus,markerVerified,publicProductVerified,reconciliation,knownGood,uncertain,receipt:$receiptArtifact}' work/pages-promotion/current/deployment-receipt.json)"
+          fi
+          if [[ "$TARGET_RELEASE_ID" != "NONE_FIRST_DEPLOYMENT" ]]; then
+            TARGET_ARTIFACT="$(jq -cn --argjson id "$TARGET_RECEIPT_ID" --arg digest "$TARGET_RECEIPT_DIGEST" --argjson runId "$(jq -r .promotion.runId work/pages-promotion/target/deployment-receipt.json)" --arg headSha "$(jq -r .promotion.workflowSha work/pages-promotion/target/deployment-receipt.json)" '{id:$id,digest:$digest,runId:$runId,headSha:$headSha,role:"rollback-target-receipt"}')"
+            TARGET_STATE="$(jq --argjson receiptArtifact "$TARGET_ARTIFACT" '{releaseId,repositoryDeploymentId:.repositoryDeployment.id,pagesDeploymentId:.deploymentId,attemptPhase,repositoryState:.repositoryDeployment.state,repositoryStatusRecorded:.repositoryDeployment.statusRecorded,pagesStatus,markerVerified,publicProductVerified,reconciliation,knownGood,uncertain,receipt:$receiptArtifact}' work/pages-promotion/target/deployment-receipt.json)"
+          fi
+          jq -n \
+            --arg operation "$OPERATION" \
+            --arg promotionWorkflowSha '${{ inputs.expected_promotion_workflow_sha }}' \
+            --arg approvalExpiresAt "$APPROVAL_EXPIRES_AT" \
+            --arg minimumFreshUntil "$(jq -r '.menu.earliestFreshUntil // "NONE"' work/pages-promotion/bundle/release-manifest.json)" \
+            --arg releaseId '${{ steps.validated.outputs.release_id }}' \
+            --argjson sourceRunId '${{ inputs.source_run_id }}' \
+            --arg sourceSha '${{ inputs.expected_source_sha }}' \
+            --argjson sourceArtifactId '${{ inputs.source_artifact_id }}' \
+            --arg sourceArtifactDigest '${{ inputs.source_artifact_digest }}' \
+            --arg sourceManifestDigest '${{ inputs.source_manifest_digest }}' \
+            --argjson recoveryArtifactId '${{ inputs.recovery_artifact_id }}' \
+            --arg recoveryArtifactDigest '${{ inputs.recovery_artifact_digest }}' \
+            --arg recoveryManifestDigest '${{ inputs.recovery_manifest_digest }}' \
+            --argjson stagedArtifactId '${{ steps.stage.outputs.artifact-id }}' \
+            --arg stagedArtifactDigest '${{ steps.staged-metadata.outputs.digest }}' \
+            --arg stagedArtifactExpiresAt '${{ steps.staged-metadata.outputs.expires_at }}' \
+            --argjson ciRunId "$(jq -r .ciRun.id work/pages-promotion/github-metadata.json)" \
+            --arg partialApproval "$PARTIAL_APPROVAL" \
+            --arg expiredRollbackApproval "$EXPIRED_ROLLBACK_APPROVAL" \
+            --argjson currentState "$CURRENT_STATE" \
+            --argjson targetState "$TARGET_STATE" \
+            --argjson currentArtifact "$CURRENT_ARTIFACT" \
+            --argjson targetArtifact "$TARGET_ARTIFACT" \
+            --slurpfile manifest work/pages-promotion/bundle/release-manifest.json \
+            '{operation:$operation,promotionWorkflowSha:$promotionWorkflowSha,approvalExpiresAt:$approvalExpiresAt,minimumFreshUntil:$minimumFreshUntil,releaseId:$releaseId,source:{runId:$sourceRunId,sourceSha:$sourceSha,artifactId:$sourceArtifactId,artifactDigest:$sourceArtifactDigest,manifestSha256:$sourceManifestDigest},ci:{runId:$ciRunId},recovery:{artifactId:$recoveryArtifactId,artifactDigest:$recoveryArtifactDigest,manifestSha256:$recoveryManifestDigest},staged:{artifactId:$stagedArtifactId,digest:$stagedArtifactDigest,artifactExpiresAt:$stagedArtifactExpiresAt},currentAttempt:$currentState,rollbackTarget:$targetState,authorization:{partialApproval:$partialApproval,expiredRollbackApproval:$expiredRollbackApproval},menu:($manifest[0].menu // null),site:$manifest[0].site,artifacts:([{id:$sourceArtifactId,digest:$sourceArtifactDigest,runId:$sourceRunId,headSha:$sourceSha,role:"source"},{id:$recoveryArtifactId,digest:$recoveryArtifactDigest,runId:$sourceRunId,headSha:$sourceSha,role:"recovery"},{id:$stagedArtifactId,digest:$stagedArtifactDigest,runId:env.GITHUB_RUN_ID|tonumber,headSha:$promotionWorkflowSha,role:"staged"}] + (if $currentArtifact == null then [] else [$currentArtifact] end) + (if $targetArtifact == null then [] else [$targetArtifact] end))}' \
+            > pre-approval-summary.json
+      - name: Retain the pre-approval summary
+        id: summary-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: lionlog-pre-approval-summary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: pre-approval-summary.json
+          if-no-files-found: error
+          retention-days: 90
 
   deploy:
-    if: github.repository == 'CrunchyBrunch/lionlog' && github.ref == 'refs/heads/main'
-    needs: build
+    needs: verify-and-stage
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
+      contents: read
+      actions: read
+      deployments: write
       pages: write
       id-token: write
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.pages.outputs.page_url }}
+    outputs:
+      repository_deployment_id: ${{ steps.pages.outputs.repository_deployment_id }}
+      deployment_id: ${{ steps.pages.outputs.deployment_id }}
+      page_url: ${{ steps.pages.outputs.page_url }}
+      attempt_artifact_id: ${{ steps.attempt-upload.outputs.artifact-id }}
+      attempt_artifact_digest: ${{ steps.attempt-upload.outputs.artifact-digest }}
     steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Re-download the exact retained approval summary
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SUMMARY_ID: ${{ needs.verify-and-stage.outputs.preapproval_artifact_id }}
+          SUMMARY_DIGEST: ${{ needs.verify-and-stage.outputs.preapproval_artifact_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/pages-deployment
+          curl --fail --silent --show-error --location --proto '=https' --max-time 120 --max-filesize 2097152 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$SUMMARY_ID/zip" --output work/pages-deployment/preapproval.zip
+          node --experimental-strip-types scripts/artifact-digest.ts --expected="$SUMMARY_DIGEST" --file=work/pages-deployment/preapproval.zip
+          node --experimental-strip-types scripts/artifact-zip.ts --zip=work/pages-deployment/preapproval.zip --output=work/pages-deployment/preapproval --expected=pre-approval-summary.json
+      - name: Download exact source and recovery wrappers after protected approval
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
+          RECOVERY_ARTIFACT_ID: ${{ inputs.recovery_artifact_id }}
+          RECOVERY_ARTIFACT_DIGEST: ${{ inputs.recovery_artifact_digest }}
+          RECOVERY_MANIFEST_DIGEST: ${{ inputs.recovery_manifest_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/pages-deployment
+          for KIND in source recovery; do
+            if [[ "$KIND" == "source" ]]; then
+              ARTIFACT_ID="$SOURCE_ARTIFACT_ID"; ARTIFACT_DIGEST="$SOURCE_ARTIFACT_DIGEST"; MANIFEST_DIGEST="$SOURCE_MANIFEST_DIGEST"
+            else
+              ARTIFACT_ID="$RECOVERY_ARTIFACT_ID"; ARTIFACT_DIGEST="$RECOVERY_ARTIFACT_DIGEST"; MANIFEST_DIGEST="$RECOVERY_MANIFEST_DIGEST"
+            fi
+            curl --fail --silent --show-error --location --proto '=https' --max-time 120 --max-filesize 115343360 \
+              -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' \
+              "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" \
+              --output "work/pages-deployment/$KIND.zip"
+            node --experimental-strip-types scripts/artifact-digest.ts --expected="$ARTIFACT_DIGEST" --file="work/pages-deployment/$KIND.zip"
+            node --experimental-strip-types scripts/artifact-zip.ts --zip="work/pages-deployment/$KIND.zip" --output="work/pages-deployment/$KIND-bundle" --expected=release-manifest.json,site.tar
+            node --experimental-strip-types scripts/artifact-digest.ts --expected="$MANIFEST_DIGEST" --file="work/pages-deployment/$KIND-bundle/release-manifest.json"
+          done
+      - name: Re-download and identify the exact staged artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          STAGED_ARTIFACT_ID: ${{ needs.verify-and-stage.outputs.staged_artifact_id }}
+          STAGED_ARTIFACT_DIGEST: ${{ needs.verify-and-stage.outputs.staged_artifact_digest }}
+          SITE_TAR_DIGEST: ${{ needs.verify-and-stage.outputs.site_tar_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/pages-deployment
+          node --experimental-strip-types scripts/artifact-digest.ts --expected="$STAGED_ARTIFACT_DIGEST" --actual="$(gh api repos/${{ github.repository }}/actions/artifacts/$STAGED_ARTIFACT_ID --jq .digest)"
+          curl --fail --silent --show-error --location --proto '=https' --max-time 120 --max-filesize 115343360 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$STAGED_ARTIFACT_ID/zip" \
+            --output work/pages-deployment/staged.zip
+          node --experimental-strip-types scripts/artifact-digest.ts --expected="$STAGED_ARTIFACT_DIGEST" --file=work/pages-deployment/staged.zip
+          node --experimental-strip-types scripts/artifact-zip.ts --zip=work/pages-deployment/staged.zip --output=work/pages-deployment/staged --expected=site.tar
+          node --experimental-strip-types scripts/artifact-digest.ts --expected="$SITE_TAR_DIGEST" --file=work/pages-deployment/staged/site.tar
+      - name: Re-download current-attempt and rollback-target receipts after approval
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CURRENT_RELEASE_ID: ${{ inputs.expected_current_attempt_release_id }}
+          CURRENT_RECEIPT_ID: ${{ inputs.current_attempt_receipt_artifact_id }}
+          CURRENT_RECEIPT_DIGEST: ${{ inputs.current_attempt_receipt_artifact_digest }}
+          TARGET_RELEASE_ID: ${{ inputs.rollback_target_release_id }}
+          TARGET_RECEIPT_ID: ${{ inputs.rollback_target_receipt_artifact_id }}
+          TARGET_RECEIPT_DIGEST: ${{ inputs.rollback_target_receipt_artifact_digest }}
+        run: |
+          set -euo pipefail
+          for KIND in current target; do
+            if [[ "$KIND" == "current" ]]; then RELEASE_ID="$CURRENT_RELEASE_ID"; ID="$CURRENT_RECEIPT_ID"; DIGEST="$CURRENT_RECEIPT_DIGEST"; else RELEASE_ID="$TARGET_RELEASE_ID"; ID="$TARGET_RECEIPT_ID"; DIGEST="$TARGET_RECEIPT_DIGEST"; fi
+            if [[ "$RELEASE_ID" == "NONE_FIRST_DEPLOYMENT" ]]; then continue; fi
+            curl --fail --silent --show-error --location --proto '=https' --max-time 120 --max-filesize 2097152 \
+              -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' \
+              "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ID/zip" --output "work/pages-deployment/$KIND.zip"
+            node --experimental-strip-types scripts/artifact-digest.ts --expected="$DIGEST" --file="work/pages-deployment/$KIND.zip"
+            node --experimental-strip-types scripts/artifact-zip.ts --zip="work/pages-deployment/$KIND.zip" --output="work/pages-deployment/$KIND" --expected=deployment-receipt.json
+            test "$(jq -r .releaseId "work/pages-deployment/$KIND/deployment-receipt.json")" = "$RELEASE_ID"
+          done
+      - name: Perform final provenance, state, deadline, and freshness checks
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          EXPECTED_PROMOTION_WORKFLOW_SHA: ${{ inputs.expected_promotion_workflow_sha }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          RECOVERY_ARTIFACT_ID: ${{ inputs.recovery_artifact_id }}
+          RECOVERY_ARTIFACT_DIGEST: ${{ inputs.recovery_artifact_digest }}
+          STAGED_ARTIFACT_ID: ${{ needs.verify-and-stage.outputs.staged_artifact_id }}
+          STAGED_ARTIFACT_DIGEST: ${{ needs.verify-and-stage.outputs.staged_artifact_digest }}
+          CURRENT_RELEASE_ID: ${{ inputs.expected_current_attempt_release_id }}
+          CURRENT_RECEIPT_ARTIFACT_ID: ${{ inputs.current_attempt_receipt_artifact_id }}
+          CURRENT_RECEIPT_ARTIFACT_DIGEST: ${{ inputs.current_attempt_receipt_artifact_digest }}
+          TARGET_RELEASE_ID: ${{ inputs.rollback_target_release_id }}
+          TARGET_RECEIPT_ARTIFACT_ID: ${{ inputs.rollback_target_receipt_artifact_id }}
+          TARGET_RECEIPT_ARTIFACT_DIGEST: ${{ inputs.rollback_target_receipt_artifact_digest }}
+          APPROVAL_EXPIRES_AT: ${{ inputs.approval_expires_at }}
+          OPERATION: ${{ inputs.operation }}
+          SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
+          PARTIAL_APPROVAL: ${{ inputs.partial_approval }}
+          EXPIRED_ROLLBACK_APPROVAL: ${{ inputs.expired_rollback_approval }}
+          MANIFEST_PATH: work/pages-deployment/source-bundle/release-manifest.json
+        run: |
+          set -euo pipefail
+          test "$EXPECTED_PROMOTION_WORKFLOW_SHA" = "${{ github.sha }}"
+          test "$(gh api repos/${{ github.repository }}/commits/main --jq .sha)" = "$EXPECTED_PROMOTION_WORKFLOW_SHA"
+          RUN="$(gh api repos/${{ github.repository }}/actions/runs/$SOURCE_RUN_ID)"
+          test "$(jq -r .workflow_id <<< "$RUN")" = "347085467"
+          test "$(jq -r .path <<< "$RUN")" = ".github/workflows/build-live-menu-artifact.yml"
+          test "$(jq -r .event <<< "$RUN")" = "workflow_dispatch"
+          test "$(jq -r .head_sha <<< "$RUN")" = "$EXPECTED_SOURCE_SHA"
+          test "$(jq -r .head_branch <<< "$RUN")" = "main"
+          test "$(jq -r .run_attempt <<< "$RUN")" = "1"
+          test "$(jq -r .conclusion <<< "$RUN")" = "success"
+          test "$(jq -r .releaseId work/pages-deployment/recovery-bundle/release-manifest.json)" = "${{ inputs.recovery_release_id }}"
+          test "$(jq -r .releaseKind work/pages-deployment/recovery-bundle/release-manifest.json)" = "first-release-recovery"
+          SOURCE_RELEASE_KIND="$(jq -r .releaseKind "$MANIFEST_PATH")"
+          if [[ "$OPERATION" == "first-release-recovery" || "$SOURCE_RELEASE_KIND" == "first-release-recovery" ]]; then
+            test "$SOURCE_ARTIFACT_ID" = "$RECOVERY_ARTIFACT_ID"
+            test "$SOURCE_ARTIFACT_DIGEST" = "$RECOVERY_ARTIFACT_DIGEST"
+          else
+            test "$(jq -r .recovery.artifactId "$MANIFEST_PATH")" = "$RECOVERY_ARTIFACT_ID"
+            test "$(jq -r .recovery.artifactDigest "$MANIFEST_PATH")" = "$RECOVERY_ARTIFACT_DIGEST"
+            test "$(jq -r .recovery.releaseId "$MANIFEST_PATH")" = "${{ inputs.recovery_release_id }}"
+          fi
+          CI_RUN_ID="$(jq -r .ci.runId work/pages-deployment/preapproval/pre-approval-summary.json)"
+          [[ "$CI_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          CI_VERIFY_COUNT="$(gh api repos/${{ github.repository }}/actions/runs/$CI_RUN_ID/jobs --jq '[.jobs[] | select(.name == "verify" and .head_sha == env.EXPECTED_SOURCE_SHA and .status == "completed" and .conclusion == "success")] | length')"
+          test "$CI_VERIFY_COUNT" = "1"
+          for PAIR in "$SOURCE_ARTIFACT_ID:$SOURCE_ARTIFACT_DIGEST" "$RECOVERY_ARTIFACT_ID:$RECOVERY_ARTIFACT_DIGEST" "$STAGED_ARTIFACT_ID:$STAGED_ARTIFACT_DIGEST"; do
+            ID="${PAIR%%:*}"; EXPECTED_DIGEST="${PAIR#*:}"
+            ARTIFACT="$(gh api repos/${{ github.repository }}/actions/artifacts/$ID)"
+            test "$(jq -r .expired <<< "$ARTIFACT")" = "false"
+            node --experimental-strip-types scripts/artifact-digest.ts --expected="$EXPECTED_DIGEST" --actual="$(jq -r .digest <<< "$ARTIFACT")"
+            if [[ "$ID" == "$STAGED_ARTIFACT_ID" ]]; then
+              test "$(jq -r .workflow_run.id <<< "$ARTIFACT")" = "${{ github.run_id }}"
+              test "$(jq -r .workflow_run.head_sha <<< "$ARTIFACT")" = "$EXPECTED_PROMOTION_WORKFLOW_SHA"
+            else
+              test "$(jq -r .workflow_run.id <<< "$ARTIFACT")" = "$SOURCE_RUN_ID"
+              test "$(jq -r .workflow_run.head_sha <<< "$ARTIFACT")" = "$EXPECTED_SOURCE_SHA"
+            fi
+            test "$(jq -r .workflow_run.head_branch <<< "$ARTIFACT")" = "main"
+            test "$(jq -r .workflow_run.head_repository_id <<< "$ARTIFACT")" = "1346360244"
+          done
+          for KIND in current target; do
+            if [[ "$KIND" == "current" ]]; then RELEASE_ID="$CURRENT_RELEASE_ID"; ID="$CURRENT_RECEIPT_ARTIFACT_ID"; DIGEST="$CURRENT_RECEIPT_ARTIFACT_DIGEST"; else RELEASE_ID="$TARGET_RELEASE_ID"; ID="$TARGET_RECEIPT_ARTIFACT_ID"; DIGEST="$TARGET_RECEIPT_ARTIFACT_DIGEST"; fi
+            if [[ "$RELEASE_ID" == "NONE_FIRST_DEPLOYMENT" ]]; then continue; fi
+            ARTIFACT="$(gh api repos/${{ github.repository }}/actions/artifacts/$ID)"
+            test "$(jq -r .expired <<< "$ARTIFACT")" = "false"
+            node --experimental-strip-types scripts/artifact-digest.ts --expected="$DIGEST" --actual="$(jq -r .digest <<< "$ARTIFACT")"
+            RECEIPT="work/pages-deployment/$KIND/deployment-receipt.json"
+            test "$(jq -r .name <<< "$ARTIFACT")" = "lionlog-deployment-receipt-$(jq -r .promotion.runId "$RECEIPT")-1"
+            test "$(jq -r .workflow_run.id <<< "$ARTIFACT")" = "$(jq -r .promotion.runId "$RECEIPT")"
+            test "$(jq -r .workflow_run.head_sha <<< "$ARTIFACT")" = "$(jq -r .promotion.workflowSha "$RECEIPT")"
+            RECEIPT_RUN="$(gh api repos/${{ github.repository }}/actions/runs/$(jq -r .promotion.runId "$RECEIPT"))"
+            test "$(jq -r .workflow_id <<< "$RECEIPT_RUN")" = "347992874"
+            test "$(jq -r .path <<< "$RECEIPT_RUN")" = ".github/workflows/deploy-github-pages.yml"
+            test "$(jq -r .head_sha <<< "$RECEIPT_RUN")" = "$(jq -r .promotion.workflowSha "$RECEIPT")"
+            test "$(jq -r .run_attempt <<< "$RECEIPT_RUN")" = "1"
+            test "$(jq -r .status <<< "$RECEIPT_RUN")" = "completed"
+          done
+          ACTUAL_ARTIFACTS='[]'
+          while read -r ID; do
+            ARTIFACT="$(gh api repos/${{ github.repository }}/actions/artifacts/$ID)"
+            ACTUAL_ARTIFACTS="$(jq --argjson value "$ARTIFACT" '. + [$value]' <<< "$ACTUAL_ARTIFACTS")"
+          done < <(jq -r '.artifacts[].id' work/pages-deployment/preapproval/pre-approval-summary.json)
+          CI_RUN="$(gh api repos/${{ github.repository }}/actions/runs/$CI_RUN_ID)"
+          CI_JOBS="$(gh api repos/${{ github.repository }}/actions/runs/$CI_RUN_ID/jobs --jq .jobs)"
+          MAIN_SHA="$(gh api repos/${{ github.repository }}/commits/main --jq .sha)"
+          jq -n \
+            --arg checkoutSha '${{ github.sha }}' \
+            --arg mainSha "$MAIN_SHA" \
+            --argjson sourceRun "$RUN" \
+            --argjson ciRun "$CI_RUN" \
+            --argjson ciJobs "$CI_JOBS" \
+            --argjson artifacts "$ACTUAL_ARTIFACTS" \
+            '{checkoutSha:$checkoutSha,mainSha:$mainSha,sourceRun:$sourceRun,ciRun:$ciRun,ciJobs:$ciJobs,artifacts:$artifacts}' \
+            > work/pages-deployment/final-state.json
+          PREAPPROVAL_SUMMARY_PATH=work/pages-deployment/preapproval/pre-approval-summary.json FINAL_STATE_PATH=work/pages-deployment/final-state.json node scripts/final-promotion-gate.mjs
+          export EXPECTED_CURRENT_RECEIPT_PATH="$([[ "$CURRENT_RELEASE_ID" == "NONE_FIRST_DEPLOYMENT" ]] && echo NONE_FIRST_DEPLOYMENT || echo work/pages-deployment/current/deployment-receipt.json)"
+          export ROLLBACK_TARGET_RECEIPT_PATH="$([[ "$TARGET_RELEASE_ID" == "NONE_FIRST_DEPLOYMENT" ]] && echo NONE_FIRST_DEPLOYMENT || echo work/pages-deployment/target/deployment-receipt.json)"
+          node scripts/verify-current-publication.mjs
+          bash scripts/verify-post-approval-policy.sh
+          test "$(date -u +%s)" -lt "$(date -u -d "$APPROVAL_EXPIRES_AT" +%s)"
+          if [[ "$OPERATION" == "promote" ]]; then
+            echo "MINIMUM_FRESH_UNTIL=$(jq -r .menu.earliestFreshUntil "$MANIFEST_PATH")" >> "$GITHUB_ENV"
+          else
+            echo "MINIMUM_FRESH_UNTIL=" >> "$GITHUB_ENV"
+          fi
+          printf '%s\n' '{"phase":"submitting","deploymentId":null,"status":null,"uncertain":true}' > deployment-attempt.json
+      - name: Deploy exact staged artifact
+        id: pages
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.verify-and-stage.outputs.release_id }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          STAGED_ARTIFACT_ID: ${{ needs.verify-and-stage.outputs.staged_artifact_id }}
+          APPROVAL_EXPIRES_AT: ${{ inputs.approval_expires_at }}
+          MINIMUM_FRESH_UNTIL: ${{ env.MINIMUM_FRESH_UNTIL }}
+          EXPECTED_PROMOTION_WORKFLOW_SHA: ${{ inputs.expected_promotion_workflow_sha }}
+          DEPLOYMENT_ATTEMPT_PATH: deployment-attempt.json
+          PREAPPROVAL_SUMMARY_PATH: work/pages-deployment/preapproval/pre-approval-summary.json
+          RELEASE_MANIFEST_PATH: work/pages-deployment/source-bundle/release-manifest.json
+          OPERATION: ${{ inputs.operation }}
+          CURRENT_RELEASE_ID: ${{ inputs.expected_current_attempt_release_id }}
+          TARGET_RELEASE_ID: ${{ inputs.rollback_target_release_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
+        run: node scripts/deploy-exact-pages-artifact.mjs
+      - name: Preserve deployment attempt evidence
+        id: attempt-upload
+        if: always() && hashFiles('deployment-attempt.json') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: lionlog-deployment-attempt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: deployment-attempt.json
+          if-no-files-found: error
+          retention-days: 90
+
+  smoke-and-record:
+    needs: [verify-and-stage, deploy]
+    if: always() && needs.verify-and-stage.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      deployments: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Recover exact deployment attempt evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ATTEMPT_ARTIFACT_ID: ${{ needs.deploy.outputs.attempt_artifact_id }}
+          ATTEMPT_ARTIFACT_DIGEST: ${{ needs.deploy.outputs.attempt_artifact_digest }}
+          EXPECTED_PROMOTION_WORKFLOW_SHA: ${{ inputs.expected_promotion_workflow_sha }}
+          RELEASE_ID: ${{ needs.verify-and-stage.outputs.release_id }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          STAGED_ARTIFACT_ID: ${{ needs.verify-and-stage.outputs.staged_artifact_id }}
+          DEPLOYMENT_ATTEMPT_PATH: deployment-attempt.json
+        run: |
+          set -uo pipefail
+          RECOVERED=false
+          if ! [[ "$ATTEMPT_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]; then
+            ATTEMPT_METADATA="$(gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts \
+              --jq '[.artifacts[] | select(.name == "lionlog-deployment-attempt-${{ github.run_id }}-${{ github.run_attempt }}" and .expired == false)] | if length == 1 then .[0] else {} end' || true)"
+            if [[ -z "$ATTEMPT_METADATA" ]]; then ATTEMPT_METADATA='{}'; fi
+            ATTEMPT_ARTIFACT_ID="$(jq -r '.id // empty' <<< "$ATTEMPT_METADATA")"
+            ATTEMPT_ARTIFACT_DIGEST="$(jq -r '.digest // empty' <<< "$ATTEMPT_METADATA")"
+          fi
+          if [[ "$ATTEMPT_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]; then
+            if curl --fail --silent --show-error --location --proto '=https' --max-time 120 --max-filesize 2097152 \
+              -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' \
+              "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ATTEMPT_ARTIFACT_ID/zip" --output attempt.zip \
+              && node --experimental-strip-types scripts/artifact-digest.ts --expected="$ATTEMPT_ARTIFACT_DIGEST" --file=attempt.zip \
+              && node --experimental-strip-types scripts/artifact-zip.ts --zip=attempt.zip --output=attempt --expected=deployment-attempt.json; then
+              jq '{attempt:.,repositoryState:"in_progress",repositoryStatusRecorded:true}' attempt/deployment-attempt.json > deployment-attempt.json
+              RECOVERED=true
+            fi
+          fi
+          if [[ "$RECOVERED" != "true" ]]; then
+            rm -f deployment-attempt.json deployment-attempt.json.tmp
+            if node scripts/recover-deployment-attempt.mjs; then
+              RECOVERED=true
+            fi
+          fi
+          if [[ "$RECOVERED" != "true" ]]; then
+            jq -n --arg recordedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson artifactId "$STAGED_ARTIFACT_ID" --arg buildVersion "$EXPECTED_PROMOTION_WORKFLOW_SHA" '{attempt:{phase:"submission-uncertain",artifactId:$artifactId,buildVersion:$buildVersion,repositoryDeploymentId:null,deploymentId:null,status:"ledger-unavailable",uncertain:true,recordedAt:$recordedAt},repositoryState:"unknown",repositoryStatusRecorded:false}' > deployment-attempt.json
+          fi
+      - name: Download exact source manifest for public verification
+        id: source-for-smoke
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --proto '=https' --max-time 120 --max-filesize 115343360 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$SOURCE_ARTIFACT_ID/zip" --output source.zip
+          node --experimental-strip-types scripts/artifact-digest.ts --expected="$SOURCE_ARTIFACT_DIGEST" --file=source.zip
+          node --experimental-strip-types scripts/artifact-zip.ts --zip=source.zip --output=source --expected=release-manifest.json,site.tar
+          node --experimental-strip-types scripts/artifact-digest.ts --expected="$SOURCE_MANIFEST_DIGEST" --file=source/release-manifest.json
+      - name: Verify the anonymous public marker
+        id: public-marker
+        if: needs.deploy.result == 'success'
+        continue-on-error: true
+        env:
+          EXPECTED_RELEASE_ID: ${{ needs.verify-and-stage.outputs.release_id }}
+        run: |
+          curl --fail --silent --show-error --proto '=https' --max-time 30 -H 'Cache-Control: no-cache' \
+            'https://crunchybrunch.github.io/lionlog/release.json' --output public-release.json
+          test "$(jq -r .releaseId public-release.json)" = "$EXPECTED_RELEASE_ID"
+      - name: Verify the complete anonymous public product
+        id: public-product
+        if: needs.deploy.result == 'success' && steps.source-for-smoke.outcome == 'success'
+        continue-on-error: true
+        env:
+          RELEASE_MANIFEST_PATH: source/release-manifest.json
+        run: |
+          for attempt in 1 2 3; do
+            node scripts/verify-public-site.mjs && exit 0
+            sleep 10
+          done
+          exit 1
+      - name: Reconcile the supported repository deployment ledger
+        if: always()
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MARKER_VERIFIED: ${{ steps.public-marker.outcome == 'success' }}
+          PUBLIC_PRODUCT_VERIFIED: ${{ steps.public-product.outcome == 'success' }}
+          DEPLOY_SUCCEEDED: ${{ needs.deploy.result == 'success' }}
+        run: |
+          set -u
+          REPOSITORY_DEPLOYMENT_ID="$(jq -r '.attempt.repositoryDeploymentId // empty' deployment-attempt.json)"
+          PAGES_DEPLOYMENT_ID="$(jq -r '.attempt.deploymentId // empty' deployment-attempt.json)"
+          STATE=failure
+          if [[ "$DEPLOY_SUCCEEDED" == "true" && "$MARKER_VERIFIED" == "true" && "$PUBLIC_PRODUCT_VERIFIED" == "true" ]]; then STATE=success; fi
+          RECORDED=false
+          if [[ "$REPOSITORY_DEPLOYMENT_ID" =~ ^[1-9][0-9]*$ ]]; then
+            if REPOSITORY_DEPLOYMENT_ID="$REPOSITORY_DEPLOYMENT_ID" REPOSITORY_DEPLOYMENT_STATE="$STATE" PAGES_DEPLOYMENT_ID="$PAGES_DEPLOYMENT_ID" node scripts/record-deployment-status.mjs; then RECORDED=true; fi
+          fi
+          jq --arg state "$([[ "$RECORDED" == "true" ]] && echo "$STATE" || echo unknown)" --argjson recorded "$RECORDED" '.repositoryState=$state | .repositoryStatusRecorded=$recorded' deployment-attempt.json > deployment-attempt.tmp
+          mv deployment-attempt.tmp deployment-attempt.json
+      - name: Record complete deployment outcome
+        if: always()
+        shell: bash
+        env:
+          MARKER_VERIFIED: ${{ steps.public-marker.outcome == 'success' }}
+          PUBLIC_PRODUCT_VERIFIED: ${{ steps.public-product.outcome == 'success' }}
+          DEPLOYMENT_ATTEMPT_PATH: deployment-attempt.json
+          DEPLOYMENT_RECEIPT_PATH: deployment-receipt.json
+          OPERATION: ${{ inputs.operation }}
+          APPROVAL_EXPIRES_AT: ${{ inputs.approval_expires_at }}
+        run: |
+          set -euo pipefail
+          PUBLIC_RELEASE_ID=UNKNOWN
+          if [[ -f public-release.json ]] && [[ "$(jq -r '.releaseId // empty' public-release.json)" =~ ^[a-f0-9]{64}$ ]]; then PUBLIC_RELEASE_ID="$(jq -r .releaseId public-release.json)"; fi
+          RECOVERY=null
+          if [[ '${{ needs.verify-and-stage.outputs.release_kind }}' == 'live' ]]; then
+            RECOVERY="$(jq -cn --arg releaseId '${{ inputs.recovery_release_id }}' --arg manifestSha256 '${{ inputs.recovery_manifest_digest }}' --argjson artifactId '${{ inputs.recovery_artifact_id }}' --arg artifactDigest '${{ inputs.recovery_artifact_digest }}' '{releaseId:$releaseId,manifestSha256:$manifestSha256,artifactId:$artifactId,artifactDigest:$artifactDigest}')"
+          fi
+          export DEPLOYMENT_RECEIPT_INPUT="$(jq -cn \
+            --arg recordedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg operation "$OPERATION" \
+            --arg releaseId '${{ needs.verify-and-stage.outputs.release_id }}' \
+            --arg releaseKind '${{ needs.verify-and-stage.outputs.release_kind }}' \
+            --arg previousKnownGoodReleaseId '${{ inputs.rollback_target_release_id }}' \
+            --arg previousKnownGoodRepositoryDeploymentId '${{ inputs.rollback_target_repository_deployment_id }}' \
+            --arg previousKnownGoodPagesDeploymentId '${{ inputs.rollback_target_pages_deployment_id }}' \
+            --arg workflowSha '${{ inputs.expected_promotion_workflow_sha }}' \
+            --arg approvalExpiresAt "$APPROVAL_EXPIRES_AT" \
+            --arg sourceArtifactDigest '${{ inputs.source_artifact_digest }}' \
+            --arg sourceManifestSha256 '${{ inputs.source_manifest_digest }}' \
+            --arg sourceSiteTarSha256 '${{ needs.verify-and-stage.outputs.site_tar_digest }}' \
+            --arg stagedArtifactDigest '${{ needs.verify-and-stage.outputs.staged_artifact_digest }}' \
+            --arg stagedArtifactExpiresAt '${{ needs.verify-and-stage.outputs.staged_artifact_expires_at }}' \
+            --arg publicReleaseId "$PUBLIC_RELEASE_ID" \
+            --argjson recovery "$RECOVERY" \
+            --argjson runId '${{ github.run_id }}' \
+            --argjson runAttempt '${{ github.run_attempt }}' \
+            --argjson sourceArtifactId '${{ inputs.source_artifact_id }}' \
+            --argjson stagedArtifactId '${{ needs.verify-and-stage.outputs.staged_artifact_id }}' \
+            --argjson publicProductVerified "$PUBLIC_PRODUCT_VERIFIED" \
+            --argjson markerVerified "$MARKER_VERIFIED" \
+            '{recordedAt:$recordedAt,operation:$operation,releaseId:$releaseId,releaseKind:$releaseKind,previousKnownGoodReleaseId:$previousKnownGoodReleaseId,previousKnownGoodRepositoryDeploymentId:(if $previousKnownGoodRepositoryDeploymentId == "NONE_FIRST_DEPLOYMENT" then $previousKnownGoodRepositoryDeploymentId else ($previousKnownGoodRepositoryDeploymentId|tonumber) end),previousKnownGoodPagesDeploymentId:$previousKnownGoodPagesDeploymentId,workflowSha:$workflowSha,approvalExpiresAt:$approvalExpiresAt,sourceArtifactId:$sourceArtifactId,sourceArtifactDigest:$sourceArtifactDigest,sourceManifestSha256:$sourceManifestSha256,sourceSiteTarSha256:$sourceSiteTarSha256,recovery:$recovery,stagedArtifactId:$stagedArtifactId,stagedArtifactDigest:$stagedArtifactDigest,stagedArtifactExpiresAt:$stagedArtifactExpiresAt,runId:$runId,runAttempt:$runAttempt,publicProductVerified:$publicProductVerified,markerVerified:$markerVerified,publicReleaseId:$publicReleaseId}')"
+          node scripts/create-deployment-receipt.mjs
+      - name: Retain complete deployment receipt even when verification fails
+        if: always()
+        id: receipt-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: lionlog-deployment-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: deployment-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Fail closed unless the retained receipt is known-good
+        if: always()
+        run: test "$(jq -r .knownGood deployment-receipt.json)" = "true"
