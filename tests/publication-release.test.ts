@@ -23,7 +23,7 @@ import {
   recoverRepositoryDeploymentAttempt,
 } from "../scripts/publication-deployment-ledger.mjs";
 import { createPublicationTar, parsePublicationTar } from "../scripts/publication-tar.ts";
-import { verifyCurrentPublication } from "../scripts/verify-current-publication.mjs";
+import { verifyCurrentPublication, verifyCurrentPublicationFromEnvironment } from "../scripts/verify-current-publication.mjs";
 import { verifyPublicSite } from "../scripts/verify-public-site.mjs";
 import { validateApprovalAndProvenance, verifyPublicationBundle } from "../scripts/verify-publication-bundle.ts";
 
@@ -76,7 +76,7 @@ test("the deployed post-approval shell policy accepts only the exact partial app
   }));
   const baseEnvironment = {
     ...process.env,
-    MANIFEST_PATH: manifestPath,
+    RELEASE_MANIFEST_PATH: manifestPath,
     OPERATION: "promote",
     SOURCE_MANIFEST_DIGEST: digest,
     PARTIAL_APPROVAL: `APPROVE_PARTIAL:${digest}:2`,
@@ -96,6 +96,53 @@ test("the deployed post-approval shell policy accepts only the exact partial app
     cwd: path.resolve(import.meta.dirname, ".."),
     env: { ...baseEnvironment, PARTIAL_APPROVAL: `APPROVE_PARTIAL:${digest}:1` },
   }));
+});
+
+test("the current-publication CLI requires the canonical manifest environment before any network boundary", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "lionlog-manifest-contract-"));
+  const manifestPath = path.join(root, "release-manifest.json");
+  await writeFile(manifestPath, JSON.stringify({ releaseId: "e".repeat(64) }));
+  const script = path.resolve(import.meta.dirname, "../scripts/verify-current-publication.mjs");
+  const baseEnvironment = { ...process.env, OPERATION: "invalid-offline-test" };
+
+  await assert.rejects(executeFile(process.execPath, [script], {
+    env: { ...baseEnvironment, RELEASE_MANIFEST_PATH: "" },
+  }), /RELEASE_MANIFEST_PATH is required/);
+  await assert.rejects(executeFile(process.execPath, [script], {
+    env: { ...baseEnvironment, MANIFEST_PATH: manifestPath, RELEASE_MANIFEST_PATH: undefined },
+  }), /MANIFEST_PATH is not supported/);
+  await assert.rejects(executeFile(process.execPath, [script], {
+    env: { ...baseEnvironment, RELEASE_MANIFEST_PATH: manifestPath },
+  }), /Publication operation is invalid/);
+
+  let fetches = 0;
+  await assert.rejects(verifyCurrentPublicationFromEnvironment({
+    ...baseEnvironment,
+    RELEASE_MANIFEST_PATH: path.join(root, "missing.json"),
+  }, {
+    fetchImpl: async () => { fetches += 1; return new Response(null, { status: 500 }); },
+  }), /readable JSON manifest/);
+  const wrongManifestPath = path.join(root, "wrong-manifest.json");
+  await writeFile(wrongManifestPath, "[]");
+  await assert.rejects(verifyCurrentPublicationFromEnvironment({
+    ...baseEnvironment,
+    RELEASE_MANIFEST_PATH: wrongManifestPath,
+  }, {
+    fetchImpl: async () => { fetches += 1; return new Response(null, { status: 500 }); },
+  }), /manifest object/);
+  assert.equal(fetches, 0);
+});
+
+test("the protected workflow passes the canonical manifest into verification before OIDC-capable submission", async () => {
+  const workflow = await readFile(path.resolve(import.meta.dirname, "../.github/workflows/deploy-github-pages.yml"), "utf8");
+  assert.doesNotMatch(workflow, /^\s+MANIFEST_PATH:/m);
+  const finalStep = workflow.indexOf("- name: Perform final provenance, state, deadline, and freshness checks");
+  const canonicalEnvironment = workflow.indexOf("RELEASE_MANIFEST_PATH: work/pages-deployment/source-bundle/release-manifest.json", finalStep);
+  const verifier = workflow.indexOf("node scripts/verify-current-publication.mjs", finalStep);
+  const deployment = workflow.indexOf("- name: Deploy exact staged artifact", finalStep);
+  assert.ok(finalStep >= 0 && canonicalEnvironment > finalStep && verifier > canonicalEnvironment && deployment > verifier);
+  assert.match(workflow, /PRE_SUBMISSION_FAILURE_APPROVAL: \$\{\{ inputs\.pre_submission_failure_approval \}\}/);
+  assert.match(workflow, /authorization:\{partialApproval:\$partialApproval,expiredRollbackApproval:\$expiredRollbackApproval,preSubmissionFailureApproval:\$preSubmissionFailureApproval\}/);
 });
 
 test("recovery release bundle round-trips and rejects identity tampering", async () => {
@@ -711,6 +758,71 @@ test("supported deployment authority covers first publication, successors, rollb
   }), /unavailable/);
 });
 
+test("the exact failed first promotion can be reconciled only by its immutable receipt and latest failed environment deployment", async () => {
+  const receipt = failedPreSubmissionReceipt();
+  const receiptDigest = "sha256:bf3c1430abf5bf1ebc8707e601b51f3776705cde507997ff3b606fcc88601874";
+  const exactApproval = `RECONCILE_PRE_SUBMISSION:${receiptDigest}:6394978446`;
+  const sourceManifest = { releaseId: "e".repeat(64) };
+  const sourceIdentity = { artifactId: 999, artifactDigest, manifestSha256: "1".repeat(64) };
+  const result = await verifyCurrentPublication({
+    operation: "promote",
+    token: "token",
+    currentReceipt: receipt,
+    sourceManifest,
+    sourceIdentity,
+    currentReceiptArtifactDigest: receiptDigest,
+    preSubmissionFailureApproval: exactApproval,
+    fetchImpl: failedPreSubmissionApiFixture(),
+  });
+  assert.deepEqual(result, {
+    state: "reconciled-pre-submission-failure",
+    publicReleaseId: "NONE_404",
+    environmentDeploymentId: 6_394_978_446,
+  });
+
+  await assert.rejects(verifyCurrentPublication({
+    operation: "promote",
+    token: "token",
+    currentReceipt: receipt,
+    sourceManifest,
+    sourceIdentity,
+    currentReceiptArtifactDigest: receiptDigest,
+    preSubmissionFailureApproval: `RECONCILE_PRE_SUBMISSION:${receiptDigest}:6394978447`,
+    fetchImpl: failedPreSubmissionApiFixture(),
+  }), /exact Project Manager reconciliation approval/);
+
+  await assert.rejects(verifyCurrentPublication({
+    operation: "promote",
+    token: "token",
+    currentReceipt: receipt,
+    sourceManifest,
+    sourceIdentity,
+    currentReceiptArtifactDigest: receiptDigest,
+    preSubmissionFailureApproval: exactApproval,
+    fetchImpl: failedPreSubmissionApiFixture({ newerEnvironmentDeployment: true }),
+  }), /historical rather than current/);
+});
+
+test("new final-gate failures remain definitive non-submissions without weakening ordinary missing-ID failures", async () => {
+  const prior = failedPreSubmissionReceipt();
+  const receipt = publicationDeploymentReceiptSchema.parse({
+    ...prior,
+    attemptPhase: "pre-submission",
+    pagesStatus: "final-gate",
+    reconciliation: { outcome: "not-submitted", publicReleaseId: "NONE_404" },
+    uncertain: false,
+  });
+  const result = await verifyCurrentPublication({
+    operation: "promote",
+    token: "token",
+    currentReceipt: receipt,
+    sourceManifest: { releaseId: "e".repeat(64) },
+    sourceIdentity: { artifactId: 999, artifactDigest, manifestSha256: "1".repeat(64) },
+    fetchImpl: deploymentApiFixture({ publicReleaseId: "NONE_404", deployments: [] }),
+  });
+  assert.deepEqual(result, { state: "definitive-pre-submission", publicReleaseId: "NONE_404" });
+});
+
 test("first-release recovery is authorized from the exact failed current attempt", async () => {
   const failedLive = deploymentReceipt({
     releaseId: "b".repeat(64),
@@ -1185,6 +1297,20 @@ test("known-good receipts require the complete served inventory, not only the ma
   assert.equal(collectorDependencyFailure.knownGood, false);
   assert.equal(collectorDependencyFailure.uncertain, true);
   assert.equal(publicationDeploymentReceiptSchema.safeParse(collectorDependencyFailure).success, true);
+  const preSubmissionFailure = createDeploymentReceipt({
+    ...input,
+    markerVerified: false,
+    publicProductVerified: false,
+    publicReleaseId: "NONE_404",
+    repositoryState: "unknown",
+    repositoryStatusRecorded: false,
+    attempt: { phase: "pre-submission", repositoryDeploymentId: null, deploymentId: null, status: "final-gate", uncertain: false },
+  });
+  assert.equal(preSubmissionFailure.attemptPhase, "pre-submission");
+  assert.equal(preSubmissionFailure.reconciliation.outcome, "not-submitted");
+  assert.equal(preSubmissionFailure.knownGood, false);
+  assert.equal(preSubmissionFailure.uncertain, false);
+  assert.equal(publicationDeploymentReceiptSchema.safeParse(preSubmissionFailure).success, true);
   assert.equal(createDeploymentReceipt({
     ...input,
     publicProductVerified: true,
@@ -1412,7 +1538,7 @@ function deploymentReceipt(options: {
   repositoryStatusRecorded?: boolean;
   publicProductVerified?: boolean;
   pagesStatus?: string;
-  attemptPhase?: "submission-uncertain" | "submission-rejected" | "status-uncertain" | "terminal";
+  attemptPhase?: "pre-submission" | "submission-uncertain" | "submission-rejected" | "status-uncertain" | "terminal";
   uncertain?: boolean;
   previous?: PublicationDeploymentReceipt;
 }): PublicationDeploymentReceipt {
@@ -1462,6 +1588,105 @@ function deploymentReceipt(options: {
     knownGood,
     uncertain: options.uncertain ?? !statusRecorded,
   });
+}
+
+function failedPreSubmissionReceipt(): PublicationDeploymentReceipt {
+  return publicationDeploymentReceiptSchema.parse({
+    receiptVersion: "lionlog.pages-deployment-receipt.v3",
+    recordedAt: "2026-09-11T14:17:12.000Z",
+    operation: "promote",
+    releaseId: "7dce94463a4d87541812eda2d500baefead34e4a5394f82d95baa10163d1cec1",
+    releaseKind: "live",
+    deploymentId: null,
+    pageUrl: null,
+    previous: {
+      knownGoodReleaseId: "NONE_FIRST_DEPLOYMENT",
+      knownGoodRepositoryDeploymentId: "NONE_FIRST_DEPLOYMENT",
+      knownGoodPagesDeploymentId: "NONE_FIRST_DEPLOYMENT",
+    },
+    promotion: {
+      workflowId: 347_992_874,
+      workflowSha: "3d5181c962486aa25345f4f16fbdd75932e0d831",
+      runId: 34_609_219_734,
+      runAttempt: 1,
+      approvalExpiresAt: "2026-09-11T15:00:00.000Z",
+    },
+    source: {
+      artifactId: 10_266_588_499,
+      artifactDigest: "sha256:8667efc4e8b7603ec034d60715b4359d8c737b6aedfef2ff29a926b4ba0c30e2",
+      manifestSha256: "99858cf98e0330aa2018460051154c5245404a8efdd9e001780d8b7634fbcd4c",
+      siteTarSha256: "6d798e96e932ecb5b51cb22fd158bc370dd4e786de2f67e72b16fa4667ab752a",
+      recoveryArtifactId: 10_267_140_347,
+      recoveryArtifactDigest: "sha256:83a47e669a5542ab86496c20ce39931b0a07b3d261d8fbed0dbbed81a503c5dd",
+      recoveryManifestSha256: "eecf7e52423789cd16a1b1a7bb44ffd97fff2c4acca6818cf6928455e8fdcd0e",
+    },
+    recovery: {
+      releaseId: "0c39c8f56df6d0d9b72ff644fd7d7fb98c78af28f4f5e700ec6f639340d53d95",
+      manifestSha256: "eecf7e52423789cd16a1b1a7bb44ffd97fff2c4acca6818cf6928455e8fdcd0e",
+      artifactId: 10_267_140_347,
+      artifactDigest: "sha256:83a47e669a5542ab86496c20ce39931b0a07b3d261d8fbed0dbbed81a503c5dd",
+    },
+    staged: {
+      artifactId: 10_267_282_434,
+      artifactDigest: "sha256:bc6a29288377cfb9f46a238a9094185e9fb095077d63addde162402991e80ae0",
+      artifactExpiresAt: "2026-12-10T14:17:12.000Z",
+    },
+    attemptPhase: "submission-uncertain",
+    repositoryDeployment: { id: null, state: "unknown", statusRecorded: false },
+    pagesAccepted: false,
+    pagesStatus: "ledger-unavailable",
+    markerVerified: false,
+    publicProductVerified: false,
+    reconciliation: { outcome: "submission-uncertain", publicReleaseId: "NONE_404" },
+    knownGood: false,
+    uncertain: true,
+  });
+}
+
+function failedPreSubmissionApiFixture({ newerEnvironmentDeployment = false } = {}) {
+  const workflowSha = "3d5181c962486aa25345f4f16fbdd75932e0d831";
+  const matchingDeployment = {
+    id: 6_394_978_446,
+    task: "deploy",
+    environment: "github-pages",
+    sha: workflowSha,
+    ref: "main",
+    payload: {},
+  };
+  const environmentDeployments = newerEnvironmentDeployment
+    ? [{ ...matchingDeployment, id: matchingDeployment.id + 1, sha: "0".repeat(40) }, matchingDeployment]
+    : [matchingDeployment];
+  return async (input: URL | RequestInfo): Promise<Response> => {
+    const url = String(input);
+    if (url.includes("crunchybrunch.github.io/lionlog/release.json")) return new Response(null, { status: 404 });
+    if (url.includes("deployments?task=lionlog-pages-release")) return Response.json([]);
+    if (url.includes("deployments?task=deploy")) return Response.json(environmentDeployments);
+    if (url.endsWith("/actions/runs/34609219734")) return Response.json({
+      id: 34_609_219_734,
+      workflow_id: 347_992_874,
+      path: ".github/workflows/deploy-github-pages.yml",
+      event: "workflow_dispatch",
+      head_sha: workflowSha,
+      head_branch: "main",
+      run_attempt: 1,
+      status: "completed",
+      conclusion: "failure",
+    });
+    if (url.includes("/deployments/6394978446/statuses?")) return Response.json([{
+      state: "failure",
+      deployment_url: "https://api.github.com/repos/CrunchyBrunch/lionlog/deployments/6394978446",
+      log_url: "https://github.com/CrunchyBrunch/lionlog/actions/runs/34609219734/job/103295384726",
+    }]);
+    if (url.endsWith("/actions/jobs/103295384726")) return Response.json({
+      id: 103_295_384_726,
+      name: "deploy",
+      run_id: 34_609_219_734,
+      head_sha: workflowSha,
+      status: "completed",
+      conclusion: "failure",
+    });
+    return new Response(null, { status: 404 });
+  };
 }
 
 function deploymentApiFixture(

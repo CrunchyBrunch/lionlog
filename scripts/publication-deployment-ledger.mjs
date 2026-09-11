@@ -8,6 +8,9 @@ const PAGES_ID = /^[A-Za-z0-9._-]{1,200}$/;
 const TERMINAL_PAGES_FAILURES = new Set(["deployment_failed", "deployment_content_failed", "deployment_cancelled", "deployment_lost"]);
 const DEPLOYMENT_PAGE_SIZE = 100;
 const MAX_DEPLOYMENT_HISTORY_PAGES = 10;
+const ARTIFACT_DIGEST = /^sha256:[a-f0-9]{64}$/;
+const PROMOTION_WORKFLOW_ID = 347992874;
+const PROMOTION_WORKFLOW_PATH = ".github/workflows/deploy-github-pages.yml";
 
 export function publicationLedgerPayload({ promotionRunId, runAttempt, releaseId, sourceArtifactId, stagedArtifactId }) {
   const payload = {
@@ -121,6 +124,91 @@ export async function readRepositoryDeploymentAuthority({ token, receipt, requir
   return { deployments, current: deployment, status: latest, pagesStatus, pagesDeploymentId };
 }
 
+export async function verifyPreSubmissionFailure({
+  token,
+  receipt,
+  receiptArtifactDigest,
+  approval,
+  publicationDeployments,
+  fetchImpl = fetch,
+}) {
+  if (!ARTIFACT_DIGEST.test(receiptArtifactDigest ?? "")) throw new Error("Pre-submission receipt digest is invalid.");
+  if (!Array.isArray(publicationDeployments) || publicationDeployments.length !== 0) {
+    throw new Error("Pre-submission reconciliation is invalid after a publication ledger was created.");
+  }
+  if (
+    receipt.promotion?.workflowId !== PROMOTION_WORKFLOW_ID
+    || receipt.promotion?.runAttempt !== 1
+    || receipt.operation !== "promote"
+    || receipt.releaseKind !== "live"
+    || receipt.deploymentId !== null
+    || receipt.pageUrl !== null
+    || receipt.pagesAccepted !== false
+    || receipt.pagesStatus !== "ledger-unavailable"
+    || receipt.knownGood !== false
+    || receipt.uncertain !== true
+    || receipt.attemptPhase !== "submission-uncertain"
+    || receipt.repositoryDeployment?.id !== null
+    || receipt.repositoryDeployment?.state !== "unknown"
+    || receipt.repositoryDeployment?.statusRecorded !== false
+    || receipt.markerVerified !== false
+    || receipt.publicProductVerified !== false
+    || receipt.reconciliation?.outcome !== "submission-uncertain"
+    || receipt.reconciliation?.publicReleaseId !== "NONE_404"
+    || !Object.values(receipt.previous ?? {}).every((value) => value === "NONE_FIRST_DEPLOYMENT")
+  ) throw new Error("Receipt is not the conservative pre-submission failure shape.");
+
+  const run = await readJson(`${API_ROOT}/repos/${REPOSITORY}/actions/runs/${receipt.promotion.runId}`, token, fetchImpl, "Failed promotion run");
+  if (
+    run.id !== receipt.promotion.runId
+    || run.workflow_id !== PROMOTION_WORKFLOW_ID
+    || run.path !== PROMOTION_WORKFLOW_PATH
+    || run.event !== "workflow_dispatch"
+    || run.head_sha !== receipt.promotion.workflowSha
+    || run.head_branch !== "main"
+    || run.run_attempt !== 1
+    || run.status !== "completed"
+    || run.conclusion !== "failure"
+  ) throw new Error("Failed promotion run provenance is inconsistent.");
+
+  const environmentDeployments = await readDeploymentHistory({ token, task: "deploy", fetchImpl });
+  const candidates = [];
+  for (const deployment of environmentDeployments) {
+    if (
+      deployment.task !== "deploy"
+      || deployment.environment !== PUBLICATION_ENVIRONMENT
+      || deployment.sha !== receipt.promotion.workflowSha
+      || deployment.ref !== "main"
+      || deployment.payload === null
+      || typeof deployment.payload !== "object"
+      || Array.isArray(deployment.payload)
+      || Object.keys(deployment.payload).length !== 0
+    ) continue;
+    const statuses = await readJson(`${API_ROOT}/repos/${REPOSITORY}/deployments/${deployment.id}/statuses?per_page=100`, token, fetchImpl, "Environment deployment statuses");
+    if (!Array.isArray(statuses)) throw new Error("Environment deployment status collection is invalid.");
+    const latest = statuses[0];
+    const jobMatch = latest?.log_url?.match(new RegExp(`^https://github\\.com/${REPOSITORY}/actions/runs/${receipt.promotion.runId}/job/([1-9][0-9]*)$`));
+    if (latest?.state !== "failure" || !jobMatch || pagesDeploymentIdFromLedgerStatus(latest, deployment.id) !== null) continue;
+    const job = await readJson(`${API_ROOT}/repos/${REPOSITORY}/actions/jobs/${jobMatch[1]}`, token, fetchImpl, "Failed protected deployment job");
+    if (
+      job.id !== Number(jobMatch[1])
+      || job.name !== "deploy"
+      || job.run_id !== receipt.promotion.runId
+      || job.head_sha !== receipt.promotion.workflowSha
+      || job.status !== "completed"
+      || job.conclusion !== "failure"
+    ) throw new Error("Failed protected deployment job provenance is inconsistent.");
+    candidates.push(deployment);
+  }
+  if (candidates.length !== 1) throw new Error("Pre-submission failure does not have one exact failed environment deployment.");
+  const environmentDeployment = candidates[0];
+  const latestEnvironmentId = environmentDeployments.reduce((latest, deployment) => Math.max(latest, deployment.id), 0);
+  if (environmentDeployment.id !== latestEnvironmentId) throw new Error("Pre-submission failure is historical rather than current.");
+  const expectedApproval = `RECONCILE_PRE_SUBMISSION:${receiptArtifactDigest}:${environmentDeployment.id}`;
+  if (approval !== expectedApproval) throw new Error("Pre-submission failure lacks exact Project Manager reconciliation approval.");
+  return { environmentDeploymentId: environmentDeployment.id };
+}
+
 export function pagesDeploymentIdFromLedgerStatus(status, repositoryDeploymentId) {
   const expectedPrefix = `${API_ROOT}/repos/${REPOSITORY}/pages/deployments/`;
   if (status?.deployment_url !== `${API_ROOT}/repos/${REPOSITORY}/deployments/${repositoryDeploymentId}`) return null;
@@ -167,11 +255,15 @@ export async function recoverRepositoryDeploymentAttempt({ token, expectedPayloa
 }
 
 export async function readRepositoryDeploymentHistory({ token, fetchImpl = fetch }) {
+  return readDeploymentHistory({ token, task: PUBLICATION_DEPLOYMENT_TASK, fetchImpl });
+}
+
+async function readDeploymentHistory({ token, task, fetchImpl }) {
   const deployments = [];
   const seen = new Set();
   for (let page = 1; page <= MAX_DEPLOYMENT_HISTORY_PAGES; page += 1) {
     const values = await readJson(
-      `${API_ROOT}/repos/${REPOSITORY}/deployments?task=${encodeURIComponent(PUBLICATION_DEPLOYMENT_TASK)}&environment=${encodeURIComponent(PUBLICATION_ENVIRONMENT)}&per_page=${DEPLOYMENT_PAGE_SIZE}&page=${page}`,
+      `${API_ROOT}/repos/${REPOSITORY}/deployments?task=${encodeURIComponent(task)}&environment=${encodeURIComponent(PUBLICATION_ENVIRONMENT)}&per_page=${DEPLOYMENT_PAGE_SIZE}&page=${page}`,
       token,
       fetchImpl,
       `Repository deployment collection page ${page}`,

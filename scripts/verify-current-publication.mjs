@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
-import { readRepositoryDeploymentAuthority } from "./publication-deployment-ledger.mjs";
+import { readReleaseManifestFromEnvironment } from "./publication-environment-contract.mjs";
+import { readRepositoryDeploymentAuthority, verifyPreSubmissionFailure } from "./publication-deployment-ledger.mjs";
 
 const RELEASE_URL = "https://crunchybrunch.github.io/lionlog/release.json";
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -16,13 +17,21 @@ export async function verifyCurrentPublication(options) {
     rollbackTargetReceipt = null,
     sourceManifest = null,
     sourceIdentity = null,
+    currentReceiptArtifactDigest = "NONE_FIRST_DEPLOYMENT",
+    preSubmissionFailureApproval = "NONE",
     token,
     fetchImpl = fetch,
   } = options;
   if (!new Set(["promote", "rollback", "first-release-recovery"]).has(operation)) throw new Error("Publication operation is invalid.");
+  const definitivePreSubmission = isDefinitivePreSubmission(currentReceipt);
   const publicReleaseId = await readPublicReleaseId(fetchImpl);
-  const authority = await readRepositoryDeploymentAuthority({ token, receipt: currentReceipt, fetchImpl });
+  const authority = await readRepositoryDeploymentAuthority({
+    token,
+    receipt: preSubmissionFailureApproval === "NONE" && !definitivePreSubmission ? currentReceipt : null,
+    fetchImpl,
+  });
   if (currentReceipt === null) {
+    if (preSubmissionFailureApproval !== "NONE") throw new Error("Empty first deployment cannot carry pre-submission reconciliation approval.");
     if (rollbackTargetReceipt !== null || sourceManifest === null) throw new Error("First deployment evidence is inconsistent.");
     if (publicReleaseId !== "NONE_404" || authority.deployments.length !== 0) {
       throw new Error("First deployment is not proven by supported repository deployment state.");
@@ -32,6 +41,45 @@ export async function verifyCurrentPublication(options) {
   }
 
   validateReceiptShape(currentReceipt);
+  if (definitivePreSubmission) {
+    if (preSubmissionFailureApproval !== "NONE") throw new Error("A definitive pre-submission receipt cannot carry reconciliation approval.");
+    if (operation !== "promote" || sourceManifest === null || sourceIdentity === null) {
+      throw new Error("Definitive pre-submission state can authorize only a new exact promotion.");
+    }
+    const hadPreviousRelease = currentReceipt.previous.knownGoodReleaseId !== "NONE_FIRST_DEPLOYMENT";
+    if (!hadPreviousRelease) {
+      if (rollbackTargetReceipt !== null || publicReleaseId !== "NONE_404" || authority.deployments.length !== 0) {
+        throw new Error("Definitive first-deployment pre-submission state is inconsistent.");
+      }
+    } else {
+      if (rollbackTargetReceipt === null) throw new Error("Definitive successor pre-submission lacks its exact known-good rollback target.");
+      validateReceiptShape(rollbackTargetReceipt);
+      if (!rollbackTargetReceipt.knownGood) throw new Error("Rollback target is not an exact known-good deployment.");
+      assertPreviousKnownGood(currentReceipt, rollbackTargetReceipt);
+      const targetAuthority = await readRepositoryDeploymentAuthority({ token, receipt: rollbackTargetReceipt, fetchImpl });
+      validateAuthorityAgainstReceipt(targetAuthority, rollbackTargetReceipt);
+      if (publicReleaseId !== rollbackTargetReceipt.releaseId) throw new Error("Public release marker does not match the preceding known-good release.");
+    }
+    return { state: "definitive-pre-submission", publicReleaseId };
+  }
+  if (preSubmissionFailureApproval !== "NONE") {
+    if (operation !== "promote" || rollbackTargetReceipt !== null || publicReleaseId !== "NONE_404") {
+      throw new Error("Pre-submission reconciliation is valid only for an unpublished promotion attempt.");
+    }
+    const reconciliation = await verifyPreSubmissionFailure({
+      token,
+      receipt: currentReceipt,
+      receiptArtifactDigest: currentReceiptArtifactDigest,
+      approval: preSubmissionFailureApproval,
+      publicationDeployments: authority.deployments,
+      fetchImpl,
+    });
+    return {
+      state: "reconciled-pre-submission-failure",
+      publicReleaseId,
+      environmentDeploymentId: reconciliation.environmentDeploymentId,
+    };
+  }
   validateAuthorityAgainstReceipt(authority, currentReceipt);
   if (rollbackTargetReceipt !== null) {
     validateReceiptShape(rollbackTargetReceipt);
@@ -171,14 +219,14 @@ export function validateReceiptShape(receipt) {
     || typeof receipt.repositoryDeployment?.statusRecorded !== "boolean"
     || (receipt.deploymentId !== null && !PAGES_ID.test(receipt.deploymentId ?? ""))
     || receipt.pagesAccepted !== (receipt.deploymentId !== null)
-    || !new Set(["submitting", "submission-uncertain", "submission-rejected", "accepted", "status-uncertain", "terminal"]).has(receipt.attemptPhase)
+    || !new Set(["pre-submission", "submitting", "submission-uncertain", "submission-rejected", "accepted", "status-uncertain", "terminal"]).has(receipt.attemptPhase)
     || !new Set(["known-good", "served-unverified", "submission-uncertain", "terminal-failure", "not-submitted", "evidence-incomplete"]).has(receipt.reconciliation?.outcome)
     || !(SHA256.test(receipt.reconciliation?.publicReleaseId ?? "") || new Set(["NONE_404", "UNKNOWN"]).has(receipt.reconciliation?.publicReleaseId))
   ) throw new Error("Deployment receipt is structurally invalid.");
   if (receipt.repositoryDeployment.id === null && (
     receipt.repositoryDeployment.statusRecorded
     || receipt.deploymentId !== null
-    || !receipt.uncertain
+    || (!receipt.uncertain && receipt.attemptPhase !== "pre-submission")
   )) throw new Error("Deployment receipt has incomplete repository authority.");
   const previous = Object.values(receipt.previous);
   if (
@@ -215,6 +263,22 @@ export function validateReceiptShape(receipt) {
   )) throw new Error("Deployment receipt weakens the known-good contract.");
 }
 
+function isDefinitivePreSubmission(receipt) {
+  return receipt !== null
+    && receipt?.attemptPhase === "pre-submission"
+    && receipt.repositoryDeployment?.id === null
+    && receipt.repositoryDeployment?.state === "unknown"
+    && receipt.repositoryDeployment?.statusRecorded === false
+    && receipt.deploymentId === null
+    && receipt.pagesAccepted === false
+    && receipt.pagesStatus === "final-gate"
+    && receipt.markerVerified === false
+    && receipt.publicProductVerified === false
+    && receipt.reconciliation?.outcome === "not-submitted"
+    && receipt.knownGood === false
+    && receipt.uncertain === false;
+}
+
 function assertExactKeys(value, keys, label) {
   if (
     value === null
@@ -224,21 +288,28 @@ function assertExactKeys(value, keys, label) {
   ) throw new Error(`${label} has unexpected fields.`);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const currentPath = process.env.EXPECTED_CURRENT_RECEIPT_PATH;
-  const targetPath = process.env.ROLLBACK_TARGET_RECEIPT_PATH;
-  const sourcePath = process.env.RELEASE_MANIFEST_PATH;
-  const result = await verifyCurrentPublication({
-    operation: process.env.OPERATION ?? "",
-    token: process.env.GITHUB_TOKEN ?? "",
+export async function verifyCurrentPublicationFromEnvironment(environment, { fetchImpl = fetch } = {}) {
+  const currentPath = environment.EXPECTED_CURRENT_RECEIPT_PATH;
+  const targetPath = environment.ROLLBACK_TARGET_RECEIPT_PATH;
+  const sourceManifest = await readReleaseManifestFromEnvironment(environment);
+  return verifyCurrentPublication({
+    operation: environment.OPERATION ?? "",
+    token: environment.GITHUB_TOKEN ?? "",
     currentReceipt: currentPath && currentPath !== "NONE_FIRST_DEPLOYMENT" ? JSON.parse(await readFile(currentPath, "utf8")) : null,
     rollbackTargetReceipt: targetPath && targetPath !== "NONE_FIRST_DEPLOYMENT" ? JSON.parse(await readFile(targetPath, "utf8")) : null,
-    sourceManifest: sourcePath ? JSON.parse(await readFile(sourcePath, "utf8")) : null,
+    sourceManifest,
     sourceIdentity: {
-      artifactId: Number(process.env.SOURCE_ARTIFACT_ID),
-      artifactDigest: process.env.SOURCE_ARTIFACT_DIGEST ?? "",
-      manifestSha256: process.env.SOURCE_MANIFEST_DIGEST ?? "",
+      artifactId: Number(environment.SOURCE_ARTIFACT_ID),
+      artifactDigest: environment.SOURCE_ARTIFACT_DIGEST ?? "",
+      manifestSha256: environment.SOURCE_MANIFEST_DIGEST ?? "",
     },
+    currentReceiptArtifactDigest: environment.CURRENT_RECEIPT_ARTIFACT_DIGEST ?? "NONE_FIRST_DEPLOYMENT",
+    preSubmissionFailureApproval: environment.PRE_SUBMISSION_FAILURE_APPROVAL ?? "NONE",
+    fetchImpl,
   });
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const result = await verifyCurrentPublicationFromEnvironment(process.env);
   console.log(JSON.stringify(result));
 }

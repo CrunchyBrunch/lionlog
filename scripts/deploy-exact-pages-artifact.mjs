@@ -7,6 +7,7 @@ import {
 } from "./publication-deployment-ledger.mjs";
 import { executeFinalPromotionGate, readFinalPromotionState } from "./final-promotion-gate.mjs";
 import { verifyCurrentPublication } from "./verify-current-publication.mjs";
+import { readReleaseManifestFromEnvironment } from "./publication-environment-contract.mjs";
 
 const REPOSITORY = "CrunchyBrunch/lionlog";
 const API_ROOT = "https://api.github.com";
@@ -191,10 +192,12 @@ async function main() {
   const attemptPath = process.env.DEPLOYMENT_ATTEMPT_PATH;
   if (!attemptPath) throw new Error("DEPLOYMENT_ATTEMPT_PATH is unavailable.");
   const summaryPath = process.env.PREAPPROVAL_SUMMARY_PATH;
-  const sourceManifestPath = process.env.RELEASE_MANIFEST_PATH;
-  if (!summaryPath || !sourceManifestPath) throw new Error("Final promotion evidence paths are unavailable.");
+  if (!summaryPath) throw new Error("Final promotion evidence paths are unavailable.");
   const expected = JSON.parse(await readFile(summaryPath, "utf8"));
-  const sourceManifest = JSON.parse(await readFile(sourceManifestPath, "utf8"));
+  const sourceManifest = await readReleaseManifestFromEnvironment(process.env);
+  if (expected?.authorization?.preSubmissionFailureApproval !== (process.env.PRE_SUBMISSION_FAILURE_APPROVAL ?? "NONE")) {
+    throw new Error("Pre-submission reconciliation approval differs from the retained approval summary.");
+  }
   const readReceipt = async (releaseId, relativePath) => releaseId === "NONE_FIRST_DEPLOYMENT"
     ? null
     : JSON.parse(await readFile(relativePath, "utf8"));
@@ -220,6 +223,8 @@ async function main() {
         artifactDigest: process.env.SOURCE_ARTIFACT_DIGEST ?? "",
         manifestSha256: process.env.SOURCE_MANIFEST_DIGEST ?? "",
       },
+      currentReceiptArtifactDigest: process.env.CURRENT_RECEIPT_ARTIFACT_DIGEST ?? "NONE_FIRST_DEPLOYMENT",
+      preSubmissionFailureApproval: process.env.PRE_SUBMISSION_FAILURE_APPROVAL ?? "NONE",
       token: githubToken,
       fetchImpl: fetch,
     }),

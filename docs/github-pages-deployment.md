@@ -5,7 +5,7 @@ Expected project URL: `https://crunchybrunch.github.io/lionlog/`
 
 ## Current state
 
-The repository contains a manual-only production publication workflow at `.github/workflows/deploy-github-pages.yml`. It has not been dispatched, GitHub Pages has not been activated by this change, and no deployment has occurred. The authoritative v0.2 operational contract is the [production publication runbook](psu-live-menu/production-publication-runbook.md).
+The repository contains a manual-only production publication workflow at `.github/workflows/deploy-github-pages.yml`. Its first protected promotion attempt on September 11, 2026 failed at the final manifest boundary before OIDC or Pages submission; no LionLog release was deployed. The authoritative failure record, reconciliation tuple, and next-attempt prerequisites are in the [production publication runbook](psu-live-menu/production-publication-runbook.md).
 
 The separate review-artifact boundary was proven at commit `6858a885f12484e5843daaf68de6c14fbd61d424` by GitHub Actions run `33567755269`. The downloaded tar had SHA-256 `F3A9EF4DA047856D18FAEFFB35084267EBB007EF7D719CBC0207813C43B9CA43`. It retained `.nojekyll`, project-prefixed framework and self-hosted font URLs, and no menu publication.
 

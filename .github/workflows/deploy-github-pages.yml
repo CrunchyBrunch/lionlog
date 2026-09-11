@@ -12,10 +12,6 @@ on:
         description: Exact successful candidate producer run ID
         required: true
         type: string
-      source_run_attempt:
-        description: Exact producer attempt; must be 1
-        required: true
-        type: string
       source_artifact_id:
         description: Exact candidate artifact ID
         required: true
@@ -100,6 +96,10 @@ on:
         description: NONE or ALLOW_EXPIRED_ROLLBACK:<manifest digest>
         required: true
         type: string
+      pre_submission_failure_approval:
+        description: NONE or RECONCILE_PRE_SUBMISSION:<receipt digest>:<environment deployment ID>
+        required: true
+        type: string
       confirmation:
         description: Type PROMOTE_EXACT_LIONLOG_RELEASE
         required: true
@@ -147,7 +147,7 @@ jobs:
         shell: bash
         env:
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
-          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          SOURCE_RUN_ATTEMPT: "1"
           SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
           SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
           SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
@@ -165,6 +165,7 @@ jobs:
           ROLLBACK_TARGET_PAGES_ID: ${{ inputs.rollback_target_pages_deployment_id }}
           ROLLBACK_TARGET_RECEIPT_ID: ${{ inputs.rollback_target_receipt_artifact_id }}
           ROLLBACK_TARGET_RECEIPT_DIGEST: ${{ inputs.rollback_target_receipt_artifact_digest }}
+          PRE_SUBMISSION_FAILURE_APPROVAL: ${{ inputs.pre_submission_failure_approval }}
         run: |
           set -euo pipefail
           [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
@@ -178,6 +179,7 @@ jobs:
           [[ "$RECOVERY_ARTIFACT_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
           [[ "$RECOVERY_MANIFEST_DIGEST" =~ ^[a-f0-9]{64}$ ]]
           [[ "$RECOVERY_RELEASE_ID" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$PRE_SUBMISSION_FAILURE_APPROVAL" == "NONE" || "$PRE_SUBMISSION_FAILURE_APPROVAL" =~ ^RECONCILE_PRE_SUBMISSION:sha256:[a-f0-9]{64}:[1-9][0-9]*$ ]]
           for VALUE in "$CURRENT_ATTEMPT_RELEASE_ID" "$ROLLBACK_TARGET_RELEASE_ID"; do
             [[ "$VALUE" == "NONE_FIRST_DEPLOYMENT" || "$VALUE" =~ ^[a-f0-9]{64}$ ]]
           done
@@ -199,8 +201,12 @@ jobs:
           done
           if [[ "$CURRENT_ATTEMPT_RELEASE_ID" == "NONE_FIRST_DEPLOYMENT" ]]; then
             test "$CURRENT_ATTEMPT_RECEIPT_ID" = "NONE_FIRST_DEPLOYMENT"
+            test "$PRE_SUBMISSION_FAILURE_APPROVAL" = "NONE"
           else
             [[ "$CURRENT_ATTEMPT_RECEIPT_ID" =~ ^[1-9][0-9]*$ ]]
+            if [[ "$PRE_SUBMISSION_FAILURE_APPROVAL" != "NONE" ]]; then
+              [[ "$PRE_SUBMISSION_FAILURE_APPROVAL" == "RECONCILE_PRE_SUBMISSION:${CURRENT_ATTEMPT_RECEIPT_DIGEST}:"* ]]
+            fi
           fi
           if [[ "$ROLLBACK_TARGET_RELEASE_ID" == "NONE_FIRST_DEPLOYMENT" ]]; then
             test "$ROLLBACK_TARGET_RECEIPT_ID" = "NONE_FIRST_DEPLOYMENT"
@@ -311,7 +317,7 @@ jobs:
             --operation=first-release-recovery \
             --source-sha="$EXPECTED_SOURCE_SHA" \
             --run-id=${{ inputs.source_run_id }} \
-            --run-attempt=${{ inputs.source_run_attempt }} \
+            --run-attempt=1 \
             --artifact-id="$RECOVERY_ARTIFACT_ID" \
             --artifact-digest="$RECOVERY_ARTIFACT_DIGEST" \
             --manifest-digest="$RECOVERY_MANIFEST_DIGEST" \
@@ -331,7 +337,7 @@ jobs:
         env:
           OPERATION: ${{ inputs.operation }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
-          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          SOURCE_RUN_ATTEMPT: "1"
           SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
           SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
           SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
@@ -379,11 +385,13 @@ jobs:
           TARGET_RELEASE_ID: ${{ inputs.rollback_target_release_id }}
           TARGET_RECEIPT_ID: ${{ inputs.rollback_target_receipt_artifact_id }}
           TARGET_RECEIPT_DIGEST: ${{ inputs.rollback_target_receipt_artifact_digest }}
+          PRE_SUBMISSION_FAILURE_APPROVAL: ${{ inputs.pre_submission_failure_approval }}
           OPERATION: ${{ inputs.operation }}
           SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
           SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
           SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
           RELEASE_MANIFEST_PATH: work/pages-promotion/bundle/release-manifest.json
+          CURRENT_RECEIPT_ARTIFACT_DIGEST: ${{ inputs.current_attempt_receipt_artifact_digest }}
         run: |
           set -euo pipefail
           mkdir -p work/pages-promotion
@@ -456,6 +464,7 @@ jobs:
           TARGET_RELEASE_ID: ${{ inputs.rollback_target_release_id }}
           TARGET_RECEIPT_ID: ${{ inputs.rollback_target_receipt_artifact_id }}
           TARGET_RECEIPT_DIGEST: ${{ inputs.rollback_target_receipt_artifact_digest }}
+          PRE_SUBMISSION_FAILURE_APPROVAL: ${{ inputs.pre_submission_failure_approval }}
           OPERATION: ${{ inputs.operation }}
           APPROVAL_EXPIRES_AT: ${{ inputs.approval_expires_at }}
           PARTIAL_APPROVAL: ${{ inputs.partial_approval }}
@@ -494,12 +503,13 @@ jobs:
             --argjson ciRunId "$(jq -r .ciRun.id work/pages-promotion/github-metadata.json)" \
             --arg partialApproval "$PARTIAL_APPROVAL" \
             --arg expiredRollbackApproval "$EXPIRED_ROLLBACK_APPROVAL" \
+            --arg preSubmissionFailureApproval "$PRE_SUBMISSION_FAILURE_APPROVAL" \
             --argjson currentState "$CURRENT_STATE" \
             --argjson targetState "$TARGET_STATE" \
             --argjson currentArtifact "$CURRENT_ARTIFACT" \
             --argjson targetArtifact "$TARGET_ARTIFACT" \
             --slurpfile manifest work/pages-promotion/bundle/release-manifest.json \
-            '{operation:$operation,promotionWorkflowSha:$promotionWorkflowSha,approvalExpiresAt:$approvalExpiresAt,minimumFreshUntil:$minimumFreshUntil,releaseId:$releaseId,source:{runId:$sourceRunId,sourceSha:$sourceSha,artifactId:$sourceArtifactId,artifactDigest:$sourceArtifactDigest,manifestSha256:$sourceManifestDigest},ci:{runId:$ciRunId},recovery:{artifactId:$recoveryArtifactId,artifactDigest:$recoveryArtifactDigest,manifestSha256:$recoveryManifestDigest},staged:{artifactId:$stagedArtifactId,digest:$stagedArtifactDigest,artifactExpiresAt:$stagedArtifactExpiresAt},currentAttempt:$currentState,rollbackTarget:$targetState,authorization:{partialApproval:$partialApproval,expiredRollbackApproval:$expiredRollbackApproval},menu:($manifest[0].menu // null),site:$manifest[0].site,artifacts:([{id:$sourceArtifactId,digest:$sourceArtifactDigest,runId:$sourceRunId,headSha:$sourceSha,role:"source"},{id:$recoveryArtifactId,digest:$recoveryArtifactDigest,runId:$sourceRunId,headSha:$sourceSha,role:"recovery"},{id:$stagedArtifactId,digest:$stagedArtifactDigest,runId:env.GITHUB_RUN_ID|tonumber,headSha:$promotionWorkflowSha,role:"staged"}] + (if $currentArtifact == null then [] else [$currentArtifact] end) + (if $targetArtifact == null then [] else [$targetArtifact] end))}' \
+            '{operation:$operation,promotionWorkflowSha:$promotionWorkflowSha,approvalExpiresAt:$approvalExpiresAt,minimumFreshUntil:$minimumFreshUntil,releaseId:$releaseId,source:{runId:$sourceRunId,sourceSha:$sourceSha,artifactId:$sourceArtifactId,artifactDigest:$sourceArtifactDigest,manifestSha256:$sourceManifestDigest},ci:{runId:$ciRunId},recovery:{artifactId:$recoveryArtifactId,artifactDigest:$recoveryArtifactDigest,manifestSha256:$recoveryManifestDigest},staged:{artifactId:$stagedArtifactId,digest:$stagedArtifactDigest,artifactExpiresAt:$stagedArtifactExpiresAt},currentAttempt:$currentState,rollbackTarget:$targetState,authorization:{partialApproval:$partialApproval,expiredRollbackApproval:$expiredRollbackApproval,preSubmissionFailureApproval:$preSubmissionFailureApproval},menu:($manifest[0].menu // null),site:$manifest[0].site,artifacts:([{id:$sourceArtifactId,digest:$sourceArtifactDigest,runId:$sourceRunId,headSha:$sourceSha,role:"source"},{id:$recoveryArtifactId,digest:$recoveryArtifactDigest,runId:$sourceRunId,headSha:$sourceSha,role:"recovery"},{id:$stagedArtifactId,digest:$stagedArtifactDigest,runId:env.GITHUB_RUN_ID|tonumber,headSha:$promotionWorkflowSha,role:"staged"}] + (if $currentArtifact == null then [] else [$currentArtifact] end) + (if $targetArtifact == null then [] else [$targetArtifact] end))}' \
             > pre-approval-summary.json
       - name: Retain the pre-approval summary
         id: summary-upload
@@ -641,9 +651,11 @@ jobs:
           SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
           PARTIAL_APPROVAL: ${{ inputs.partial_approval }}
           EXPIRED_ROLLBACK_APPROVAL: ${{ inputs.expired_rollback_approval }}
-          MANIFEST_PATH: work/pages-deployment/source-bundle/release-manifest.json
+          PRE_SUBMISSION_FAILURE_APPROVAL: ${{ inputs.pre_submission_failure_approval }}
+          RELEASE_MANIFEST_PATH: work/pages-deployment/source-bundle/release-manifest.json
         run: |
           set -euo pipefail
+          jq -n --arg recordedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson artifactId "$STAGED_ARTIFACT_ID" --arg buildVersion "$EXPECTED_PROMOTION_WORKFLOW_SHA" '{phase:"pre-submission",artifactId:$artifactId,buildVersion:$buildVersion,repositoryDeploymentId:null,deploymentId:null,status:"final-gate",uncertain:false,recordedAt:$recordedAt}' > deployment-attempt.json
           test "$EXPECTED_PROMOTION_WORKFLOW_SHA" = "${{ github.sha }}"
           test "$(gh api repos/${{ github.repository }}/commits/main --jq .sha)" = "$EXPECTED_PROMOTION_WORKFLOW_SHA"
           RUN="$(gh api repos/${{ github.repository }}/actions/runs/$SOURCE_RUN_ID)"
@@ -656,14 +668,14 @@ jobs:
           test "$(jq -r .conclusion <<< "$RUN")" = "success"
           test "$(jq -r .releaseId work/pages-deployment/recovery-bundle/release-manifest.json)" = "${{ inputs.recovery_release_id }}"
           test "$(jq -r .releaseKind work/pages-deployment/recovery-bundle/release-manifest.json)" = "first-release-recovery"
-          SOURCE_RELEASE_KIND="$(jq -r .releaseKind "$MANIFEST_PATH")"
+          SOURCE_RELEASE_KIND="$(jq -r .releaseKind "$RELEASE_MANIFEST_PATH")"
           if [[ "$OPERATION" == "first-release-recovery" || "$SOURCE_RELEASE_KIND" == "first-release-recovery" ]]; then
             test "$SOURCE_ARTIFACT_ID" = "$RECOVERY_ARTIFACT_ID"
             test "$SOURCE_ARTIFACT_DIGEST" = "$RECOVERY_ARTIFACT_DIGEST"
           else
-            test "$(jq -r .recovery.artifactId "$MANIFEST_PATH")" = "$RECOVERY_ARTIFACT_ID"
-            test "$(jq -r .recovery.artifactDigest "$MANIFEST_PATH")" = "$RECOVERY_ARTIFACT_DIGEST"
-            test "$(jq -r .recovery.releaseId "$MANIFEST_PATH")" = "${{ inputs.recovery_release_id }}"
+            test "$(jq -r .recovery.artifactId "$RELEASE_MANIFEST_PATH")" = "$RECOVERY_ARTIFACT_ID"
+            test "$(jq -r .recovery.artifactDigest "$RELEASE_MANIFEST_PATH")" = "$RECOVERY_ARTIFACT_DIGEST"
+            test "$(jq -r .recovery.releaseId "$RELEASE_MANIFEST_PATH")" = "${{ inputs.recovery_release_id }}"
           fi
           CI_RUN_ID="$(jq -r .ci.runId work/pages-deployment/preapproval/pre-approval-summary.json)"
           [[ "$CI_RUN_ID" =~ ^[1-9][0-9]*$ ]]
@@ -725,11 +737,10 @@ jobs:
           bash scripts/verify-post-approval-policy.sh
           test "$(date -u +%s)" -lt "$(date -u -d "$APPROVAL_EXPIRES_AT" +%s)"
           if [[ "$OPERATION" == "promote" ]]; then
-            echo "MINIMUM_FRESH_UNTIL=$(jq -r .menu.earliestFreshUntil "$MANIFEST_PATH")" >> "$GITHUB_ENV"
+            echo "MINIMUM_FRESH_UNTIL=$(jq -r .menu.earliestFreshUntil "$RELEASE_MANIFEST_PATH")" >> "$GITHUB_ENV"
           else
             echo "MINIMUM_FRESH_UNTIL=" >> "$GITHUB_ENV"
           fi
-          printf '%s\n' '{"phase":"submitting","deploymentId":null,"status":null,"uncertain":true}' > deployment-attempt.json
       - name: Deploy exact staged artifact
         id: pages
         env:
@@ -748,6 +759,8 @@ jobs:
           TARGET_RELEASE_ID: ${{ inputs.rollback_target_release_id }}
           SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
           SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
+          CURRENT_RECEIPT_ARTIFACT_DIGEST: ${{ inputs.current_attempt_receipt_artifact_digest }}
+          PRE_SUBMISSION_FAILURE_APPROVAL: ${{ inputs.pre_submission_failure_approval }}
         run: node scripts/deploy-exact-pages-artifact.mjs
       - name: Preserve deployment attempt evidence
         id: attempt-upload
@@ -800,7 +813,11 @@ jobs:
               "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ATTEMPT_ARTIFACT_ID/zip" --output attempt.zip \
               && node --experimental-strip-types scripts/artifact-digest.ts --expected="$ATTEMPT_ARTIFACT_DIGEST" --file=attempt.zip \
               && node --experimental-strip-types scripts/artifact-zip.ts --zip=attempt.zip --output=attempt --expected=deployment-attempt.json; then
-              jq '{attempt:.,repositoryState:"in_progress",repositoryStatusRecorded:true}' attempt/deployment-attempt.json > deployment-attempt.json
+              if [[ "$(jq -r .phase attempt/deployment-attempt.json)" == "pre-submission" ]]; then
+                jq '{attempt:.,repositoryState:"unknown",repositoryStatusRecorded:false}' attempt/deployment-attempt.json > deployment-attempt.json
+              else
+                jq '{attempt:.,repositoryState:"in_progress",repositoryStatusRecorded:true}' attempt/deployment-attempt.json > deployment-attempt.json
+              fi
               RECOVERED=true
             fi
           fi
