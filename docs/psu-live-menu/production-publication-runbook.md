@@ -1,7 +1,7 @@
 # LionLog v0.2 production publication runbook
 
-Date: 2026-09-10
-Status: implementation boundary; no Pages site or deployment is created by this document or by merging the implementation.
+Date: 2026-09-11
+Status: the first protected promotion attempt failed before Pages submission. No LionLog release has been deployed; a reviewed code correction and a new exact authorization are required before another attempt.
 
 LionLog publishes normalized public PSU menu data as a static project-site PWA. LionLog is independent and is not affiliated with or endorsed by Penn State. It does not use an official or private PSU API. Only the manually dispatched candidate workflow contacts PSU; browsers, CI, builds, promotion, rollback, and app opens do not.
 
@@ -50,16 +50,17 @@ The live manifest records repository identity, numeric producer workflow ID/path
 Dispatch `deploy-github-pages.yml` from the current `main` only after reviewing the candidate receipt and contents. Every field is required:
 
 - operation: `promote`, `rollback`, or `first-release-recovery`;
-- exact producer run ID and attempt `1`;
+- exact producer run ID; producer attempt `1` is a fixed workflow invariant rather than a separately entered field;
 - exact source artifact ID and `sha256:` GitHub artifact digest;
 - exact lowercase release-manifest SHA-256;
-- exact candidate source SHA and service date (`NONE` only for first-release recovery);
+- exact candidate source SHA and service date (`NONE` for first-release recovery and for an ordinary exact rollback to a known-good app-only release);
 - exact promotion-workflow SHA;
 - exact retained recovery artifact ID, wrapper digest, manifest digest, and release ID;
 - exact latest-attempt release ID and receipt artifact ID/digest, or the first-deployment sentinel;
 - a separate exact known-good rollback target: release ID, repository deployment ID, Pages deployment ID, and receipt artifact ID/digest, or the first-deployment sentinel when no known-good release exists;
 - an ISO approval expiry timestamp;
 - coverage approval and expired-rollback approval values described below;
+- `NONE` for ordinary state, or the exact pre-submission reconciliation value described below;
 - confirmation: `PROMOTE_EXACT_LIONLOG_RELEASE`.
 
 The approval expires at the supplied timestamp. Changing any artifact, manifest, omission count, operation, current-production identity, or source requires a new approval.
@@ -82,6 +83,18 @@ Rollback restores exact historical bytes without fetching PSU. An unexpired roll
 
 Such a rollback restores the application while the menu correctly appears unavailable. It does not describe expired data as current.
 
+## September 11 pre-submission failure reconciliation
+
+Promotion run `34609219734` (attempt `1`) from workflow SHA `3d5181c962486aa25345f4f16fbdd75932e0d831` passed its unprivileged verification and protected-environment review, then failed in protected job `103295384726`. GitHub's immutable job-step record shows the final provenance step failed and the separately named `Deploy exact staged artifact` step was completed as `skipped`; therefore that job did not enter LionLog's OIDC/Pages adapter. The final shell boundary supplied the obsolete `MANIFEST_PATH` name while `verify-current-publication.mjs` required `RELEASE_MANIFEST_PATH`. GitHub's automatic environment deployment `6394978446` has exact latest status `18228833381` (`failure`) linked to that job. The receipt records no Pages deployment ID or LionLog publication-ledger identity, and the public `release.json` was observed absent; absence of the custom ledger alone is not generalized into proof that Pages was never contacted.
+
+The immutable receipt artifact `10267367634`, digest `sha256:bf3c1430abf5bf1ebc8707e601b51f3776705cde507997ff3b606fcc88601874`, conservatively records `submission-uncertain` because the old workflow could not retain the known final phase. It must not be reclassified or edited. The correction contains one bounded reviewed-incident record and accepts only the exact receipt bytes and fields, artifact provenance, failed run, complete named job-step evidence, empty LionLog publication ledger, absent public marker, automatic environment deployment, and exact latest failure status:
+
+`RECONCILE_PRE_SUBMISSION:sha256:bf3c1430abf5bf1ebc8707e601b51f3776705cde507997ff3b606fcc88601874:6394978446`
+
+This value is an input to a future newly authorized promotion, not standing permission to dispatch one. GitHub creates a new automatic `github-pages` environment deployment for the protected `deploy` job before its steps run. During the newly authorized run, the verifier therefore allows exactly one newer automatic environment deployment only when it is bound to that exact current run, attempt, SHA, in-progress protected job, and in-progress status URL; unrelated, missing, duplicate, completed, or incompletely paginated evidence fails closed. The next attempt must use current-attempt release ID `7dce94463a4d87541812eda2d500baefead34e4a5394f82d95baa10163d1cec1`, receipt artifact `10267367634` and its exact digest above, the first-deployment sentinel for the rollback target, a reviewed candidate whose freshness still satisfies policy, the merged correction's exact `main` SHA, a fresh approval expiry, and a new direct authorization for the complete tuple. Recheck the public marker and both deployment ledgers immediately before dispatch. Never rerun run `34609219734`.
+
+`RELEASE_MANIFEST_PATH` is the only accepted release-manifest environment variable in the final verifier, policy shell, and Pages adapter. At the actual adapter boundary, the authoritative manifest schema, release identity, provenance/approval policy, normalized menu evidence, complete inventory, deterministic tar, target, source/recovery/staged identities, and retained approval summary are verified again before OIDC. Missing paths, the former name, unreadable or unsupported manifests, semantic mismatches, altered tar bytes, and approval-tuple drift fail before OIDC and before any repository publication-ledger or Pages POST. New failures at this boundary retain `pre-submission` evidence with `not-submitted`; they do not need the historical reconciliation exception.
+
 ## First deployment
 
 1. Merge the reviewed publication-boundary implementation.
@@ -101,7 +114,7 @@ Rollback selects a retained, previously validated candidate by exact ID and dige
 
 The workflow creates a supported repository Deployment ledger entry before the Pages request. Once GitHub returns a Pages deployment ID, the adapter writes it locally and immediately records it in a repository deployment status before long polling. The collector can therefore recover the ID through supported repository Deployment list/get/status APIs and the exact Pages status endpoint even if the deploy job times out before uploading local evidence. Verification paginates the complete relevant repository Deployment history up to a fixed 1,000-entry bound and fails closed if that bound is exhausted, a page is malformed, identities repeat, or the exact attempt is missing. Absence of a matching ledger never proves that Pages was not contacted.
 
-A prior attempt authorizes another protected submission only after one of two conditions is established: its exact Pages deployment ID reports a recognized terminal status, or its retained receipt records a definitive non-submission from a non-retryable Pages rejection. Queued, in-progress, unknown, newly introduced, statusless, missing-ID, transport-error, and HTTP 5xx outcomes remain unresolved and block promotion, rollback, and first-release recovery. There is an unavoidable small interval between receiving the Pages response and completing the server-side status write; runner loss in that interval therefore fails closed and requires external reconciliation rather than a retry. Do not infer non-submission from the absence of local evidence or from a missing repository ledger.
+A prior attempt authorizes another protected submission only after one of three conditions is established: its exact Pages deployment ID reports a recognized terminal status; its retained receipt records a definitive non-submission from a non-retryable Pages rejection or the new `pre-submission` final-gate evidence; or the narrowly reviewed September 11 reconciliation above revalidates every immutable receipt, run, job, and ledger identity. Queued, in-progress, unknown, newly introduced, statusless, arbitrary missing-ID, transport-error, and HTTP 5xx outcomes remain unresolved and block promotion, rollback, and first-release recovery. There is an unavoidable small interval between receiving the Pages response and completing the server-side status write; runner loss in that interval therefore fails closed and requires external reconciliation rather than a retry. Do not infer non-submission from the absence of local evidence or from a missing repository ledger.
 
 If Pages succeeds but marker or complete-inventory verification fails, the failed current-attempt receipt is retained and the repository deployment is marked failed. A later directly approved rollback may pair that receipt with the preceding known-good target. On a failed first launch, `first-release-recovery` instead requires the exact recovery tuple already bound into the failed live receipt and no known-good target. Once that app-only recovery is itself known-good, it is an ordinary exact rollback target: if a later live successor fails, `rollback` may restore those same retained app-only bytes without pretending they contain menu data. Neither path weakens `knownGood`.
 

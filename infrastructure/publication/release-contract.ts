@@ -180,7 +180,7 @@ export const publicationDeploymentReceiptSchema = z.object({
     artifactDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
     artifactExpiresAt: z.string().datetime({ offset: true }),
   }).strict(),
-  attemptPhase: z.enum(["submitting", "submission-uncertain", "submission-rejected", "accepted", "status-uncertain", "terminal"]),
+  attemptPhase: z.enum(["pre-submission", "submitting", "submission-uncertain", "submission-rejected", "accepted", "status-uncertain", "terminal"]),
   repositoryDeployment: z.object({
     id: positiveIdentifierSchema.nullable(),
     state: z.enum(["pending", "in_progress", "success", "failure", "error", "unknown"]),
