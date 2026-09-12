@@ -85,6 +85,116 @@ export interface PublicationVerificationOptions {
 
 export type PublicationApprovalOptions = Omit<PublicationVerificationOptions, "bundleDirectory" | "extractionDirectory">;
 
+interface ProtectedAdapterVerificationOptions {
+  bundleDirectory: string;
+  stagedTarPath: string;
+  expected: ProtectedApprovalSummary;
+  actual: ProtectedFinalState;
+  environment: Record<string, string | undefined>;
+  now: Date;
+}
+
+interface ProtectedArtifactIdentity { id: number; digest: string; runId: number; headSha: string; role: string }
+interface ProtectedApprovalSummary {
+  operation: PublicationVerificationOptions["operation"];
+  promotionWorkflowSha: string;
+  approvalExpiresAt: string;
+  releaseId: string;
+  source: { runId: number; sourceSha: string; artifactId: number; artifactDigest: string; manifestSha256: string };
+  recovery: { artifactId: number; artifactDigest: string; manifestSha256: string; releaseId: string };
+  staged: { artifactId: number; digest: string; artifactExpiresAt: string };
+  currentAttempt: { releaseId: string };
+  rollbackTarget: { releaseId: string };
+  authorization: { partialApproval: string; expiredRollbackApproval: string; preSubmissionFailureApproval: string };
+  menu: PublicationReleaseManifest["menu"];
+  site: PublicationReleaseManifest["site"];
+  artifacts: ProtectedArtifactIdentity[];
+}
+interface ProtectedFinalState {
+  mainSha: string;
+  sourceRun: GithubMetadata["run"];
+  ciRun: GithubMetadata["ciRun"];
+  ciJobs: GithubMetadata["ciJobs"];
+  artifacts: GithubMetadata["artifact"][];
+}
+
+export async function verifyProtectedAdapterBundle(options: ProtectedAdapterVerificationOptions): Promise<PublicationReleaseManifest> {
+  const { expected, actual, environment } = options;
+  const requireEqual = (label: string, actualValue: unknown, expectedValue: unknown): void => {
+    if (actualValue !== expectedValue) throw new Error(`${label} differs from the retained approval summary.`);
+  };
+  requireEqual("Operation", environment.OPERATION, expected.operation);
+  requireEqual("Promotion workflow SHA", environment.EXPECTED_PROMOTION_WORKFLOW_SHA, expected.promotionWorkflowSha);
+  requireEqual("Release identity", environment.RELEASE_ID, expected.releaseId);
+  requireEqual("Source artifact identity", Number(environment.SOURCE_ARTIFACT_ID), expected.source?.artifactId);
+  requireEqual("Source artifact digest", environment.SOURCE_ARTIFACT_DIGEST, expected.source?.artifactDigest);
+  requireEqual("Source manifest digest", environment.SOURCE_MANIFEST_DIGEST, expected.source?.manifestSha256);
+  requireEqual("Staged artifact identity", Number(environment.STAGED_ARTIFACT_ID), expected.staged?.artifactId);
+  requireEqual("Recovery artifact identity", Number(environment.RECOVERY_ARTIFACT_ID), expected.recovery?.artifactId);
+  requireEqual("Recovery artifact digest", environment.RECOVERY_ARTIFACT_DIGEST, expected.recovery?.artifactDigest);
+  requireEqual("Recovery manifest digest", environment.RECOVERY_MANIFEST_DIGEST, expected.recovery?.manifestSha256);
+  requireEqual("Recovery release identity", environment.RECOVERY_RELEASE_ID, expected.recovery?.releaseId);
+  requireEqual("Service date", environment.SERVICE_DATE, expected.menu?.serviceDate ?? "NONE");
+  requireEqual("Partial-coverage approval", environment.PARTIAL_APPROVAL, expected.authorization?.partialApproval);
+  requireEqual("Expired-rollback approval", environment.EXPIRED_ROLLBACK_APPROVAL, expected.authorization?.expiredRollbackApproval);
+  requireEqual("Pre-submission reconciliation approval", environment.PRE_SUBMISSION_FAILURE_APPROVAL ?? "NONE", expected.authorization?.preSubmissionFailureApproval);
+  requireEqual("Current release identity", environment.CURRENT_RELEASE_ID, expected.currentAttempt?.releaseId);
+  requireEqual("Rollback target release identity", environment.TARGET_RELEASE_ID, expected.rollbackTarget?.releaseId);
+
+  const roles = new Map<string, ProtectedArtifactIdentity>();
+  for (const artifact of expected.artifacts ?? []) {
+    if (typeof artifact?.role !== "string" || roles.has(artifact.role)) throw new Error("Retained approval artifact roles are invalid or ambiguous.");
+    roles.set(artifact.role, artifact);
+  }
+  for (const [role, identity] of [["source", expected.source], ["recovery", expected.recovery], ["staged", expected.staged]] as const) {
+    const artifact = roles.get(role);
+    if (!artifact || artifact.id !== identity?.artifactId || artifact.digest !== (role === "staged" ? identity?.digest : identity?.artifactDigest)) {
+      throw new Error(`Retained ${role} artifact identity is inconsistent.`);
+    }
+  }
+  const sourceArtifact = (actual.artifacts ?? []).find((artifact) => artifact?.id === expected.source?.artifactId);
+  if (!sourceArtifact) throw new Error("Current source artifact metadata is unavailable.");
+  const manifest = await verifyPublicationBundle({
+    bundleDirectory: options.bundleDirectory,
+    metadata: {
+      repository: { id: LIONLOG_REPOSITORY_ID, full_name: LIONLOG_REPOSITORY },
+      main: { sha: actual.mainSha },
+      artifact: sourceArtifact,
+      run: actual.sourceRun,
+      ciRun: actual.ciRun,
+      ciJobs: actual.ciJobs,
+    },
+    operation: expected.operation,
+    expectedSourceSha: expected.source?.sourceSha,
+    expectedRunId: expected.source?.runId,
+    expectedRunAttempt: 1,
+    expectedArtifactId: expected.source?.artifactId,
+    expectedArtifactDigest: expected.source?.artifactDigest,
+    expectedManifestSha256: expected.source?.manifestSha256,
+    expectedServiceDate: expected.menu?.serviceDate ?? "NONE",
+    approvalExpiresAt: expected.approvalExpiresAt,
+    partialApproval: expected.authorization?.partialApproval,
+    expiredRollbackApproval: expected.authorization?.expiredRollbackApproval,
+    workflowSha: expected.promotionWorkflowSha,
+    expectedPromotionWorkflowSha: expected.promotionWorkflowSha,
+    expectedRecoveryArtifactId: expected.recovery?.artifactId,
+    expectedRecoveryArtifactDigest: expected.recovery?.artifactDigest,
+    expectedRecoveryManifestSha256: expected.recovery?.manifestSha256,
+    expectedRecoveryReleaseId: expected.recovery?.releaseId,
+    now: options.now,
+  });
+  if (
+    manifest.releaseId !== expected.releaseId
+    || JSON.stringify(manifest.menu) !== JSON.stringify(expected.menu)
+    || JSON.stringify(manifest.site) !== JSON.stringify(expected.site)
+  ) throw new Error("Release manifest semantics differ from the retained approval summary.");
+  const stagedTar = await readFile(options.stagedTarPath);
+  if (stagedTar.byteLength !== manifest.site.bytes || sha256(stagedTar) !== manifest.site.tarSha256) {
+    throw new Error("Staged Pages tar differs from the validated release manifest.");
+  }
+  return manifest;
+}
+
 export async function verifyPublicationBundle(options: PublicationVerificationOptions): Promise<PublicationReleaseManifest> {
   const manifestBytes = await readFile(path.join(options.bundleDirectory, "release-manifest.json"));
   if (sha256(manifestBytes) !== options.expectedManifestSha256) throw new Error("Release manifest digest mismatch.");

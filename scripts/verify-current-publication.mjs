@@ -17,8 +17,10 @@ export async function verifyCurrentPublication(options) {
     rollbackTargetReceipt = null,
     sourceManifest = null,
     sourceIdentity = null,
+    currentReceiptArtifactId = "NONE_FIRST_DEPLOYMENT",
     currentReceiptArtifactDigest = "NONE_FIRST_DEPLOYMENT",
     preSubmissionFailureApproval = "NONE",
+    currentPromotion = null,
     token,
     fetchImpl = fetch,
   } = options;
@@ -69,9 +71,11 @@ export async function verifyCurrentPublication(options) {
     const reconciliation = await verifyPreSubmissionFailure({
       token,
       receipt: currentReceipt,
+      receiptArtifactId: currentReceiptArtifactId,
       receiptArtifactDigest: currentReceiptArtifactDigest,
       approval: preSubmissionFailureApproval,
       publicationDeployments: authority.deployments,
+      currentPromotion,
       fetchImpl,
     });
     return {
@@ -304,7 +308,16 @@ export async function verifyCurrentPublicationFromEnvironment(environment, { fet
       manifestSha256: environment.SOURCE_MANIFEST_DIGEST ?? "",
     },
     currentReceiptArtifactDigest: environment.CURRENT_RECEIPT_ARTIFACT_DIGEST ?? "NONE_FIRST_DEPLOYMENT",
+    currentReceiptArtifactId: environment.CURRENT_RECEIPT_ARTIFACT_ID === "NONE_FIRST_DEPLOYMENT"
+      ? "NONE_FIRST_DEPLOYMENT"
+      : Number(environment.CURRENT_RECEIPT_ARTIFACT_ID),
     preSubmissionFailureApproval: environment.PRE_SUBMISSION_FAILURE_APPROVAL ?? "NONE",
+    currentPromotion: environment.GITHUB_JOB === "deploy" ? {
+      runId: Number(environment.GITHUB_RUN_ID),
+      runAttempt: Number(environment.GITHUB_RUN_ATTEMPT),
+      workflowSha: environment.GITHUB_SHA ?? "",
+      job: environment.GITHUB_JOB,
+    } : null,
     fetchImpl,
   });
 }

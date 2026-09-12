@@ -35,11 +35,12 @@ export function validateFinalPromotionState(expected, actual, now = new Date()) 
   return { verifiedAt: now.toISOString(), promotionWorkflowSha: expected.promotionWorkflowSha };
 }
 
-export async function executeFinalPromotionGate({ expected, readActual, verifyCurrentState, clock = () => Date.now(), requestOidc, submit }) {
+export async function executeFinalPromotionGate({ expected, readActual, verifyApprovedBundle = async () => {}, verifyCurrentState, clock = () => Date.now(), requestOidc, submit }) {
   const checkpoint = async () => {
     const actual = await readActual();
     const now = new Date(clock());
     validateFinalPromotionState(expected, actual, now);
+    await verifyApprovedBundle(actual, now);
     await verifyCurrentState();
   };
   await checkpoint();

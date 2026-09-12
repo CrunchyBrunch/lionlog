@@ -497,6 +497,7 @@ jobs:
             --argjson recoveryArtifactId '${{ inputs.recovery_artifact_id }}' \
             --arg recoveryArtifactDigest '${{ inputs.recovery_artifact_digest }}' \
             --arg recoveryManifestDigest '${{ inputs.recovery_manifest_digest }}' \
+            --arg recoveryReleaseId '${{ inputs.recovery_release_id }}' \
             --argjson stagedArtifactId '${{ steps.stage.outputs.artifact-id }}' \
             --arg stagedArtifactDigest '${{ steps.staged-metadata.outputs.digest }}' \
             --arg stagedArtifactExpiresAt '${{ steps.staged-metadata.outputs.expires_at }}' \
@@ -509,7 +510,7 @@ jobs:
             --argjson currentArtifact "$CURRENT_ARTIFACT" \
             --argjson targetArtifact "$TARGET_ARTIFACT" \
             --slurpfile manifest work/pages-promotion/bundle/release-manifest.json \
-            '{operation:$operation,promotionWorkflowSha:$promotionWorkflowSha,approvalExpiresAt:$approvalExpiresAt,minimumFreshUntil:$minimumFreshUntil,releaseId:$releaseId,source:{runId:$sourceRunId,sourceSha:$sourceSha,artifactId:$sourceArtifactId,artifactDigest:$sourceArtifactDigest,manifestSha256:$sourceManifestDigest},ci:{runId:$ciRunId},recovery:{artifactId:$recoveryArtifactId,artifactDigest:$recoveryArtifactDigest,manifestSha256:$recoveryManifestDigest},staged:{artifactId:$stagedArtifactId,digest:$stagedArtifactDigest,artifactExpiresAt:$stagedArtifactExpiresAt},currentAttempt:$currentState,rollbackTarget:$targetState,authorization:{partialApproval:$partialApproval,expiredRollbackApproval:$expiredRollbackApproval,preSubmissionFailureApproval:$preSubmissionFailureApproval},menu:($manifest[0].menu // null),site:$manifest[0].site,artifacts:([{id:$sourceArtifactId,digest:$sourceArtifactDigest,runId:$sourceRunId,headSha:$sourceSha,role:"source"},{id:$recoveryArtifactId,digest:$recoveryArtifactDigest,runId:$sourceRunId,headSha:$sourceSha,role:"recovery"},{id:$stagedArtifactId,digest:$stagedArtifactDigest,runId:env.GITHUB_RUN_ID|tonumber,headSha:$promotionWorkflowSha,role:"staged"}] + (if $currentArtifact == null then [] else [$currentArtifact] end) + (if $targetArtifact == null then [] else [$targetArtifact] end))}' \
+            '{operation:$operation,promotionWorkflowSha:$promotionWorkflowSha,approvalExpiresAt:$approvalExpiresAt,minimumFreshUntil:$minimumFreshUntil,releaseId:$releaseId,source:{runId:$sourceRunId,sourceSha:$sourceSha,artifactId:$sourceArtifactId,artifactDigest:$sourceArtifactDigest,manifestSha256:$sourceManifestDigest},ci:{runId:$ciRunId},recovery:{artifactId:$recoveryArtifactId,artifactDigest:$recoveryArtifactDigest,manifestSha256:$recoveryManifestDigest,releaseId:$recoveryReleaseId},staged:{artifactId:$stagedArtifactId,digest:$stagedArtifactDigest,artifactExpiresAt:$stagedArtifactExpiresAt},currentAttempt:$currentState,rollbackTarget:$targetState,authorization:{partialApproval:$partialApproval,expiredRollbackApproval:$expiredRollbackApproval,preSubmissionFailureApproval:$preSubmissionFailureApproval},menu:($manifest[0].menu // null),site:$manifest[0].site,artifacts:([{id:$sourceArtifactId,digest:$sourceArtifactDigest,runId:$sourceRunId,headSha:$sourceSha,role:"source"},{id:$recoveryArtifactId,digest:$recoveryArtifactDigest,runId:$sourceRunId,headSha:$sourceSha,role:"recovery"},{id:$stagedArtifactId,digest:$stagedArtifactDigest,runId:env.GITHUB_RUN_ID|tonumber,headSha:$promotionWorkflowSha,role:"staged"}] + (if $currentArtifact == null then [] else [$currentArtifact] end) + (if $targetArtifact == null then [] else [$targetArtifact] end))}' \
             > pre-approval-summary.json
       - name: Retain the pre-approval summary
         id: summary-upload
@@ -543,6 +544,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: npm
       - name: Re-download the exact retained approval summary
         shell: bash
         env:
@@ -747,6 +752,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ needs.verify-and-stage.outputs.release_id }}
           SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          RECOVERY_ARTIFACT_ID: ${{ inputs.recovery_artifact_id }}
+          RECOVERY_ARTIFACT_DIGEST: ${{ inputs.recovery_artifact_digest }}
+          RECOVERY_MANIFEST_DIGEST: ${{ inputs.recovery_manifest_digest }}
+          RECOVERY_RELEASE_ID: ${{ inputs.recovery_release_id }}
           STAGED_ARTIFACT_ID: ${{ needs.verify-and-stage.outputs.staged_artifact_id }}
           APPROVAL_EXPIRES_AT: ${{ inputs.approval_expires_at }}
           MINIMUM_FRESH_UNTIL: ${{ env.MINIMUM_FRESH_UNTIL }}
@@ -756,12 +765,18 @@ jobs:
           RELEASE_MANIFEST_PATH: work/pages-deployment/source-bundle/release-manifest.json
           OPERATION: ${{ inputs.operation }}
           CURRENT_RELEASE_ID: ${{ inputs.expected_current_attempt_release_id }}
+          CURRENT_RECEIPT_ARTIFACT_ID: ${{ inputs.current_attempt_receipt_artifact_id }}
           TARGET_RELEASE_ID: ${{ inputs.rollback_target_release_id }}
+          TARGET_RECEIPT_ARTIFACT_ID: ${{ inputs.rollback_target_receipt_artifact_id }}
+          TARGET_RECEIPT_ARTIFACT_DIGEST: ${{ inputs.rollback_target_receipt_artifact_digest }}
+          SERVICE_DATE: ${{ inputs.expected_service_date }}
           SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
           SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
           CURRENT_RECEIPT_ARTIFACT_DIGEST: ${{ inputs.current_attempt_receipt_artifact_digest }}
+          PARTIAL_APPROVAL: ${{ inputs.partial_approval }}
+          EXPIRED_ROLLBACK_APPROVAL: ${{ inputs.expired_rollback_approval }}
           PRE_SUBMISSION_FAILURE_APPROVAL: ${{ inputs.pre_submission_failure_approval }}
-        run: node scripts/deploy-exact-pages-artifact.mjs
+        run: node --experimental-strip-types scripts/deploy-exact-pages-artifact.mjs
       - name: Preserve deployment attempt evidence
         id: attempt-upload
         if: always() && hashFiles('deployment-attempt.json') != ''
