@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
+import { constants, readFileSync } from "node:fs";
+import { lstat, open, readFile, realpath, rm } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -61,6 +61,7 @@ interface GithubMetadata {
 
 export interface PublicationVerificationOptions {
   bundleDirectory: string;
+  manifestPath?: string;
   extractionDirectory?: string;
   metadata: GithubMetadata;
   operation: "promote" | "rollback" | "first-release-recovery";
@@ -87,6 +88,7 @@ export type PublicationApprovalOptions = Omit<PublicationVerificationOptions, "b
 
 interface ProtectedAdapterVerificationOptions {
   bundleDirectory: string;
+  manifestPath: string;
   stagedTarPath: string;
   expected: ProtectedApprovalSummary;
   actual: ProtectedFinalState;
@@ -99,6 +101,7 @@ interface ProtectedApprovalSummary {
   operation: PublicationVerificationOptions["operation"];
   promotionWorkflowSha: string;
   approvalExpiresAt: string;
+  minimumFreshUntil: string;
   releaseId: string;
   source: { runId: number; sourceSha: string; artifactId: number; artifactDigest: string; manifestSha256: string };
   recovery: { artifactId: number; artifactDigest: string; manifestSha256: string; releaseId: string };
@@ -125,6 +128,8 @@ export async function verifyProtectedAdapterBundle(options: ProtectedAdapterVeri
   };
   requireEqual("Operation", environment.OPERATION, expected.operation);
   requireEqual("Promotion workflow SHA", environment.EXPECTED_PROMOTION_WORKFLOW_SHA, expected.promotionWorkflowSha);
+  requireEqual("Approval expiry", environment.APPROVAL_EXPIRES_AT, expected.approvalExpiresAt);
+  requireEqual("Minimum freshness", environment.MINIMUM_FRESH_UNTIL || "NONE", expected.minimumFreshUntil);
   requireEqual("Release identity", environment.RELEASE_ID, expected.releaseId);
   requireEqual("Source artifact identity", Number(environment.SOURCE_ARTIFACT_ID), expected.source?.artifactId);
   requireEqual("Source artifact digest", environment.SOURCE_ARTIFACT_DIGEST, expected.source?.artifactDigest);
@@ -156,6 +161,7 @@ export async function verifyProtectedAdapterBundle(options: ProtectedAdapterVeri
   if (!sourceArtifact) throw new Error("Current source artifact metadata is unavailable.");
   const manifest = await verifyPublicationBundle({
     bundleDirectory: options.bundleDirectory,
+    manifestPath: options.manifestPath,
     metadata: {
       repository: { id: LIONLOG_REPOSITORY_ID, full_name: LIONLOG_REPOSITORY },
       main: { sha: actual.mainSha },
@@ -196,7 +202,8 @@ export async function verifyProtectedAdapterBundle(options: ProtectedAdapterVeri
 }
 
 export async function verifyPublicationBundle(options: PublicationVerificationOptions): Promise<PublicationReleaseManifest> {
-  const manifestBytes = await readFile(path.join(options.bundleDirectory, "release-manifest.json"));
+  const manifestPath = options.manifestPath ?? path.join(options.bundleDirectory, "release-manifest.json");
+  const manifestBytes = await readExactManifestBytes(manifestPath, options.bundleDirectory);
   if (sha256(manifestBytes) !== options.expectedManifestSha256) throw new Error("Release manifest digest mismatch.");
   const manifest = validatePublicationReleaseManifest(JSON.parse(manifestBytes.toString("utf8")));
   const computedReleaseId = computePublicationReleaseId({
@@ -256,6 +263,48 @@ export async function verifyPublicationBundle(options: PublicationVerificationOp
     }
   }
   return manifest;
+}
+
+async function readExactManifestBytes(manifestPath: string, bundleDirectory: string): Promise<Buffer> {
+  const canonicalPath = path.join(bundleDirectory, "release-manifest.json");
+  if (
+    manifestPath !== canonicalPath
+    || path.resolve(manifestPath) !== path.resolve(canonicalPath)
+    || path.basename(manifestPath) !== "release-manifest.json"
+  ) throw new Error("Configured release manifest path is not the exact canonical bundle manifest.");
+  const [manifestInfo, canonicalParent] = await Promise.all([lstat(manifestPath), realpath(bundleDirectory)]);
+  if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink()) throw new Error("Configured release manifest must be a regular non-symlink file.");
+  const manifestRealPath = await realpath(manifestPath);
+  if (manifestRealPath !== path.join(canonicalParent, "release-manifest.json")) {
+    throw new Error("Configured release manifest resolves through an unexpected path alias.");
+  }
+  const handle = await open(manifestPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const before = await handle.stat();
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    const finalInfo = await lstat(manifestPath);
+    const finalRealPath = await realpath(manifestPath);
+    if (
+      before.dev !== manifestInfo.dev
+      || before.ino !== manifestInfo.ino
+      || before.dev !== after.dev
+      || before.ino !== after.ino
+      || before.size !== after.size
+      || before.mtimeMs !== after.mtimeMs
+      || !finalInfo.isFile()
+      || finalInfo.isSymbolicLink()
+      || after.dev !== finalInfo.dev
+      || after.ino !== finalInfo.ino
+      || after.size !== finalInfo.size
+      || after.mtimeMs !== finalInfo.mtimeMs
+      || finalRealPath !== manifestRealPath
+      || bytes.byteLength !== after.size
+    ) throw new Error("Configured release manifest changed while it was being validated.");
+    return bytes;
+  } finally {
+    await handle.close();
+  }
 }
 
 export function validateApprovalAndProvenance(

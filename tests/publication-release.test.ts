@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -13,7 +13,7 @@ import { buildPsuSnapshot, validatePsuSnapshot, type PsuMenuSnapshot } from "../
 import { assertArtifactDigest, normalizeArtifactDigest } from "../scripts/artifact-digest.ts";
 import { parseArtifactZip } from "../scripts/artifact-zip.ts";
 import { computePublicationReleaseId, createPublicationBundle, sha256 } from "../scripts/create-publication-bundle.ts";
-import { deployExactPagesArtifact, executeProtectedAdapterGate } from "../scripts/deploy-exact-pages-artifact.mjs";
+import { deployExactPagesArtifact, executeProtectedAdapterGate, main as runProtectedAdapterMain } from "../scripts/deploy-exact-pages-artifact.mjs";
 import { createDeploymentReceipt } from "../scripts/create-deployment-receipt.mjs";
 import { executeFinalPromotionGate, readFinalPromotionState } from "../scripts/final-promotion-gate.mjs";
 import {
@@ -137,12 +137,60 @@ test("the protected workflow passes the canonical manifest into verification bef
   const workflow = await readFile(path.resolve(import.meta.dirname, "../.github/workflows/deploy-github-pages.yml"), "utf8");
   assert.doesNotMatch(workflow, /^\s+MANIFEST_PATH:/m);
   const finalStep = workflow.indexOf("- name: Perform final provenance, state, deadline, and freshness checks");
+  const deployJob = workflow.indexOf("\n  deploy:");
   const canonicalEnvironment = workflow.indexOf("RELEASE_MANIFEST_PATH: work/pages-deployment/source-bundle/release-manifest.json", finalStep);
   const verifier = workflow.indexOf("node scripts/verify-current-publication.mjs", finalStep);
   const deployment = workflow.indexOf("- name: Deploy exact staged artifact", finalStep);
+  const lockedInstall = workflow.indexOf("npm ci --ignore-scripts --omit=dev", deployJob);
   assert.ok(finalStep >= 0 && canonicalEnvironment > finalStep && verifier > canonicalEnvironment && deployment > verifier);
+  assert.ok(deployJob >= 0 && lockedInstall > deployJob && lockedInstall < deployment);
   assert.match(workflow, /PRE_SUBMISSION_FAILURE_APPROVAL: \$\{\{ inputs\.pre_submission_failure_approval \}\}/);
   assert.match(workflow, /authorization:\{partialApproval:\$partialApproval,expiredRollbackApproval:\$expiredRollbackApproval,preSubmissionFailureApproval:\$preSubmissionFailureApproval\}/);
+});
+
+test("the actual protected adapter command loads on a clean production-only install", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "lionlog-clean-adapter-"));
+  const repository = path.resolve(import.meta.dirname, "..");
+  await Promise.all([
+    cp(path.join(repository, "scripts"), path.join(root, "scripts"), { recursive: true }),
+    cp(path.join(repository, "infrastructure"), path.join(root, "infrastructure"), { recursive: true }),
+    cp(path.join(repository, "package.json"), path.join(root, "package.json")),
+    cp(path.join(repository, "package-lock.json"), path.join(root, "package-lock.json")),
+  ]);
+  const adapter = path.join(root, "scripts", "deploy-exact-pages-artifact.mjs");
+  await assert.rejects(executeFile(process.execPath, ["--experimental-strip-types", adapter], {
+    cwd: root,
+    env: { ...process.env, GITHUB_REPOSITORY: "invalid/offline-test" },
+  }), /ERR_MODULE_NOT_FOUND|Cannot find package 'zod'/);
+  const npmCandidates = [
+    process.env.npm_execpath,
+    path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
+    path.resolve(path.dirname(process.execPath), "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+  ].filter((value): value is string => Boolean(value));
+  let npmCli: string | undefined;
+  for (const candidate of npmCandidates) {
+    try { await access(candidate); npmCli = candidate; break; } catch { /* try the next standard Node layout */ }
+  }
+  assert.ok(npmCli, "npm_execpath must identify the locked installer used by the test runner");
+  await executeFile(process.execPath, [npmCli, "ci", "--ignore-scripts", "--omit=dev", "--offline"], { cwd: root, env: process.env });
+  await assert.rejects(executeFile(process.execPath, ["--experimental-strip-types", adapter], {
+    cwd: root,
+    env: { ...process.env, GITHUB_REPOSITORY: "invalid/offline-test" },
+  }), /restricted to a first-attempt manual run/);
+});
+
+test("publication verification rejects a symlinked canonical manifest", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "lionlog-manifest-symlink-"));
+  const source = path.join(root, "source.json");
+  const bundle = path.join(root, "bundle");
+  await mkdir(bundle);
+  await writeFile(source, "{}\n");
+  const manifestPath = path.join(bundle, "release-manifest.json");
+  await symlink(source, manifestPath, "file");
+  await assert.rejects(verifyPublicationBundle({
+    bundleDirectory: bundle,
+    manifestPath,
+  } as never), /non-symlink/);
 });
 
 test("recovery release bundle round-trips and rejects identity tampering", async () => {
@@ -310,8 +358,8 @@ test("the real protected adapter gate fully validates manifest semantics before 
     ciRun: metadata.ciRun,
     ciJobs: metadata.ciJobs,
     artifacts: [
-      metadata.artifact,
-      metadata.artifact,
+      { ...metadata.artifact, expires_at: "2026-09-07T14:00:00.000Z" },
+      { ...metadata.artifact, expires_at: "2026-09-07T14:00:00.000Z" },
       { id: 789, digest: stagedDigest, expired: false, workflow_run: { id: 321, head_sha: sourceSha, head_branch: "main", head_repository_id: 1_346_360_244 } },
     ],
   };
@@ -333,7 +381,192 @@ test("the real protected adapter gate fully validates manifest semantics before 
     PRE_SUBMISSION_FAILURE_APPROVAL: "NONE",
     CURRENT_RELEASE_ID: "NONE_FIRST_DEPLOYMENT",
     TARGET_RELEASE_ID: "NONE_FIRST_DEPLOYMENT",
+    APPROVAL_EXPIRES_AT: expected.approvalExpiresAt,
+    MINIMUM_FRESH_UNTIL: expected.minimumFreshUntil,
   });
+  const validCalls = { oidc: 0, submissions: 0 };
+  assert.equal(await executeProtectedAdapterGate({
+    expected: expectedBase,
+    bundleDirectory: bundle,
+    manifestPath,
+    stagedTarPath: path.join(bundle, "site.tar"),
+    environment: environmentFor(expectedBase),
+    readActual: async () => actual,
+    verifyCurrentState: async () => {},
+    clock: () => now.getTime(),
+    requestOidc: async () => { validCalls.oidc += 1; return "oidc"; },
+    submit: async () => { validCalls.submissions += 1; return "submitted"; },
+  }), "submitted");
+  assert.deepEqual(validCalls, { oidc: 1, submissions: 1 });
+
+  const summaryPath = path.join(root, "pre-approval-summary.json");
+  const attemptPath = path.join(root, "deployment-attempt.json");
+  const outputPath = path.join(root, "github-output.txt");
+  await writeFile(summaryPath, `${JSON.stringify(expectedBase)}\n`);
+  const mainEnvironment = {
+    ...environmentFor(expectedBase),
+    NODE_ENV: "test" as const,
+    GITHUB_REPOSITORY: "CrunchyBrunch/lionlog",
+    GITHUB_EVENT_NAME: "workflow_dispatch",
+    GITHUB_REF: "refs/heads/main",
+    GITHUB_RUN_ID: "321",
+    GITHUB_RUN_ATTEMPT: "1",
+    GITHUB_JOB: "deploy",
+    GITHUB_SHA: sourceSha,
+    GITHUB_TOKEN: "token",
+    RELEASE_MANIFEST_PATH: manifestPath,
+    PREAPPROVAL_SUMMARY_PATH: summaryPath,
+    DEPLOYMENT_ATTEMPT_PATH: attemptPath,
+    GITHUB_OUTPUT: outputPath,
+    CURRENT_RECEIPT_ARTIFACT_ID: "NONE_FIRST_DEPLOYMENT",
+    CURRENT_RECEIPT_ARTIFACT_DIGEST: "NONE_FIRST_DEPLOYMENT",
+    TARGET_RECEIPT_ARTIFACT_ID: "NONE_FIRST_DEPLOYMENT",
+    TARGET_RECEIPT_ARTIFACT_DIGEST: "NONE_FIRST_DEPLOYMENT",
+  };
+  const mainCalls = { oidc: 0, pagesPosts: 0 };
+  const pagesFetch = async (_input: URL | RequestInfo, init?: RequestInit) => {
+    if (init?.method === "POST") {
+      mainCalls.pagesPosts += 1;
+      return Response.json({
+        id: "deployment-main",
+        status_url: "https://api.github.com/repos/CrunchyBrunch/lionlog/pages/deployments/deployment-main/status",
+        page_url: "https://crunchybrunch.github.io/lionlog/",
+      });
+    }
+    return Response.json({ status: "succeed" });
+  };
+  await runProtectedAdapterMain({
+    environment: mainEnvironment,
+    fetchImpl: pagesFetch,
+    clock: () => now.getTime(),
+    wait: async () => {},
+    readActualImpl: async () => actual,
+    verifyCurrentStateImpl: async () => {},
+    requestOidcImpl: async () => { mainCalls.oidc += 1; return "oidc"; },
+    createLedgerImpl: async () => 77,
+    recordStatusImpl: async () => ({}),
+    stagedTarPath: path.join(bundle, "site.tar"),
+  } as never);
+  assert.deepEqual(mainCalls, { oidc: 1, pagesPosts: 1 });
+  assert.match(await readFile(outputPath, "utf8"), /deployment_id=deployment-main/);
+
+  let mainDeadlineClock = Date.parse("2026-09-07T12:59:58.000Z");
+  const mainDeadlineCalls = { oidc: 0, pagesPosts: 0 };
+  await assert.rejects(runProtectedAdapterMain({
+    environment: { ...mainEnvironment, GITHUB_OUTPUT: path.join(root, "deadline-output.txt") },
+    fetchImpl: async () => { mainDeadlineCalls.pagesPosts += 1; return Response.json({}); },
+    clock: () => mainDeadlineClock,
+    wait: async () => {},
+    readActualImpl: async () => actual,
+    verifyCurrentStateImpl: async () => {},
+    requestOidcImpl: async () => { mainDeadlineCalls.oidc += 1; return "oidc"; },
+    createLedgerImpl: async () => { mainDeadlineClock = Date.parse("2026-09-07T13:00:01.000Z"); return 78; },
+    recordStatusImpl: async () => ({}),
+    stagedTarPath: path.join(bundle, "site.tar"),
+  } as never), /expired before submission/);
+  assert.deepEqual(mainDeadlineCalls, { oidc: 1, pagesPosts: 0 });
+
+  const wrongPath = path.join(bundle, "wrong.json");
+  await writeFile(wrongPath, "{}\n");
+  const wrongPathCalls = { oidc: 0, submissions: 0 };
+  await assert.rejects(executeProtectedAdapterGate({
+    expected: expectedBase,
+    bundleDirectory: bundle,
+    manifestPath: wrongPath,
+    stagedTarPath: path.join(bundle, "site.tar"),
+    environment: environmentFor(expectedBase),
+    readActual: async () => actual,
+    verifyCurrentState: async () => {},
+    clock: () => now.getTime(),
+    requestOidc: async () => { wrongPathCalls.oidc += 1; return "oidc"; },
+    submit: async () => { wrongPathCalls.submissions += 1; return "submitted"; },
+  }), /exact canonical bundle manifest/);
+  assert.deepEqual(wrongPathCalls, { oidc: 0, submissions: 0 });
+
+  const wrongDigestExpected = structuredClone(expectedBase);
+  wrongDigestExpected.source.manifestSha256 = "0".repeat(64);
+  wrongDigestExpected.recovery.manifestSha256 = "0".repeat(64);
+  const wrongDigestCalls = { oidc: 0, submissions: 0 };
+  await assert.rejects(executeProtectedAdapterGate({
+    expected: wrongDigestExpected,
+    bundleDirectory: bundle,
+    manifestPath,
+    stagedTarPath: path.join(bundle, "site.tar"),
+    environment: environmentFor(wrongDigestExpected),
+    readActual: async () => actual,
+    verifyCurrentState: async () => {},
+    clock: () => now.getTime(),
+    requestOidc: async () => { wrongDigestCalls.oidc += 1; return "oidc"; },
+    submit: async () => { wrongDigestCalls.submissions += 1; return "submitted"; },
+  }), /manifest digest mismatch/i);
+  assert.deepEqual(wrongDigestCalls, { oidc: 0, submissions: 0 });
+
+  const mismatchedDeadline = { ...environmentFor(expectedBase), APPROVAL_EXPIRES_AT: "2099-01-01T00:00:00.000Z" };
+  const deadlineCalls = { oidc: 0, submissions: 0 };
+  await assert.rejects(executeProtectedAdapterGate({
+    expected: expectedBase,
+    bundleDirectory: bundle,
+    manifestPath,
+    stagedTarPath: path.join(bundle, "site.tar"),
+    environment: mismatchedDeadline,
+    readActual: async () => actual,
+    verifyCurrentState: async () => {},
+    clock: () => now.getTime(),
+    requestOidc: async () => { deadlineCalls.oidc += 1; return "oidc"; },
+    submit: async () => { deadlineCalls.submissions += 1; return "submitted"; },
+  }), /Approval expiry differs/);
+  assert.deepEqual(deadlineCalls, { oidc: 0, submissions: 0 });
+
+  let gateClock = Date.parse("2026-09-07T12:59:58.000Z");
+  let pagesPosts = 0;
+  let deadlineOidc = 0;
+  await assert.rejects(executeProtectedAdapterGate({
+    expected: expectedBase,
+    bundleDirectory: bundle,
+    manifestPath,
+    stagedTarPath: path.join(bundle, "site.tar"),
+    environment: environmentFor(expectedBase),
+    readActual: async () => actual,
+    verifyCurrentState: async () => {},
+    clock: () => gateClock,
+    requestOidc: async () => { deadlineOidc += 1; return "oidc"; },
+    submit: async () => {
+      gateClock = Date.parse("2026-09-07T13:00:01.000Z");
+      return deployExactPagesArtifact({
+        artifactId: 789,
+        buildVersion: sourceSha,
+        repositoryDeploymentId: 77,
+        githubToken: "token",
+        oidcToken: "oidc",
+        approvalExpiresAt: expectedBase.approvalExpiresAt,
+        now: () => gateClock,
+        fetchImpl: async () => { pagesPosts += 1; return Response.json({}); },
+      });
+    },
+  }), /expired before submission/);
+  assert.equal(deadlineOidc, 1);
+  assert.equal(pagesPosts, 0);
+
+  const changedAfterOidcCalls = { oidc: 0, submissions: 0 };
+  await assert.rejects(executeProtectedAdapterGate({
+    expected: expectedBase,
+    bundleDirectory: bundle,
+    manifestPath,
+    stagedTarPath: path.join(bundle, "site.tar"),
+    environment: environmentFor(expectedBase),
+    readActual: async () => actual,
+    verifyCurrentState: async () => {},
+    clock: () => now.getTime(),
+    requestOidc: async () => {
+      changedAfterOidcCalls.oidc += 1;
+      await writeFile(manifestPath, "{}\n");
+      return "oidc";
+    },
+    submit: async () => { changedAfterOidcCalls.submissions += 1; return "submitted"; },
+  }));
+  assert.deepEqual(changedAfterOidcCalls, { oidc: 1, submissions: 0 });
+  await writeFile(manifestPath, originalBytes);
+
   const invalidManifests = [
     {},
     { ...manifest, releaseId: "0".repeat(64) },
@@ -350,6 +583,7 @@ test("the real protected adapter gate fully validates manifest semantics before 
     await assert.rejects(executeProtectedAdapterGate({
       expected,
       bundleDirectory: bundle,
+      manifestPath,
       stagedTarPath: path.join(bundle, "site.tar"),
       environment: environmentFor(expected),
       readActual: async () => actual,

@@ -40,13 +40,14 @@ export async function executeFinalPromotionGate({ expected, readActual, verifyAp
     const actual = await readActual();
     const now = new Date(clock());
     validateFinalPromotionState(expected, actual, now);
-    await verifyApprovedBundle(actual, now);
-    await verifyCurrentState();
+    const approvedBundle = await verifyApprovedBundle(actual, now);
+    await verifyCurrentState(approvedBundle);
+    return approvedBundle;
   };
   await checkpoint();
   const oidcToken = await requestOidc();
-  await checkpoint();
-  return submit(oidcToken);
+  const approvedBundle = await checkpoint();
+  return submit(oidcToken, approvedBundle);
 }
 
 export async function readFinalPromotionState({ expected, githubToken, checkoutSha, fetchImpl = fetch }) {

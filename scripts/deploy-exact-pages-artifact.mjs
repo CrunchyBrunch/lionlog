@@ -8,7 +8,6 @@ import {
 } from "./publication-deployment-ledger.mjs";
 import { executeFinalPromotionGate, readFinalPromotionState } from "./final-promotion-gate.mjs";
 import { verifyCurrentPublication } from "./verify-current-publication.mjs";
-import { readReleaseManifestFromEnvironment } from "./publication-environment-contract.mjs";
 import { verifyProtectedAdapterBundle } from "./verify-publication-bundle.ts";
 
 const REPOSITORY = "CrunchyBrunch/lionlog";
@@ -216,6 +215,7 @@ function assertReceiptMatchesApprovalSummary(summary, receipt, artifactId, artif
 export function executeProtectedAdapterGate({
   expected,
   bundleDirectory,
+  manifestPath,
   stagedTarPath,
   environment,
   readActual,
@@ -229,6 +229,7 @@ export function executeProtectedAdapterGate({
     readActual,
     verifyApprovedBundle: (actual, verificationTime) => verifyProtectedAdapterBundle({
       bundleDirectory,
+      manifestPath,
       stagedTarPath,
       expected,
       actual,
@@ -242,44 +243,53 @@ export function executeProtectedAdapterGate({
   });
 }
 
-export async function main() {
+export async function main({
+  environment = process.env,
+  fetchImpl = fetch,
+  clock = () => Date.now(),
+  wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  readActualImpl,
+  verifyCurrentStateImpl,
+  requestOidcImpl,
+  createLedgerImpl = createRepositoryDeploymentLedger,
+  recordStatusImpl = recordRepositoryDeploymentStatus,
+  stagedTarPath = "work/pages-deployment/staged/site.tar",
+} = {}) {
   if (
-    process.env.GITHUB_REPOSITORY !== REPOSITORY
-    || process.env.GITHUB_EVENT_NAME !== "workflow_dispatch"
-    || process.env.GITHUB_REF !== "refs/heads/main"
-    || process.env.GITHUB_RUN_ATTEMPT !== "1"
+    environment.GITHUB_REPOSITORY !== REPOSITORY
+    || environment.GITHUB_EVENT_NAME !== "workflow_dispatch"
+    || environment.GITHUB_REF !== "refs/heads/main"
+    || environment.GITHUB_RUN_ATTEMPT !== "1"
   ) throw new Error("Pages deployment is restricted to a first-attempt manual run on LionLog main.");
-  if (process.env.EXPECTED_PROMOTION_WORKFLOW_SHA !== process.env.GITHUB_SHA) {
+  if (environment.EXPECTED_PROMOTION_WORKFLOW_SHA !== environment.GITHUB_SHA) {
     throw new Error("Promotion workflow SHA is not the explicitly approved SHA.");
   }
-  const approvalExpiresAt = process.env.APPROVAL_EXPIRES_AT ?? "";
-  const minimumFreshUntil = process.env.MINIMUM_FRESH_UNTIL || undefined;
-  const attemptPath = process.env.DEPLOYMENT_ATTEMPT_PATH;
+  const attemptPath = environment.DEPLOYMENT_ATTEMPT_PATH;
   if (!attemptPath) throw new Error("DEPLOYMENT_ATTEMPT_PATH is unavailable.");
-  const summaryPath = process.env.PREAPPROVAL_SUMMARY_PATH;
+  const summaryPath = environment.PREAPPROVAL_SUMMARY_PATH;
   if (!summaryPath) throw new Error("Final promotion evidence paths are unavailable.");
   const expected = JSON.parse(await readFile(summaryPath, "utf8"));
-  const sourceManifest = await readReleaseManifestFromEnvironment(process.env);
-  if (expected?.authorization?.preSubmissionFailureApproval !== (process.env.PRE_SUBMISSION_FAILURE_APPROVAL ?? "NONE")) {
+  const approvalExpiresAt = expected.approvalExpiresAt;
+  if (expected?.authorization?.preSubmissionFailureApproval !== (environment.PRE_SUBMISSION_FAILURE_APPROVAL ?? "NONE")) {
     throw new Error("Pre-submission reconciliation approval differs from the retained approval summary.");
   }
   const readReceipt = async (releaseId, relativePath) => releaseId === "NONE_FIRST_DEPLOYMENT"
     ? null
     : JSON.parse(await readFile(relativePath, "utf8"));
-  const currentReceipt = await readReceipt(process.env.CURRENT_RELEASE_ID, "work/pages-deployment/current/deployment-receipt.json");
-  const rollbackTargetReceipt = await readReceipt(process.env.TARGET_RELEASE_ID, "work/pages-deployment/target/deployment-receipt.json");
+  const currentReceipt = await readReceipt(environment.CURRENT_RELEASE_ID, "work/pages-deployment/current/deployment-receipt.json");
+  const rollbackTargetReceipt = await readReceipt(environment.TARGET_RELEASE_ID, "work/pages-deployment/target/deployment-receipt.json");
   assertReceiptMatchesApprovalSummary(
     expected.currentAttempt,
     currentReceipt,
-    process.env.CURRENT_RECEIPT_ARTIFACT_ID ?? "",
-    process.env.CURRENT_RECEIPT_ARTIFACT_DIGEST ?? "",
+    environment.CURRENT_RECEIPT_ARTIFACT_ID ?? "",
+    environment.CURRENT_RECEIPT_ARTIFACT_DIGEST ?? "",
     "Current-attempt",
   );
   assertReceiptMatchesApprovalSummary(
     expected.rollbackTarget,
     rollbackTargetReceipt,
-    process.env.TARGET_RECEIPT_ARTIFACT_ID ?? "",
-    process.env.TARGET_RECEIPT_ARTIFACT_DIGEST ?? "",
+    environment.TARGET_RECEIPT_ARTIFACT_ID ?? "",
+    environment.TARGET_RECEIPT_ARTIFACT_DIGEST ?? "",
     "Rollback-target",
   );
   const { rename, writeFile } = await import("node:fs/promises");
@@ -288,82 +298,90 @@ export async function main() {
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`);
     await rename(temporary, attemptPath);
   };
-  const githubToken = process.env.GITHUB_TOKEN ?? "";
+  const githubToken = environment.GITHUB_TOKEN ?? "";
+  const manifestPath = environment.RELEASE_MANIFEST_PATH ?? "";
   const result = await executeProtectedAdapterGate({
     expected,
-    bundleDirectory: path.dirname(process.env.RELEASE_MANIFEST_PATH ?? ""),
-    stagedTarPath: "work/pages-deployment/staged/site.tar",
-    environment: process.env,
-    readActual: () => readFinalPromotionState({ expected, githubToken, checkoutSha: process.env.GITHUB_SHA, fetchImpl: fetch }),
-    verifyCurrentState: () => verifyCurrentPublication({
-      operation: process.env.OPERATION ?? "",
+    bundleDirectory: path.dirname(manifestPath),
+    manifestPath,
+    stagedTarPath,
+    environment,
+    readActual: readActualImpl ?? (() => readFinalPromotionState({ expected, githubToken, checkoutSha: environment.GITHUB_SHA, fetchImpl })),
+    verifyCurrentState: verifyCurrentStateImpl ?? ((sourceManifest) => verifyCurrentPublication({
+      operation: environment.OPERATION ?? "",
       currentReceipt,
       rollbackTargetReceipt,
       sourceManifest,
       sourceIdentity: {
-        artifactId: Number(process.env.SOURCE_ARTIFACT_ID),
-        artifactDigest: process.env.SOURCE_ARTIFACT_DIGEST ?? "",
-        manifestSha256: process.env.SOURCE_MANIFEST_DIGEST ?? "",
+        artifactId: Number(environment.SOURCE_ARTIFACT_ID),
+        artifactDigest: environment.SOURCE_ARTIFACT_DIGEST ?? "",
+        manifestSha256: environment.SOURCE_MANIFEST_DIGEST ?? "",
       },
-      currentReceiptArtifactDigest: process.env.CURRENT_RECEIPT_ARTIFACT_DIGEST ?? "NONE_FIRST_DEPLOYMENT",
-      currentReceiptArtifactId: process.env.CURRENT_RECEIPT_ARTIFACT_ID === "NONE_FIRST_DEPLOYMENT" ? "NONE_FIRST_DEPLOYMENT" : Number(process.env.CURRENT_RECEIPT_ARTIFACT_ID),
-      preSubmissionFailureApproval: process.env.PRE_SUBMISSION_FAILURE_APPROVAL ?? "NONE",
+      currentReceiptArtifactDigest: environment.CURRENT_RECEIPT_ARTIFACT_DIGEST ?? "NONE_FIRST_DEPLOYMENT",
+      currentReceiptArtifactId: environment.CURRENT_RECEIPT_ARTIFACT_ID === "NONE_FIRST_DEPLOYMENT" ? "NONE_FIRST_DEPLOYMENT" : Number(environment.CURRENT_RECEIPT_ARTIFACT_ID),
+      preSubmissionFailureApproval: environment.PRE_SUBMISSION_FAILURE_APPROVAL ?? "NONE",
       currentPromotion: {
-        runId: Number(process.env.GITHUB_RUN_ID),
-        runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
-        workflowSha: process.env.GITHUB_SHA ?? "",
-        job: process.env.GITHUB_JOB ?? "",
+        runId: Number(environment.GITHUB_RUN_ID),
+        runAttempt: Number(environment.GITHUB_RUN_ATTEMPT),
+        workflowSha: environment.GITHUB_SHA ?? "",
+        job: environment.GITHUB_JOB ?? "",
       },
       token: githubToken,
-      fetchImpl: fetch,
-    }),
-    clock: () => Date.now(),
-    requestOidc: () => requestOidcToken({
-      requestUrl: process.env.ACTIONS_ID_TOKEN_REQUEST_URL ?? "",
-      requestToken: process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN ?? "",
-    }),
-    submit: async (oidcToken) => {
+      fetchImpl,
+    })),
+    clock,
+    requestOidc: requestOidcImpl ?? (() => requestOidcToken({
+      requestUrl: environment.ACTIONS_ID_TOKEN_REQUEST_URL ?? "",
+      requestToken: environment.ACTIONS_ID_TOKEN_REQUEST_TOKEN ?? "",
+      fetchImpl,
+    })),
+    submit: async (oidcToken, sourceManifest) => {
       const payload = publicationLedgerPayload({
-        promotionRunId: Number(process.env.GITHUB_RUN_ID),
-        runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
-        releaseId: process.env.RELEASE_ID ?? "",
-        sourceArtifactId: Number(process.env.SOURCE_ARTIFACT_ID),
-        stagedArtifactId: Number(process.env.STAGED_ARTIFACT_ID),
+        promotionRunId: Number(environment.GITHUB_RUN_ID),
+        runAttempt: Number(environment.GITHUB_RUN_ATTEMPT),
+        releaseId: sourceManifest.releaseId,
+        sourceArtifactId: expected.source.artifactId,
+        stagedArtifactId: expected.staged.artifactId,
       });
-      const repositoryDeploymentId = await createRepositoryDeploymentLedger({
+      const repositoryDeploymentId = await createLedgerImpl({
         token: githubToken,
-        workflowSha: process.env.GITHUB_SHA ?? "",
+        workflowSha: expected.promotionWorkflowSha,
         payload,
+        fetchImpl,
       });
-      await recordRepositoryDeploymentStatus({
+      await recordStatusImpl({
         token: githubToken,
         repositoryDeploymentId,
         state: "in_progress",
-        runId: Number(process.env.GITHUB_RUN_ID),
+        runId: Number(environment.GITHUB_RUN_ID),
+        fetchImpl,
       });
-      const recordAccepted = async ({ pagesDeploymentId }) => recordRepositoryDeploymentStatus({
+      const recordAccepted = async ({ pagesDeploymentId }) => recordStatusImpl({
         token: githubToken,
         repositoryDeploymentId,
         state: "in_progress",
         pagesDeploymentId,
-        runId: Number(process.env.GITHUB_RUN_ID),
+        runId: Number(environment.GITHUB_RUN_ID),
+        fetchImpl,
       });
       const deployment = await deployExactPagesArtifact({
-        artifactId: Number(process.env.STAGED_ARTIFACT_ID),
-        buildVersion: process.env.GITHUB_SHA ?? "",
+        artifactId: expected.staged.artifactId,
+        buildVersion: expected.promotionWorkflowSha,
         githubToken,
         oidcToken,
         approvalExpiresAt,
-        minimumFreshUntil,
+        minimumFreshUntil: sourceManifest.menu?.earliestFreshUntil,
         repositoryDeploymentId,
         recordAttempt,
         recordAccepted,
-        now: () => Date.now(),
+        now: clock,
+        wait,
+        fetchImpl,
       });
       return { ...deployment, repositoryDeploymentId };
     },
   });
-  const output = process.env.GITHUB_OUTPUT;
+  const output = environment.GITHUB_OUTPUT;
   if (!output) throw new Error("GITHUB_OUTPUT is unavailable.");
   const { appendFile } = await import("node:fs/promises");
   await appendFile(output, `repository_deployment_id=${result.repositoryDeploymentId}\ndeployment_id=${result.deploymentId}\npage_url=${result.pageUrl}\nstatus=${result.status}\n`);

@@ -548,6 +548,11 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Install locked production validation dependencies
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+        run: npm ci --ignore-scripts --omit=dev
       - name: Re-download the exact retained approval summary
         shell: bash
         env:
