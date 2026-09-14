@@ -1,5 +1,6 @@
 import { pathToFileURL } from "node:url";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import {
   createRepositoryDeploymentLedger,
   publicationLedgerPayload,
@@ -7,6 +8,11 @@ import {
 } from "./publication-deployment-ledger.mjs";
 import { executeFinalPromotionGate, readFinalPromotionState } from "./final-promotion-gate.mjs";
 import { verifyCurrentPublication } from "./verify-current-publication.mjs";
+import {
+  assertManifestFileIdentity,
+  verifyManifestFileIdentity,
+  verifyProtectedAdapterBundle,
+} from "./verify-publication-bundle.ts";
 
 const REPOSITORY = "CrunchyBrunch/lionlog";
 const API_ROOT = "https://api.github.com";
@@ -23,10 +29,14 @@ export async function deployExactPagesArtifact({
   timeoutMs = 10 * 60_000,
   approvalExpiresAt,
   minimumFreshUntil = undefined,
+  rollbackRetainUntil = undefined,
+  expiredRollbackApproval = "NONE",
+  sourceManifestSha256 = undefined,
   repositoryDeploymentId,
   now = () => Date.now(),
   recordAttempt = async (value) => { void value; },
   recordAccepted = async (value) => { void value; },
+  verifyBeforeSubmission = async () => {},
 }) {
   if (!Number.isSafeInteger(artifactId) || artifactId <= 0) throw new Error("Pages artifact ID is invalid.");
   if (!/^[a-f0-9]{40}$/.test(buildVersion)) throw new Error("Pages build version must be an exact Git SHA.");
@@ -38,12 +48,26 @@ export async function deployExactPagesArtifact({
     if (!Number.isFinite(Date.parse(approvalExpiresAt ?? "")) || Date.parse(approvalExpiresAt) <= current) {
       throw new Error("Pages approval expired before submission.");
     }
-    if (minimumFreshUntil && Date.parse(minimumFreshUntil) < current + 15 * 60_000) {
+    if (minimumFreshUntil && (!Number.isFinite(Date.parse(minimumFreshUntil)) || Date.parse(minimumFreshUntil) < current + 15 * 60_000)) {
       throw new Error("Live release freshness margin elapsed before submission.");
+    }
+    if (rollbackRetainUntil) {
+      const retainUntil = Date.parse(rollbackRetainUntil);
+      if (!Number.isFinite(retainUntil) || !/^[a-f0-9]{64}$/.test(sourceManifestSha256 ?? "")) {
+        throw new Error("Live rollback retention authority is invalid before submission.");
+      }
+      const requiredWaiver = `ALLOW_EXPIRED_ROLLBACK:${sourceManifestSha256}`;
+      if (retainUntil < current && expiredRollbackApproval !== requiredWaiver) {
+        throw new Error("Expired rollback lacks exact approval before submission.");
+      }
+      if (retainUntil >= current && expiredRollbackApproval !== "NONE") {
+        throw new Error("Unexpired rollback carries an invalid expiry waiver before submission.");
+      }
     }
   };
   const assertBeforeSubmission = async () => {
     try {
+      await verifyBeforeSubmission();
       assertTemporalAuthorization();
     } catch (error) {
       await recordAttempt(evidence({
@@ -51,7 +75,7 @@ export async function deployExactPagesArtifact({
         artifactId,
         buildVersion,
         deploymentId: null,
-        status: "authorization-expired",
+        status: "authorization-rejected",
         uncertain: false,
         recordedAt: new Date(now()).toISOString(),
       }));
@@ -176,100 +200,222 @@ function apiHeaders(token) {
   };
 }
 
-async function main() {
+function assertReceiptMatchesApprovalSummary(summary, receipt, artifactId, artifactDigest, label) {
+  if (summary?.releaseId === "NONE_FIRST_DEPLOYMENT") {
+    if (receipt !== null || artifactId !== "NONE_FIRST_DEPLOYMENT" || artifactDigest !== "NONE_FIRST_DEPLOYMENT") {
+      throw new Error(`${label} first-deployment sentinel is inconsistent.`);
+    }
+    return;
+  }
+  if (receipt === null) throw new Error(`${label} receipt is unavailable.`);
+  const expected = {
+    releaseId: receipt.releaseId,
+    repositoryDeploymentId: receipt.repositoryDeployment.id,
+    pagesDeploymentId: receipt.deploymentId,
+    attemptPhase: receipt.attemptPhase,
+    repositoryState: receipt.repositoryDeployment.state,
+    repositoryStatusRecorded: receipt.repositoryDeployment.statusRecorded,
+    pagesStatus: receipt.pagesStatus,
+    markerVerified: receipt.markerVerified,
+    publicProductVerified: receipt.publicProductVerified,
+    reconciliation: receipt.reconciliation,
+    knownGood: receipt.knownGood,
+    uncertain: receipt.uncertain,
+    receipt: {
+      id: Number(artifactId),
+      digest: artifactDigest,
+      runId: receipt.promotion.runId,
+      headSha: receipt.promotion.workflowSha,
+      role: label === "Current-attempt" ? "current-attempt-receipt" : "rollback-target-receipt",
+    },
+  };
+  if (JSON.stringify(summary) !== JSON.stringify(expected)) {
+    throw new Error(`${label} receipt differs from the retained approval summary.`);
+  }
+}
+
+export function executeProtectedAdapterGate({
+  expected,
+  bundleDirectory,
+  manifestPath,
+  stagedTarPath,
+  environment,
+  readActual,
+  verifyCurrentState,
+  clock = () => Date.now(),
+  requestOidc,
+  submit,
+}) {
+  let initialManifestIdentity;
+  return executeFinalPromotionGate({
+    expected,
+    readActual,
+    verifyApprovedBundle: async (actual, verificationTime) => {
+      const verified = await verifyProtectedAdapterBundle({
+        bundleDirectory,
+        manifestPath,
+        stagedTarPath,
+        expected,
+        actual,
+        environment,
+        now: verificationTime,
+      });
+      if (initialManifestIdentity) assertManifestFileIdentity(initialManifestIdentity, verified.manifestIdentity);
+      else initialManifestIdentity = verified.manifestIdentity;
+      return verified;
+    },
+    verifyCurrentState: (verified) => verifyCurrentState(verified.manifest),
+    clock,
+    requestOidc,
+    submit: (oidcToken, verified) => submit(oidcToken, verified.manifest, verified.manifestIdentity),
+  });
+}
+
+export async function main({
+  environment = process.env,
+  fetchImpl = fetch,
+  clock = () => Date.now(),
+  wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  readActualImpl,
+  verifyCurrentStateImpl,
+  requestOidcImpl,
+  createLedgerImpl = createRepositoryDeploymentLedger,
+  recordStatusImpl = recordRepositoryDeploymentStatus,
+  stagedTarPath = "work/pages-deployment/staged/site.tar",
+} = {}) {
   if (
-    process.env.GITHUB_REPOSITORY !== REPOSITORY
-    || process.env.GITHUB_EVENT_NAME !== "workflow_dispatch"
-    || process.env.GITHUB_REF !== "refs/heads/main"
-    || process.env.GITHUB_RUN_ATTEMPT !== "1"
+    environment.GITHUB_REPOSITORY !== REPOSITORY
+    || environment.GITHUB_EVENT_NAME !== "workflow_dispatch"
+    || environment.GITHUB_REF !== "refs/heads/main"
+    || environment.GITHUB_RUN_ATTEMPT !== "1"
   ) throw new Error("Pages deployment is restricted to a first-attempt manual run on LionLog main.");
-  if (process.env.EXPECTED_PROMOTION_WORKFLOW_SHA !== process.env.GITHUB_SHA) {
+  if (environment.EXPECTED_PROMOTION_WORKFLOW_SHA !== environment.GITHUB_SHA) {
     throw new Error("Promotion workflow SHA is not the explicitly approved SHA.");
   }
-  const approvalExpiresAt = process.env.APPROVAL_EXPIRES_AT ?? "";
-  const minimumFreshUntil = process.env.MINIMUM_FRESH_UNTIL || undefined;
-  const attemptPath = process.env.DEPLOYMENT_ATTEMPT_PATH;
+  const attemptPath = environment.DEPLOYMENT_ATTEMPT_PATH;
   if (!attemptPath) throw new Error("DEPLOYMENT_ATTEMPT_PATH is unavailable.");
-  const summaryPath = process.env.PREAPPROVAL_SUMMARY_PATH;
-  const sourceManifestPath = process.env.RELEASE_MANIFEST_PATH;
-  if (!summaryPath || !sourceManifestPath) throw new Error("Final promotion evidence paths are unavailable.");
+  const summaryPath = environment.PREAPPROVAL_SUMMARY_PATH;
+  if (!summaryPath) throw new Error("Final promotion evidence paths are unavailable.");
   const expected = JSON.parse(await readFile(summaryPath, "utf8"));
-  const sourceManifest = JSON.parse(await readFile(sourceManifestPath, "utf8"));
+  const approvalExpiresAt = expected.approvalExpiresAt;
+  if (expected?.authorization?.preSubmissionFailureApproval !== (environment.PRE_SUBMISSION_FAILURE_APPROVAL ?? "NONE")) {
+    throw new Error("Pre-submission reconciliation approval differs from the retained approval summary.");
+  }
   const readReceipt = async (releaseId, relativePath) => releaseId === "NONE_FIRST_DEPLOYMENT"
     ? null
     : JSON.parse(await readFile(relativePath, "utf8"));
-  const currentReceipt = await readReceipt(process.env.CURRENT_RELEASE_ID, "work/pages-deployment/current/deployment-receipt.json");
-  const rollbackTargetReceipt = await readReceipt(process.env.TARGET_RELEASE_ID, "work/pages-deployment/target/deployment-receipt.json");
+  const currentReceipt = await readReceipt(environment.CURRENT_RELEASE_ID, "work/pages-deployment/current/deployment-receipt.json");
+  const rollbackTargetReceipt = await readReceipt(environment.TARGET_RELEASE_ID, "work/pages-deployment/target/deployment-receipt.json");
+  assertReceiptMatchesApprovalSummary(
+    expected.currentAttempt,
+    currentReceipt,
+    environment.CURRENT_RECEIPT_ARTIFACT_ID ?? "",
+    environment.CURRENT_RECEIPT_ARTIFACT_DIGEST ?? "",
+    "Current-attempt",
+  );
+  assertReceiptMatchesApprovalSummary(
+    expected.rollbackTarget,
+    rollbackTargetReceipt,
+    environment.TARGET_RECEIPT_ARTIFACT_ID ?? "",
+    environment.TARGET_RECEIPT_ARTIFACT_DIGEST ?? "",
+    "Rollback-target",
+  );
   const { rename, writeFile } = await import("node:fs/promises");
   const recordAttempt = async (value) => {
     const temporary = `${attemptPath}.tmp`;
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`);
     await rename(temporary, attemptPath);
   };
-  const githubToken = process.env.GITHUB_TOKEN ?? "";
-  const result = await executeFinalPromotionGate({
+  const githubToken = environment.GITHUB_TOKEN ?? "";
+  const manifestPath = environment.RELEASE_MANIFEST_PATH ?? "";
+  const result = await executeProtectedAdapterGate({
     expected,
-    readActual: () => readFinalPromotionState({ expected, githubToken, checkoutSha: process.env.GITHUB_SHA, fetchImpl: fetch }),
-    verifyCurrentState: () => verifyCurrentPublication({
-      operation: process.env.OPERATION ?? "",
+    bundleDirectory: path.dirname(manifestPath),
+    manifestPath,
+    stagedTarPath,
+    environment,
+    readActual: readActualImpl ?? (() => readFinalPromotionState({ expected, githubToken, checkoutSha: environment.GITHUB_SHA, fetchImpl })),
+    verifyCurrentState: verifyCurrentStateImpl ?? ((sourceManifest) => verifyCurrentPublication({
+      operation: environment.OPERATION ?? "",
       currentReceipt,
       rollbackTargetReceipt,
       sourceManifest,
       sourceIdentity: {
-        artifactId: Number(process.env.SOURCE_ARTIFACT_ID),
-        artifactDigest: process.env.SOURCE_ARTIFACT_DIGEST ?? "",
-        manifestSha256: process.env.SOURCE_MANIFEST_DIGEST ?? "",
+        artifactId: Number(environment.SOURCE_ARTIFACT_ID),
+        artifactDigest: environment.SOURCE_ARTIFACT_DIGEST ?? "",
+        manifestSha256: environment.SOURCE_MANIFEST_DIGEST ?? "",
+      },
+      currentReceiptArtifactDigest: environment.CURRENT_RECEIPT_ARTIFACT_DIGEST ?? "NONE_FIRST_DEPLOYMENT",
+      currentReceiptArtifactId: environment.CURRENT_RECEIPT_ARTIFACT_ID === "NONE_FIRST_DEPLOYMENT" ? "NONE_FIRST_DEPLOYMENT" : Number(environment.CURRENT_RECEIPT_ARTIFACT_ID),
+      preSubmissionFailureApproval: environment.PRE_SUBMISSION_FAILURE_APPROVAL ?? "NONE",
+      currentPromotion: {
+        runId: Number(environment.GITHUB_RUN_ID),
+        runAttempt: Number(environment.GITHUB_RUN_ATTEMPT),
+        workflowSha: environment.GITHUB_SHA ?? "",
+        job: environment.GITHUB_JOB ?? "",
       },
       token: githubToken,
-      fetchImpl: fetch,
-    }),
-    clock: () => Date.now(),
-    requestOidc: () => requestOidcToken({
-      requestUrl: process.env.ACTIONS_ID_TOKEN_REQUEST_URL ?? "",
-      requestToken: process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN ?? "",
-    }),
-    submit: async (oidcToken) => {
+      fetchImpl,
+    })),
+    clock,
+    requestOidc: requestOidcImpl ?? (() => requestOidcToken({
+      requestUrl: environment.ACTIONS_ID_TOKEN_REQUEST_URL ?? "",
+      requestToken: environment.ACTIONS_ID_TOKEN_REQUEST_TOKEN ?? "",
+      fetchImpl,
+    })),
+    submit: async (oidcToken, sourceManifest, manifestIdentity) => {
       const payload = publicationLedgerPayload({
-        promotionRunId: Number(process.env.GITHUB_RUN_ID),
-        runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
-        releaseId: process.env.RELEASE_ID ?? "",
-        sourceArtifactId: Number(process.env.SOURCE_ARTIFACT_ID),
-        stagedArtifactId: Number(process.env.STAGED_ARTIFACT_ID),
+        promotionRunId: Number(environment.GITHUB_RUN_ID),
+        runAttempt: Number(environment.GITHUB_RUN_ATTEMPT),
+        releaseId: sourceManifest.releaseId,
+        sourceArtifactId: expected.source.artifactId,
+        stagedArtifactId: expected.staged.artifactId,
       });
-      const repositoryDeploymentId = await createRepositoryDeploymentLedger({
+      const repositoryDeploymentId = await createLedgerImpl({
         token: githubToken,
-        workflowSha: process.env.GITHUB_SHA ?? "",
+        workflowSha: expected.promotionWorkflowSha,
         payload,
+        fetchImpl,
       });
-      await recordRepositoryDeploymentStatus({
+      await recordStatusImpl({
         token: githubToken,
         repositoryDeploymentId,
         state: "in_progress",
-        runId: Number(process.env.GITHUB_RUN_ID),
+        runId: Number(environment.GITHUB_RUN_ID),
+        fetchImpl,
       });
-      const recordAccepted = async ({ pagesDeploymentId }) => recordRepositoryDeploymentStatus({
+      const recordAccepted = async ({ pagesDeploymentId }) => recordStatusImpl({
         token: githubToken,
         repositoryDeploymentId,
         state: "in_progress",
         pagesDeploymentId,
-        runId: Number(process.env.GITHUB_RUN_ID),
+        runId: Number(environment.GITHUB_RUN_ID),
+        fetchImpl,
       });
       const deployment = await deployExactPagesArtifact({
-        artifactId: Number(process.env.STAGED_ARTIFACT_ID),
-        buildVersion: process.env.GITHUB_SHA ?? "",
+        artifactId: expected.staged.artifactId,
+        buildVersion: expected.promotionWorkflowSha,
         githubToken,
         oidcToken,
         approvalExpiresAt,
-        minimumFreshUntil,
+        minimumFreshUntil: expected.operation === "promote" ? sourceManifest.menu?.earliestFreshUntil : undefined,
+        rollbackRetainUntil: expected.operation === "rollback" && sourceManifest.releaseKind === "live"
+          ? sourceManifest.menu?.earliestRetainUntil
+          : undefined,
+        expiredRollbackApproval: expected.authorization.expiredRollbackApproval,
+        sourceManifestSha256: expected.source.manifestSha256,
         repositoryDeploymentId,
         recordAttempt,
         recordAccepted,
-        now: () => Date.now(),
+        now: clock,
+        wait,
+        fetchImpl,
+        verifyBeforeSubmission: () => verifyManifestFileIdentity(manifestPath, path.dirname(manifestPath), manifestIdentity),
       });
       return { ...deployment, repositoryDeploymentId };
     },
   });
-  const output = process.env.GITHUB_OUTPUT;
+  const output = environment.GITHUB_OUTPUT;
   if (!output) throw new Error("GITHUB_OUTPUT is unavailable.");
   const { appendFile } = await import("node:fs/promises");
   await appendFile(output, `repository_deployment_id=${result.repositoryDeploymentId}\ndeployment_id=${result.deploymentId}\npage_url=${result.pageUrl}\nstatus=${result.status}\n`);

@@ -5,7 +5,7 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const ARTIFACT_DIGEST = /^sha256:[a-f0-9]{64}$/;
 const PAGES_ID = /^[A-Za-z0-9._-]{1,200}$/;
 const REPOSITORY_STATES = new Set(["pending", "in_progress", "success", "failure", "error", "unknown"]);
-const ATTEMPT_PHASES = new Set(["submitting", "submission-uncertain", "submission-rejected", "accepted", "status-uncertain", "terminal"]);
+const ATTEMPT_PHASES = new Set(["pre-submission", "submitting", "submission-uncertain", "submission-rejected", "accepted", "status-uncertain", "terminal"]);
 
 export function createDeploymentReceipt(input) {
   const attempt = input.attempt ?? {};
@@ -38,7 +38,7 @@ export function createDeploymentReceipt(input) {
       ? "served-unverified"
       : attempt.uncertain !== false
         ? "submission-uncertain"
-        : attempt.phase === "submission-rejected"
+        : attempt.phase === "pre-submission" || attempt.phase === "submission-rejected"
           ? "not-submitted"
           : attempt.phase === "terminal"
             ? "terminal-failure"
@@ -90,7 +90,7 @@ export function createDeploymentReceipt(input) {
     publicProductVerified,
     reconciliation: { outcome, publicReleaseId },
     knownGood,
-    uncertain: attempt.uncertain !== false || !repositoryStatusRecorded,
+    uncertain: attempt.uncertain !== false || (attempt.phase !== "pre-submission" && !repositoryStatusRecorded),
   };
   validateReceipt(receipt);
   return receipt;

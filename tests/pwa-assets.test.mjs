@@ -384,7 +384,7 @@ test("live and Pages workflows are explicit, bounded, and ordinary CI cannot inv
   assert.match(pagesAdapter, /executeFinalPromotionGate/);
   assert.match(pagesAdapter, /readFinalPromotionState/);
   assert.match(pagesAdapter, /verifyCurrentPublication/);
-  assert.match(finalGate, /await checkpoint\(\);[\s\S]*requestOidc\(\)[\s\S]*await checkpoint\(\);[\s\S]*submit\(oidcToken\)/);
+  assert.match(finalGate, /await checkpoint\(\);[\s\S]*requestOidc\(\)[\s\S]*approvedBundle = await checkpoint\(\);[\s\S]*submit\(oidcToken, approvedBundle\)/);
   assert.doesNotMatch(deploymentWorkflow, /npm run build|vinext build|prepare:psu-field-release/);
   assert.doesNotMatch(deploymentWorkflow, /ingest:psu|LIONLOG_ALLOW_PSU_NETWORK|LIVE_PSU_INGESTION/);
   assert.doesNotMatch(deploymentWorkflow, /^\s*(?:schedule|push|pull_request):/m);
