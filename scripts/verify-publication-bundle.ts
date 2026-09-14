@@ -121,7 +121,24 @@ interface ProtectedFinalState {
   artifacts: GithubMetadata["artifact"][];
 }
 
-export async function verifyProtectedAdapterBundle(options: ProtectedAdapterVerificationOptions): Promise<PublicationReleaseManifest> {
+export interface ManifestFileIdentity {
+  configuredPath: string;
+  bundlePath: string;
+  parentDev: number;
+  parentIno: number;
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  birthtimeMs: number;
+}
+
+export interface VerifiedProtectedAdapterBundle {
+  manifest: PublicationReleaseManifest;
+  manifestIdentity: ManifestFileIdentity;
+}
+
+export async function verifyProtectedAdapterBundle(options: ProtectedAdapterVerificationOptions): Promise<VerifiedProtectedAdapterBundle> {
   const { expected, actual, environment } = options;
   const requireEqual = (label: string, actualValue: unknown, expectedValue: unknown): void => {
     if (actualValue !== expectedValue) throw new Error(`${label} differs from the retained approval summary.`);
@@ -159,7 +176,7 @@ export async function verifyProtectedAdapterBundle(options: ProtectedAdapterVeri
   }
   const sourceArtifact = (actual.artifacts ?? []).find((artifact) => artifact?.id === expected.source?.artifactId);
   if (!sourceArtifact) throw new Error("Current source artifact metadata is unavailable.");
-  const manifest = await verifyPublicationBundle({
+  const verified = await verifyPublicationBundleWithIdentity({
     bundleDirectory: options.bundleDirectory,
     manifestPath: options.manifestPath,
     metadata: {
@@ -189,6 +206,7 @@ export async function verifyProtectedAdapterBundle(options: ProtectedAdapterVeri
     expectedRecoveryReleaseId: expected.recovery?.releaseId,
     now: options.now,
   });
+  const { manifest } = verified;
   if (
     manifest.releaseId !== expected.releaseId
     || JSON.stringify(manifest.menu) !== JSON.stringify(expected.menu)
@@ -198,12 +216,16 @@ export async function verifyProtectedAdapterBundle(options: ProtectedAdapterVeri
   if (stagedTar.byteLength !== manifest.site.bytes || sha256(stagedTar) !== manifest.site.tarSha256) {
     throw new Error("Staged Pages tar differs from the validated release manifest.");
   }
-  return manifest;
+  return verified;
 }
 
 export async function verifyPublicationBundle(options: PublicationVerificationOptions): Promise<PublicationReleaseManifest> {
+  return (await verifyPublicationBundleWithIdentity(options)).manifest;
+}
+
+async function verifyPublicationBundleWithIdentity(options: PublicationVerificationOptions): Promise<VerifiedProtectedAdapterBundle> {
   const manifestPath = options.manifestPath ?? path.join(options.bundleDirectory, "release-manifest.json");
-  const manifestBytes = await readExactManifestBytes(manifestPath, options.bundleDirectory);
+  const { bytes: manifestBytes, identity: manifestIdentity } = await readExactManifestBytes(manifestPath, options.bundleDirectory);
   if (sha256(manifestBytes) !== options.expectedManifestSha256) throw new Error("Release manifest digest mismatch.");
   const manifest = validatePublicationReleaseManifest(JSON.parse(manifestBytes.toString("utf8")));
   const computedReleaseId = computePublicationReleaseId({
@@ -262,46 +284,103 @@ export async function verifyPublicationBundle(options: PublicationVerificationOp
       throw new Error("Extracted Pages artifact inventory changed.");
     }
   }
-  return manifest;
+  return { manifest, manifestIdentity };
 }
 
-async function readExactManifestBytes(manifestPath: string, bundleDirectory: string): Promise<Buffer> {
+function sameManifestIdentity(left: ManifestFileIdentity, right: ManifestFileIdentity): boolean {
+  return Object.keys(left).every((key) => left[key as keyof ManifestFileIdentity] === right[key as keyof ManifestFileIdentity]);
+}
+
+export function assertManifestFileIdentity(expected: ManifestFileIdentity, actual: ManifestFileIdentity): void {
+  if (!sameManifestIdentity(expected, actual)) throw new Error("Configured release manifest identity changed after initial validation.");
+}
+
+export async function verifyManifestFileIdentity(
+  manifestPath: string,
+  bundleDirectory: string,
+  expected: ManifestFileIdentity,
+): Promise<void> {
+  assertManifestFileIdentity(expected, await inspectManifestIdentity(manifestPath, bundleDirectory));
+}
+
+async function inspectManifestIdentity(manifestPath: string, bundleDirectory: string): Promise<ManifestFileIdentity> {
   const canonicalPath = path.join(bundleDirectory, "release-manifest.json");
   if (
     manifestPath !== canonicalPath
+    || manifestPath !== path.normalize(manifestPath)
+    || bundleDirectory !== path.normalize(bundleDirectory)
     || path.resolve(manifestPath) !== path.resolve(canonicalPath)
     || path.basename(manifestPath) !== "release-manifest.json"
   ) throw new Error("Configured release manifest path is not the exact canonical bundle manifest.");
-  const [manifestInfo, canonicalParent] = await Promise.all([lstat(manifestPath), realpath(bundleDirectory)]);
-  if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink()) throw new Error("Configured release manifest must be a regular non-symlink file.");
-  const manifestRealPath = await realpath(manifestPath);
-  if (manifestRealPath !== path.join(canonicalParent, "release-manifest.json")) {
+  const resolvedBundle = path.resolve(bundleDirectory);
+  const resolvedManifest = path.resolve(manifestPath);
+  const [parentInfo, canonicalParent, manifestInfo, manifestRealPath] = await Promise.all([
+    lstat(bundleDirectory),
+    realpath(bundleDirectory),
+    lstat(manifestPath),
+    realpath(manifestPath),
+  ]);
+  if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink() || canonicalParent !== resolvedBundle) {
+    throw new Error("Configured release manifest parent must be the canonical non-aliased bundle directory.");
+  }
+  if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink() || manifestInfo.nlink !== 1) {
+    throw new Error("Configured release manifest must be a regular non-symlink, non-hardlinked file.");
+  }
+  if (manifestRealPath !== resolvedManifest || manifestRealPath !== path.join(canonicalParent, "release-manifest.json")) {
     throw new Error("Configured release manifest resolves through an unexpected path alias.");
   }
+  const [finalParentInfo, finalManifestInfo, finalRealPath] = await Promise.all([
+    lstat(bundleDirectory),
+    lstat(manifestPath),
+    realpath(manifestPath),
+  ]);
+  if (
+    parentInfo.dev !== finalParentInfo.dev
+    || parentInfo.ino !== finalParentInfo.ino
+    || parentInfo.mtimeMs !== finalParentInfo.mtimeMs
+    || manifestInfo.dev !== finalManifestInfo.dev
+    || manifestInfo.ino !== finalManifestInfo.ino
+    || manifestInfo.size !== finalManifestInfo.size
+    || manifestInfo.mtimeMs !== finalManifestInfo.mtimeMs
+    || manifestInfo.birthtimeMs !== finalManifestInfo.birthtimeMs
+    || finalManifestInfo.nlink !== 1
+    || finalRealPath !== manifestRealPath
+  ) throw new Error("Configured release manifest identity changed while it was inspected.");
+  return {
+    configuredPath: resolvedManifest,
+    bundlePath: resolvedBundle,
+    parentDev: parentInfo.dev,
+    parentIno: parentInfo.ino,
+    dev: manifestInfo.dev,
+    ino: manifestInfo.ino,
+    size: manifestInfo.size,
+    mtimeMs: manifestInfo.mtimeMs,
+    birthtimeMs: manifestInfo.birthtimeMs,
+  };
+}
+
+async function readExactManifestBytes(
+  manifestPath: string,
+  bundleDirectory: string,
+): Promise<{ bytes: Buffer; identity: ManifestFileIdentity }> {
+  const initialIdentity = await inspectManifestIdentity(manifestPath, bundleDirectory);
   const handle = await open(manifestPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const before = await handle.stat();
     const bytes = await handle.readFile();
     const after = await handle.stat();
-    const finalInfo = await lstat(manifestPath);
-    const finalRealPath = await realpath(manifestPath);
+    const finalIdentity = await inspectManifestIdentity(manifestPath, bundleDirectory);
     if (
-      before.dev !== manifestInfo.dev
-      || before.ino !== manifestInfo.ino
+      before.dev !== initialIdentity.dev
+      || before.ino !== initialIdentity.ino
       || before.dev !== after.dev
       || before.ino !== after.ino
       || before.size !== after.size
       || before.mtimeMs !== after.mtimeMs
-      || !finalInfo.isFile()
-      || finalInfo.isSymbolicLink()
-      || after.dev !== finalInfo.dev
-      || after.ino !== finalInfo.ino
-      || after.size !== finalInfo.size
-      || after.mtimeMs !== finalInfo.mtimeMs
-      || finalRealPath !== manifestRealPath
       || bytes.byteLength !== after.size
     ) throw new Error("Configured release manifest changed while it was being validated.");
-    return bytes;
+    assertManifestFileIdentity(initialIdentity, finalIdentity);
+    return { bytes, identity: initialIdentity };
   } finally {
     await handle.close();
   }

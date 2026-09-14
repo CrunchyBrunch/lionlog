@@ -8,7 +8,11 @@ import {
 } from "./publication-deployment-ledger.mjs";
 import { executeFinalPromotionGate, readFinalPromotionState } from "./final-promotion-gate.mjs";
 import { verifyCurrentPublication } from "./verify-current-publication.mjs";
-import { verifyProtectedAdapterBundle } from "./verify-publication-bundle.ts";
+import {
+  assertManifestFileIdentity,
+  verifyManifestFileIdentity,
+  verifyProtectedAdapterBundle,
+} from "./verify-publication-bundle.ts";
 
 const REPOSITORY = "CrunchyBrunch/lionlog";
 const API_ROOT = "https://api.github.com";
@@ -25,10 +29,14 @@ export async function deployExactPagesArtifact({
   timeoutMs = 10 * 60_000,
   approvalExpiresAt,
   minimumFreshUntil = undefined,
+  rollbackRetainUntil = undefined,
+  expiredRollbackApproval = "NONE",
+  sourceManifestSha256 = undefined,
   repositoryDeploymentId,
   now = () => Date.now(),
   recordAttempt = async (value) => { void value; },
   recordAccepted = async (value) => { void value; },
+  verifyBeforeSubmission = async () => {},
 }) {
   if (!Number.isSafeInteger(artifactId) || artifactId <= 0) throw new Error("Pages artifact ID is invalid.");
   if (!/^[a-f0-9]{40}$/.test(buildVersion)) throw new Error("Pages build version must be an exact Git SHA.");
@@ -40,12 +48,26 @@ export async function deployExactPagesArtifact({
     if (!Number.isFinite(Date.parse(approvalExpiresAt ?? "")) || Date.parse(approvalExpiresAt) <= current) {
       throw new Error("Pages approval expired before submission.");
     }
-    if (minimumFreshUntil && Date.parse(minimumFreshUntil) < current + 15 * 60_000) {
+    if (minimumFreshUntil && (!Number.isFinite(Date.parse(minimumFreshUntil)) || Date.parse(minimumFreshUntil) < current + 15 * 60_000)) {
       throw new Error("Live release freshness margin elapsed before submission.");
+    }
+    if (rollbackRetainUntil) {
+      const retainUntil = Date.parse(rollbackRetainUntil);
+      if (!Number.isFinite(retainUntil) || !/^[a-f0-9]{64}$/.test(sourceManifestSha256 ?? "")) {
+        throw new Error("Live rollback retention authority is invalid before submission.");
+      }
+      const requiredWaiver = `ALLOW_EXPIRED_ROLLBACK:${sourceManifestSha256}`;
+      if (retainUntil < current && expiredRollbackApproval !== requiredWaiver) {
+        throw new Error("Expired rollback lacks exact approval before submission.");
+      }
+      if (retainUntil >= current && expiredRollbackApproval !== "NONE") {
+        throw new Error("Unexpired rollback carries an invalid expiry waiver before submission.");
+      }
     }
   };
   const assertBeforeSubmission = async () => {
     try {
+      await verifyBeforeSubmission();
       assertTemporalAuthorization();
     } catch (error) {
       await recordAttempt(evidence({
@@ -53,7 +75,7 @@ export async function deployExactPagesArtifact({
         artifactId,
         buildVersion,
         deploymentId: null,
-        status: "authorization-expired",
+        status: "authorization-rejected",
         uncertain: false,
         recordedAt: new Date(now()).toISOString(),
       }));
@@ -224,22 +246,28 @@ export function executeProtectedAdapterGate({
   requestOidc,
   submit,
 }) {
+  let initialManifestIdentity;
   return executeFinalPromotionGate({
     expected,
     readActual,
-    verifyApprovedBundle: (actual, verificationTime) => verifyProtectedAdapterBundle({
-      bundleDirectory,
-      manifestPath,
-      stagedTarPath,
-      expected,
-      actual,
-      environment,
-      now: verificationTime,
-    }),
-    verifyCurrentState,
+    verifyApprovedBundle: async (actual, verificationTime) => {
+      const verified = await verifyProtectedAdapterBundle({
+        bundleDirectory,
+        manifestPath,
+        stagedTarPath,
+        expected,
+        actual,
+        environment,
+        now: verificationTime,
+      });
+      if (initialManifestIdentity) assertManifestFileIdentity(initialManifestIdentity, verified.manifestIdentity);
+      else initialManifestIdentity = verified.manifestIdentity;
+      return verified;
+    },
+    verifyCurrentState: (verified) => verifyCurrentState(verified.manifest),
     clock,
     requestOidc,
-    submit,
+    submit: (oidcToken, verified) => submit(oidcToken, verified.manifest, verified.manifestIdentity),
   });
 }
 
@@ -335,7 +363,7 @@ export async function main({
       requestToken: environment.ACTIONS_ID_TOKEN_REQUEST_TOKEN ?? "",
       fetchImpl,
     })),
-    submit: async (oidcToken, sourceManifest) => {
+    submit: async (oidcToken, sourceManifest, manifestIdentity) => {
       const payload = publicationLedgerPayload({
         promotionRunId: Number(environment.GITHUB_RUN_ID),
         runAttempt: Number(environment.GITHUB_RUN_ATTEMPT),
@@ -370,13 +398,19 @@ export async function main({
         githubToken,
         oidcToken,
         approvalExpiresAt,
-        minimumFreshUntil: sourceManifest.menu?.earliestFreshUntil,
+        minimumFreshUntil: expected.operation === "promote" ? sourceManifest.menu?.earliestFreshUntil : undefined,
+        rollbackRetainUntil: expected.operation === "rollback" && sourceManifest.releaseKind === "live"
+          ? sourceManifest.menu?.earliestRetainUntil
+          : undefined,
+        expiredRollbackApproval: expected.authorization.expiredRollbackApproval,
+        sourceManifestSha256: expected.source.manifestSha256,
         repositoryDeploymentId,
         recordAttempt,
         recordAccepted,
         now: clock,
         wait,
         fetchImpl,
+        verifyBeforeSubmission: () => verifyManifestFileIdentity(manifestPath, path.dirname(manifestPath), manifestIdentity),
       });
       return { ...deployment, repositoryDeploymentId };
     },

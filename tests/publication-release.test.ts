@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { access, cp, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { access, cp, link, mkdir, mkdtemp, readFile, realpath, rename, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -146,6 +146,8 @@ test("the protected workflow passes the canonical manifest into verification bef
   assert.ok(deployJob >= 0 && lockedInstall > deployJob && lockedInstall < deployment);
   assert.match(workflow, /PRE_SUBMISSION_FAILURE_APPROVAL: \$\{\{ inputs\.pre_submission_failure_approval \}\}/);
   assert.match(workflow, /authorization:\{partialApproval:\$partialApproval,expiredRollbackApproval:\$expiredRollbackApproval,preSubmissionFailureApproval:\$preSubmissionFailureApproval\}/);
+  assert.match(workflow, /MINIMUM_FRESH_UNTIL=\$\(jq -er '\.minimumFreshUntil \| strings' work\/pages-deployment\/preapproval\/pre-approval-summary\.json\)/);
+  assert.doesNotMatch(workflow, /echo "MINIMUM_FRESH_UNTIL="/);
 });
 
 test("the actual protected adapter command loads on a clean production-only install", async () => {
@@ -191,6 +193,56 @@ test("publication verification rejects a symlinked canonical manifest", { skip: 
     bundleDirectory: bundle,
     manifestPath,
   } as never), /non-symlink/);
+});
+
+test("publication verification rejects hardlinks and parent-directory aliases", async (context) => {
+  const root = await mkdtemp(path.join(tmpdir(), "lionlog-manifest-alias-"));
+  const source = path.join(root, "source.json");
+  const bundle = path.join(root, "bundle");
+  await mkdir(bundle);
+  await writeFile(source, "{}\n");
+  const manifestPath = path.join(bundle, "release-manifest.json");
+  await link(source, manifestPath);
+  await assert.rejects(verifyPublicationBundle({
+    bundleDirectory: bundle,
+    manifestPath,
+  } as never), /non-hardlinked/);
+
+  await rename(manifestPath, path.join(bundle, "hardlink.json"));
+  await writeFile(manifestPath, "{}\n");
+  const alias = path.join(root, "bundle-alias");
+  try {
+    await symlink(bundle, alias, process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") {
+      context.diagnostic("Parent-directory alias creation is unavailable on this runner.");
+      return;
+    }
+    throw error;
+  }
+  await assert.rejects(verifyPublicationBundle({
+    bundleDirectory: alias,
+    manifestPath: path.join(alias, "release-manifest.json"),
+  } as never), /canonical non-aliased bundle directory/);
+});
+
+test("publication verification rejects a detectable Windows parent-case alias", { skip: process.platform !== "win32" }, async (context) => {
+  const root = await mkdtemp(path.join(tmpdir(), "lionlog-manifest-case-"));
+  const bundle = path.join(root, "bundle");
+  await mkdir(bundle);
+  await writeFile(path.join(bundle, "release-manifest.json"), "{}\n");
+  const index = [...bundle].findIndex((character, characterIndex) => characterIndex > 2 && /[a-z]/i.test(character));
+  assert.ok(index >= 0);
+  const character = bundle[index];
+  const aliasedBundle = `${bundle.slice(0, index)}${character === character.toLowerCase() ? character.toUpperCase() : character.toLowerCase()}${bundle.slice(index + 1)}`;
+  if (await realpath(aliasedBundle) === path.resolve(aliasedBundle)) {
+    context.skip("The filesystem did not expose canonical case for this path.");
+    return;
+  }
+  await assert.rejects(verifyPublicationBundle({
+    bundleDirectory: aliasedBundle,
+    manifestPath: path.join(aliasedBundle, "release-manifest.json"),
+  } as never), /canonical non-aliased bundle directory/);
 });
 
 test("recovery release bundle round-trips and rejects identity tampering", async () => {
@@ -466,6 +518,28 @@ test("the real protected adapter gate fully validates manifest semantics before 
   } as never), /expired before submission/);
   assert.deepEqual(mainDeadlineCalls, { oidc: 1, pagesPosts: 0 });
 
+  const ledgerIdentityPath = path.join(bundle, "release-manifest.before-ledger.json");
+  const ledgerIdentityCalls = { oidc: 0, pagesPosts: 0 };
+  await assert.rejects(runProtectedAdapterMain({
+    environment: { ...mainEnvironment, GITHUB_OUTPUT: path.join(root, "identity-output.txt") },
+    fetchImpl: async () => { ledgerIdentityCalls.pagesPosts += 1; return Response.json({}); },
+    clock: () => now.getTime(),
+    wait: async () => {},
+    readActualImpl: async () => actual,
+    verifyCurrentStateImpl: async () => {},
+    requestOidcImpl: async () => { ledgerIdentityCalls.oidc += 1; return "oidc"; },
+    createLedgerImpl: async () => {
+      await rename(manifestPath, ledgerIdentityPath);
+      await writeFile(manifestPath, originalBytes);
+      return 79;
+    },
+    recordStatusImpl: async () => ({}),
+    stagedTarPath: path.join(bundle, "site.tar"),
+  } as never), /identity changed/);
+  assert.deepEqual(ledgerIdentityCalls, { oidc: 1, pagesPosts: 0 });
+  await unlink(manifestPath);
+  await rename(ledgerIdentityPath, manifestPath);
+
   const wrongPath = path.join(bundle, "wrong.json");
   await writeFile(wrongPath, "{}\n");
   const wrongPathCalls = { oidc: 0, submissions: 0 };
@@ -567,6 +641,29 @@ test("the real protected adapter gate fully validates manifest semantics before 
   assert.deepEqual(changedAfterOidcCalls, { oidc: 1, submissions: 0 });
   await writeFile(manifestPath, originalBytes);
 
+  const originalIdentityPath = path.join(bundle, "release-manifest.original.json");
+  const replacedIdenticallyCalls = { oidc: 0, submissions: 0 };
+  await assert.rejects(executeProtectedAdapterGate({
+    expected: expectedBase,
+    bundleDirectory: bundle,
+    manifestPath,
+    stagedTarPath: path.join(bundle, "site.tar"),
+    environment: environmentFor(expectedBase),
+    readActual: async () => actual,
+    verifyCurrentState: async () => {},
+    clock: () => now.getTime(),
+    requestOidc: async () => {
+      replacedIdenticallyCalls.oidc += 1;
+      await rename(manifestPath, originalIdentityPath);
+      await writeFile(manifestPath, originalBytes);
+      return "oidc";
+    },
+    submit: async () => { replacedIdenticallyCalls.submissions += 1; return "submitted"; },
+  }), /identity changed/);
+  assert.deepEqual(replacedIdenticallyCalls, { oidc: 1, submissions: 0 });
+  await unlink(manifestPath);
+  await rename(originalIdentityPath, manifestPath);
+
   const invalidManifests = [
     {},
     { ...manifest, releaseId: "0".repeat(64) },
@@ -595,6 +692,395 @@ test("the real protected adapter gate fully validates manifest semantics before 
     assert.deepEqual(calls, { oidc: 0, submissions: 0 });
   }
   await writeFile(manifestPath, originalBytes);
+});
+
+test("the actual protected adapter CLI enforces operation-specific live and app-only authority", async (context) => {
+  const root = await mkdtemp(path.join(tmpdir(), "lionlog-adapter-cli-"));
+  const recoverySite = path.join(root, "recovery-site");
+  const recoveryBundle = path.join(root, "recovery-bundle");
+  await writeRecoverySite(recoverySite);
+  const recovery = await createPublicationBundle({
+    site: recoverySite,
+    output: recoveryBundle,
+    releaseKind: "first-release-recovery",
+    commitSha: sourceSha,
+    runId: 123,
+    runAttempt: 1,
+    createdAt: now.toISOString(),
+  });
+  const recoveryManifestPath = path.join(recoveryBundle, "release-manifest.json");
+  const recoveryBytes = await readFile(recoveryManifestPath);
+  const recoveryDigest = `sha256:${"7".repeat(64)}`;
+  const liveSite = path.join(root, "live-site");
+  const liveBundle = path.join(root, "live-bundle");
+  await writeFieldReleaseSite(liveSite, { freshForMs: 18 * 60 * 60_000, retainForMs: 48 * 60 * 60_000 });
+  const live = await createPublicationBundle({
+    site: liveSite,
+    output: liveBundle,
+    releaseKind: "live",
+    commitSha: sourceSha,
+    runId: 123,
+    runAttempt: 1,
+    createdAt: now.toISOString(),
+    recoveryManifest: recoveryManifestPath,
+    recoveryArtifactId: 789,
+    recoveryArtifactDigest: recoveryDigest,
+  });
+  const liveManifestPath = path.join(liveBundle, "release-manifest.json");
+  const liveBytes = await readFile(liveManifestPath);
+  const stagedDigest = `sha256:${"e".repeat(64)}`;
+
+  const fixture = (
+    manifest: PublicationReleaseManifest,
+    manifestBytes: Buffer,
+    operation: "promote" | "rollback" | "first-release-recovery",
+    verificationTime: Date,
+    expiredRollbackApproval = "NONE",
+    approvalExpiresAt = new Date(verificationTime.getTime() + 60 * 60_000).toISOString(),
+  ) => {
+    const manifestDigest = sha256(manifestBytes);
+    const sourceMetadata = githubMetadata(manifest, verificationTime);
+    sourceMetadata.artifact.expires_at = new Date(verificationTime.getTime() + 24 * 60 * 60_000).toISOString();
+    const recoveryIdentity = manifest.recovery ?? {
+      artifactId: 456,
+      artifactDigest,
+      manifestSha256: manifestDigest,
+      releaseId: manifest.releaseId,
+    };
+    const expected = {
+      operation,
+      promotionWorkflowSha: sourceSha,
+      approvalExpiresAt,
+      minimumFreshUntil: manifest.menu?.earliestFreshUntil ?? "NONE",
+      releaseId: manifest.releaseId,
+      source: { runId: 123, sourceSha, artifactId: 456, artifactDigest, manifestSha256: manifestDigest },
+      ci: { runId: 999 },
+      recovery: recoveryIdentity,
+      staged: { artifactId: 790, digest: stagedDigest, artifactExpiresAt: new Date(verificationTime.getTime() + 24 * 60 * 60_000).toISOString() },
+      currentAttempt: { releaseId: "NONE_FIRST_DEPLOYMENT" },
+      rollbackTarget: { releaseId: "NONE_FIRST_DEPLOYMENT" },
+      authorization: { partialApproval: "COMPLETE_ONLY", expiredRollbackApproval, preSubmissionFailureApproval: "NONE" },
+      menu: manifest.menu,
+      site: manifest.site,
+      artifacts: [
+        { id: 456, digest: artifactDigest, runId: 123, headSha: sourceSha, role: "source" },
+        { id: recoveryIdentity.artifactId, digest: recoveryIdentity.artifactDigest, runId: 123, headSha: sourceSha, role: "recovery" },
+        { id: 790, digest: stagedDigest, runId: 321, headSha: sourceSha, role: "staged" },
+      ],
+    };
+    const actual = {
+      checkoutSha: sourceSha,
+      mainSha: sourceSha,
+      sourceRun: sourceMetadata.run,
+      ciRun: sourceMetadata.ciRun,
+      ciJobs: sourceMetadata.ciJobs,
+      artifacts: [
+        sourceMetadata.artifact,
+        {
+          ...sourceMetadata.artifact,
+          id: recoveryIdentity.artifactId,
+          digest: recoveryIdentity.artifactDigest,
+        },
+        {
+          ...sourceMetadata.artifact,
+          id: 790,
+          digest: stagedDigest,
+          workflow_run: { id: 321, head_sha: sourceSha, head_branch: "main", head_repository_id: 1_346_360_244 },
+        },
+      ],
+    };
+    return { expected, actual };
+  };
+
+  let sequence = 0;
+  const runCli = async ({
+    name,
+    manifest,
+    manifestPath,
+    manifestBytes,
+    operation,
+    verificationTime,
+    expiredRollbackApproval = "NONE",
+    approvalExpiresAt,
+    transitions = {},
+    succeeds,
+  }: {
+    name: string;
+    manifest: PublicationReleaseManifest;
+    manifestPath: string;
+    manifestBytes: Buffer;
+    operation: "promote" | "rollback" | "first-release-recovery";
+    verificationTime: Date;
+    expiredRollbackApproval?: string;
+    approvalExpiresAt?: string;
+    transitions?: Record<string, { time?: string; replaceManifest?: "identical" | "different" }>;
+    succeeds: boolean;
+  }) => {
+    const caseRoot = path.join(root, `case-${sequence++}-${name}`);
+    await mkdir(caseRoot, { recursive: true });
+    const { expected, actual } = fixture(manifest, manifestBytes, operation, verificationTime, expiredRollbackApproval, approvalExpiresAt);
+    const summaryPath = path.join(caseRoot, "pre-approval-summary.json");
+    const configPath = path.join(caseRoot, "config.json");
+    const resultPath = path.join(caseRoot, "result.json");
+    await writeFile(summaryPath, `${JSON.stringify(expected)}\n`);
+    await writeFile(configPath, `${JSON.stringify({ actual, initialTime: verificationTime.toISOString(), transitions })}\n`);
+    const environment = {
+      ...process.env,
+      GITHUB_REPOSITORY: "CrunchyBrunch/lionlog",
+      GITHUB_EVENT_NAME: "workflow_dispatch",
+      GITHUB_REF: "refs/heads/main",
+      GITHUB_RUN_ID: "321",
+      GITHUB_RUN_ATTEMPT: "1",
+      GITHUB_JOB: "deploy",
+      GITHUB_SHA: sourceSha,
+      GITHUB_TOKEN: "token",
+      EXPECTED_PROMOTION_WORKFLOW_SHA: sourceSha,
+      OPERATION: operation,
+      RELEASE_ID: expected.releaseId,
+      SOURCE_ARTIFACT_ID: String(expected.source.artifactId),
+      SOURCE_ARTIFACT_DIGEST: expected.source.artifactDigest,
+      SOURCE_MANIFEST_DIGEST: expected.source.manifestSha256,
+      RECOVERY_ARTIFACT_ID: String(expected.recovery.artifactId),
+      RECOVERY_ARTIFACT_DIGEST: expected.recovery.artifactDigest,
+      RECOVERY_MANIFEST_DIGEST: expected.recovery.manifestSha256,
+      RECOVERY_RELEASE_ID: expected.recovery.releaseId,
+      STAGED_ARTIFACT_ID: String(expected.staged.artifactId),
+      SERVICE_DATE: expected.menu?.serviceDate ?? "NONE",
+      APPROVAL_EXPIRES_AT: expected.approvalExpiresAt,
+      MINIMUM_FRESH_UNTIL: expected.minimumFreshUntil,
+      PARTIAL_APPROVAL: expected.authorization.partialApproval,
+      EXPIRED_ROLLBACK_APPROVAL: expected.authorization.expiredRollbackApproval,
+      PRE_SUBMISSION_FAILURE_APPROVAL: "NONE",
+      CURRENT_RELEASE_ID: "NONE_FIRST_DEPLOYMENT",
+      CURRENT_RECEIPT_ARTIFACT_ID: "NONE_FIRST_DEPLOYMENT",
+      CURRENT_RECEIPT_ARTIFACT_DIGEST: "NONE_FIRST_DEPLOYMENT",
+      TARGET_RELEASE_ID: "NONE_FIRST_DEPLOYMENT",
+      TARGET_RECEIPT_ARTIFACT_ID: "NONE_FIRST_DEPLOYMENT",
+      TARGET_RECEIPT_ARTIFACT_DIGEST: "NONE_FIRST_DEPLOYMENT",
+      RELEASE_MANIFEST_PATH: manifestPath,
+      PREAPPROVAL_SUMMARY_PATH: summaryPath,
+      DEPLOYMENT_ATTEMPT_PATH: path.join(caseRoot, "deployment-attempt.json"),
+      GITHUB_OUTPUT: path.join(caseRoot, "github-output.txt"),
+      STAGED_TAR_PATH: path.join(path.dirname(manifestPath), "site.tar"),
+      LIONLOG_ADAPTER_CLI_CONFIG: configPath,
+      LIONLOG_ADAPTER_CLI_RESULT: resultPath,
+    };
+    const execution = executeFile(process.execPath, [
+      "--experimental-strip-types",
+      path.resolve(import.meta.dirname, "helpers/protected-adapter-cli.mjs"),
+    ], { cwd: caseRoot, env: environment });
+    if (succeeds) await execution;
+    else await assert.rejects(execution);
+    return JSON.parse(await readFile(resultPath, "utf8")) as { calls: { oidc: number; pagesPosts: number }; error: string | null };
+  };
+
+  const promotion = await runCli({
+    name: "promotion",
+    manifest: live,
+    manifestPath: liveManifestPath,
+    manifestBytes: liveBytes,
+    operation: "promote",
+    verificationTime: now,
+    succeeds: true,
+  });
+  assert.deepEqual(promotion.calls, { oidc: 1, pagesPosts: 1 });
+
+  const freshRollback = await runCli({
+    name: "fresh-rollback",
+    manifest: live,
+    manifestPath: liveManifestPath,
+    manifestBytes: liveBytes,
+    operation: "rollback",
+    verificationTime: now,
+    succeeds: true,
+  });
+  assert.deepEqual(freshRollback.calls, { oidc: 1, pagesPosts: 1 });
+
+  const staleRetainedTime = new Date("2026-09-08T12:00:00.000Z");
+  const staleRetainedRollback = await runCli({
+    name: "stale-retained-rollback",
+    manifest: live,
+    manifestPath: liveManifestPath,
+    manifestBytes: liveBytes,
+    operation: "rollback",
+    verificationTime: staleRetainedTime,
+    succeeds: true,
+  });
+  assert.deepEqual(staleRetainedRollback.calls, { oidc: 1, pagesPosts: 1 });
+
+  const expiredTime = new Date("2026-09-10T12:00:00.000Z");
+  const expiredWaiver = `ALLOW_EXPIRED_ROLLBACK:${sha256(liveBytes)}`;
+  const expiredRollback = await runCli({
+    name: "expired-retained-rollback",
+    manifest: live,
+    manifestPath: liveManifestPath,
+    manifestBytes: liveBytes,
+    operation: "rollback",
+    verificationTime: expiredTime,
+    expiredRollbackApproval: expiredWaiver,
+    succeeds: true,
+  });
+  assert.deepEqual(expiredRollback.calls, { oidc: 1, pagesPosts: 1 });
+
+  for (const [name, approval] of [["missing-waiver", "NONE"], ["wrong-waiver", `ALLOW_EXPIRED_ROLLBACK:${"0".repeat(64)}`]] as const) {
+    const invalid = await runCli({
+      name,
+      manifest: live,
+      manifestPath: liveManifestPath,
+      manifestBytes: liveBytes,
+      operation: "rollback",
+      verificationTime: expiredTime,
+      expiredRollbackApproval: approval,
+      succeeds: false,
+    });
+    assert.deepEqual(invalid.calls, { oidc: 0, pagesPosts: 0 });
+  }
+
+  const appOnlyRollback = await runCli({
+    name: "app-only-rollback",
+    manifest: recovery,
+    manifestPath: recoveryManifestPath,
+    manifestBytes: recoveryBytes,
+    operation: "rollback",
+    verificationTime: now,
+    succeeds: true,
+  });
+  assert.deepEqual(appOnlyRollback.calls, { oidc: 1, pagesPosts: 1 });
+
+  const expiresDuringCurrentState = await runCli({
+    name: "expires-before-oidc",
+    manifest: recovery,
+    manifestPath: recoveryManifestPath,
+    manifestBytes: recoveryBytes,
+    operation: "rollback",
+    verificationTime: new Date("2026-09-07T12:59:58.000Z"),
+    approvalExpiresAt: "2026-09-07T13:00:00.000Z",
+    transitions: { afterCurrentState: { time: "2026-09-07T13:00:01.000Z" } },
+    succeeds: false,
+  });
+  assert.deepEqual(expiresDuringCurrentState.calls, { oidc: 0, pagesPosts: 0 });
+
+  for (const [name, stage, expectedOidc] of [
+    ["expires-during-oidc", "duringOidc", 1],
+    ["expires-during-ledger", "duringLedger", 1],
+  ] as const) {
+    const expired = await runCli({
+      name,
+      manifest: recovery,
+      manifestPath: recoveryManifestPath,
+      manifestBytes: recoveryBytes,
+      operation: "rollback",
+      verificationTime: new Date("2026-09-07T12:59:58.000Z"),
+      approvalExpiresAt: "2026-09-07T13:00:00.000Z",
+      transitions: { [stage]: { time: "2026-09-07T13:00:01.000Z" } },
+      succeeds: false,
+    });
+    assert.deepEqual(expired.calls, { oidc: expectedOidc, pagesPosts: 0 });
+  }
+
+  const replacementBundles: string[] = [];
+  for (const kind of ["identical", "different"] as const) {
+    const replacementBundle = path.join(root, `replacement-${kind}`);
+    await cp(liveBundle, replacementBundle, { recursive: true });
+    replacementBundles.push(replacementBundle);
+    const replaced = await runCli({
+      name: `replace-${kind}`,
+      manifest: live,
+      manifestPath: path.join(replacementBundle, "release-manifest.json"),
+      manifestBytes: liveBytes,
+      operation: "promote",
+      verificationTime: now,
+      transitions: { duringOidc: { replaceManifest: kind } },
+      succeeds: false,
+    });
+    assert.deepEqual(replaced.calls, { oidc: 1, pagesPosts: 0 });
+  }
+
+  const hardlinkBundle = path.join(root, "hardlink-bundle");
+  await mkdir(hardlinkBundle);
+  await cp(path.join(liveBundle, "site.tar"), path.join(hardlinkBundle, "site.tar"));
+  const hardlinkSource = path.join(root, "hardlink-source.json");
+  await writeFile(hardlinkSource, liveBytes);
+  await link(hardlinkSource, path.join(hardlinkBundle, "release-manifest.json"));
+  const hardlinked = await runCli({
+    name: "hardlink",
+    manifest: live,
+    manifestPath: path.join(hardlinkBundle, "release-manifest.json"),
+    manifestBytes: liveBytes,
+    operation: "promote",
+    verificationTime: now,
+    succeeds: false,
+  });
+  assert.deepEqual(hardlinked.calls, { oidc: 0, pagesPosts: 0 });
+
+  const parentAlias = path.join(root, "live-bundle-parent-alias");
+  try {
+    await symlink(liveBundle, parentAlias, process.platform === "win32" ? "junction" : "dir");
+    const aliased = await runCli({
+      name: "parent-alias",
+      manifest: live,
+      manifestPath: path.join(parentAlias, "release-manifest.json"),
+      manifestBytes: liveBytes,
+      operation: "promote",
+      verificationTime: now,
+      succeeds: false,
+    });
+    assert.deepEqual(aliased.calls, { oidc: 0, pagesPosts: 0 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") context.diagnostic("Parent alias creation is unavailable on this runner.");
+    else throw error;
+  }
+
+  if (process.platform !== "win32") {
+    const symlinkBundle = path.join(root, "symlink-bundle");
+    await mkdir(symlinkBundle);
+    await cp(path.join(liveBundle, "site.tar"), path.join(symlinkBundle, "site.tar"));
+    await symlink(liveManifestPath, path.join(symlinkBundle, "release-manifest.json"), "file");
+    const symlinked = await runCli({
+      name: "manifest-symlink",
+      manifest: live,
+      manifestPath: path.join(symlinkBundle, "release-manifest.json"),
+      manifestBytes: liveBytes,
+      operation: "promote",
+      verificationTime: now,
+      succeeds: false,
+    });
+    assert.deepEqual(symlinked.calls, { oidc: 0, pagesPosts: 0 });
+  }
+
+  const noncanonicalPath = `${liveBundle}${path.sep}..${path.sep}${path.basename(liveBundle)}${path.sep}release-manifest.json`;
+  const noncanonical = await runCli({
+    name: "noncanonical-path",
+    manifest: live,
+    manifestPath: noncanonicalPath,
+    manifestBytes: liveBytes,
+    operation: "promote",
+    verificationTime: now,
+    succeeds: false,
+  });
+  assert.deepEqual(noncanonical.calls, { oidc: 0, pagesPosts: 0 });
+
+  if (process.platform === "win32") {
+    const index = [...liveBundle].findIndex((character, characterIndex) => characterIndex > 2 && /[a-z]/i.test(character));
+    assert.ok(index >= 0);
+    const character = liveBundle[index];
+    const caseAlias = `${liveBundle.slice(0, index)}${character === character.toLowerCase() ? character.toUpperCase() : character.toLowerCase()}${liveBundle.slice(index + 1)}`;
+    if (await realpath(caseAlias) !== path.resolve(caseAlias)) {
+      const caseAliased = await runCli({
+        name: "parent-case-alias",
+        manifest: live,
+        manifestPath: path.join(caseAlias, "release-manifest.json"),
+        manifestBytes: liveBytes,
+        operation: "promote",
+        verificationTime: now,
+        succeeds: false,
+      });
+      assert.deepEqual(caseAliased.calls, { oidc: 0, pagesPosts: 0 });
+    } else {
+      context.diagnostic("The filesystem did not expose canonical case for the CLI alias probe.");
+    }
+  }
+  assert.equal(replacementBundles.length, 2);
 });
 
 test("full live verification derives field-release policy from catalog and snapshot bytes", async () => {
@@ -1535,8 +2021,8 @@ test("final promotion gate blocks state and time mutations before OIDC and submi
   const expected = {
     operation: "promote",
     promotionWorkflowSha: sourceSha,
-    approvalExpiresAt: "2026-09-07T13:00:00.000Z",
-    minimumFreshUntil: "2026-09-07T13:00:00.000Z",
+    approvalExpiresAt: "2026-09-07T15:00:00.000Z",
+    minimumFreshUntil: "2026-09-07T14:00:00.000Z",
     source: { runId: 123, sourceSha },
     ci: { runId: 999 },
     site: { tarSha256: "c".repeat(64), bytes: 10, inventory: [{ path: "index.html", bytes: 10, sha256: "d".repeat(64) }] },
@@ -1556,13 +2042,18 @@ test("final promotion gate blocks state and time mutations before OIDC and submi
       { id: 789, digest: "e".repeat(64), expired: false, workflow_run: { id: 321, head_sha: sourceSha, head_branch: "main", head_repository_id: 1_346_360_244 } },
     ],
   };
-  const run = (states: typeof actual[], times = [Date.parse("2026-09-07T12:00:00.000Z"), Date.parse("2026-09-07T12:00:01.000Z")], currentChecks: Array<Error | null> = [null, null]) => {
+  const run = (
+    states: typeof actual[],
+    times = [Date.parse("2026-09-07T12:00:00.000Z"), Date.parse("2026-09-07T12:00:01.000Z")],
+    currentChecks: Array<Error | null> = [null, null],
+    expectedState = expected,
+  ) => {
     let stateRead = 0;
     let timeRead = 0;
     let currentRead = 0;
     const calls = { oidc: 0, submissions: 0 };
     const result = executeFinalPromotionGate({
-      expected,
+      expected: expectedState,
       readActual: async () => states[Math.min(stateRead++, states.length - 1)],
       verifyCurrentState: async () => {
         const error = currentChecks[Math.min(currentRead++, currentChecks.length - 1)];
@@ -1591,10 +2082,32 @@ test("final promotion gate blocks state and time mutations before OIDC and submi
   const currentChangedAfterOidc = run([actual, actual], undefined, [null, new Error("Current deployment authority changed.")]);
   await assert.rejects(currentChangedAfterOidc.result, /Current deployment authority/);
   assert.deepEqual(currentChangedAfterOidc.calls, { oidc: 1, submissions: 0 });
-  const freshnessExpiredAfterOidc = run([actual, actual], [Date.parse("2026-09-07T12:00:00.000Z"), Date.parse("2026-09-07T12:45:01.000Z")]);
+  const freshnessExpiredAfterOidc = run([actual, actual], [
+    Date.parse("2026-09-07T12:00:00.000Z"),
+    Date.parse("2026-09-07T12:00:01.000Z"),
+    Date.parse("2026-09-07T13:45:01.000Z"),
+  ]);
   await assert.rejects(freshnessExpiredAfterOidc.result, /freshness/);
   assert.deepEqual(freshnessExpiredAfterOidc.calls, { oidc: 1, submissions: 0 });
-  const approvalExpiredBeforeOidc = run([actual], [Date.parse("2026-09-07T13:00:01.000Z")]);
+  const approvalExpiredDuringValidation = run([actual], [
+    Date.parse("2026-09-07T12:59:58.000Z"),
+    Date.parse("2026-09-07T13:00:01.000Z"),
+  ], undefined, { ...expected, approvalExpiresAt: "2026-09-07T13:00:00.000Z" });
+  await assert.rejects(approvalExpiredDuringValidation.result, /approval expired/);
+  assert.deepEqual(approvalExpiredDuringValidation.calls, { oidc: 0, submissions: 0 });
+  const approvalExpiredDuringOidc = run([actual, actual], [
+    Date.parse("2026-09-07T12:59:58.000Z"),
+    Date.parse("2026-09-07T12:59:59.000Z"),
+    Date.parse("2026-09-07T13:00:01.000Z"),
+  ], undefined, { ...expected, approvalExpiresAt: "2026-09-07T13:00:00.000Z" });
+  await assert.rejects(approvalExpiredDuringOidc.result, /approval expired/);
+  assert.deepEqual(approvalExpiredDuringOidc.calls, { oidc: 1, submissions: 0 });
+  const approvalExpiredBeforeOidc = run(
+    [actual],
+    [Date.parse("2026-09-07T13:00:01.000Z")],
+    undefined,
+    { ...expected, approvalExpiresAt: "2026-09-07T13:00:00.000Z" },
+  );
   await assert.rejects(approvalExpiredBeforeOidc.result, /approval expired/);
   assert.deepEqual(approvalExpiredBeforeOidc.calls, { oidc: 0, submissions: 0 });
   const accepted = run([actual, actual]);

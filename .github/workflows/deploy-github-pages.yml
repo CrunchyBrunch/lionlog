@@ -746,11 +746,7 @@ jobs:
           node scripts/verify-current-publication.mjs
           bash scripts/verify-post-approval-policy.sh
           test "$(date -u +%s)" -lt "$(date -u -d "$APPROVAL_EXPIRES_AT" +%s)"
-          if [[ "$OPERATION" == "promote" ]]; then
-            echo "MINIMUM_FRESH_UNTIL=$(jq -r .menu.earliestFreshUntil "$RELEASE_MANIFEST_PATH")" >> "$GITHUB_ENV"
-          else
-            echo "MINIMUM_FRESH_UNTIL=" >> "$GITHUB_ENV"
-          fi
+          echo "MINIMUM_FRESH_UNTIL=$(jq -er '.minimumFreshUntil | strings' work/pages-deployment/preapproval/pre-approval-summary.json)" >> "$GITHUB_ENV"
       - name: Deploy exact staged artifact
         id: pages
         env:

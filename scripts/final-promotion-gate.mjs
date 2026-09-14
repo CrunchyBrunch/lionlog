@@ -14,14 +14,7 @@ export function validateFinalPromotionState(expected, actual, now = new Date()) 
     || actual?.checkoutSha !== expected.promotionWorkflowSha
     || actual?.mainSha !== expected.promotionWorkflowSha
   ) throw new Error("Main or checked-out promotion workflow changed after approval.");
-  if (!Number.isFinite(Date.parse(expected.approvalExpiresAt ?? "")) || Date.parse(expected.approvalExpiresAt) <= now.getTime()) {
-    throw new Error("Protected approval expired before the final gate.");
-  }
-  if (expected.operation === "promote") {
-    if (!Number.isFinite(Date.parse(expected.minimumFreshUntil ?? "")) || Date.parse(expected.minimumFreshUntil) < now.getTime() + 15 * 60_000) {
-      throw new Error("Live release freshness margin elapsed before the final gate.");
-    }
-  }
+  validateFinalPromotionTime(expected, now);
   validateRun(expected.source, actual.sourceRun);
   validateCi(expected, actual);
   validateApprovedInventory(expected.site);
@@ -35,6 +28,18 @@ export function validateFinalPromotionState(expected, actual, now = new Date()) 
   return { verifiedAt: now.toISOString(), promotionWorkflowSha: expected.promotionWorkflowSha };
 }
 
+export function validateFinalPromotionTime(expected, now = new Date()) {
+  if (!Number.isFinite(now.getTime())) throw new Error("Final verification time is invalid.");
+  if (!Number.isFinite(Date.parse(expected?.approvalExpiresAt ?? "")) || Date.parse(expected.approvalExpiresAt) <= now.getTime()) {
+    throw new Error("Protected approval expired before the final gate.");
+  }
+  if (expected.operation === "promote") {
+    if (!Number.isFinite(Date.parse(expected.minimumFreshUntil ?? "")) || Date.parse(expected.minimumFreshUntil) < now.getTime() + 15 * 60_000) {
+      throw new Error("Live release freshness margin elapsed before the final gate.");
+    }
+  }
+}
+
 export async function executeFinalPromotionGate({ expected, readActual, verifyApprovedBundle = async () => {}, verifyCurrentState, clock = () => Date.now(), requestOidc, submit }) {
   const checkpoint = async () => {
     const actual = await readActual();
@@ -45,6 +50,7 @@ export async function executeFinalPromotionGate({ expected, readActual, verifyAp
     return approvedBundle;
   };
   await checkpoint();
+  validateFinalPromotionTime(expected, new Date(clock()));
   const oidcToken = await requestOidc();
   const approvedBundle = await checkpoint();
   return submit(oidcToken, approvedBundle);
