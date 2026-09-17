@@ -214,6 +214,7 @@ test("service-worker lifecycle scopes caches and preserves the active shell acro
     let activation;
     handlers.activate({ waitUntil(value) { activation = value; } });
     await activation;
+    handlers.setFetch = (fetchImpl) => { context.fetch = fetchImpl; };
     return handlers;
   }
 
@@ -231,6 +232,13 @@ test("service-worker lifecycle scopes caches and preserves the active shell acro
     });
     assert.equal(responded, false, `service worker must ignore ${requestUrl}`);
   }
+  handlersA.setFetch(async () => { throw new TypeError("offline"); });
+  let offlineMiss;
+  handlersA.fetch({
+    request: { method: "GET", mode: "cors", url: "https://lionlog.example/lionlog/favicon.ico" },
+    respondWith(value) { offlineMiss = value; },
+  });
+  assert.equal((await offlineMiss).type, "error", "an uncached offline auxiliary request resolves without an unhandled rejection");
 
   await assert.rejects(runLifecycle(revisionB, { failAsset: true }), /asset was unavailable/);
   assert.ok(cacheNames.has(cacheName("/lionlog/", revisionA)), "the old active shell survives interrupted installation");

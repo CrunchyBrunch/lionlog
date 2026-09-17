@@ -11,6 +11,7 @@ import {
 import type { ValidatedRelease } from "./supported-pages-release.ts";
 import { ACTION_HEADROOM_MS } from "./supported-pages-release.ts";
 import { assertExpectedPredecessor, validateExpectedPredecessor, type PublicReleaseObservation } from "./public-release-state.ts";
+import type { LegacyAttemptEvidence, LegacyStepEvidence } from "./collect-pages-attempt-history.ts";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const GIT_SHA = /^[a-f0-9]{40}$/;
@@ -28,18 +29,31 @@ export type PreapprovalSummary = Omit<ValidatedRelease, "summaryVersion"> & {
   };
 };
 
-export interface Incident {
+interface IncidentBase {
   runId: number;
   runAttempt: number;
   workflowSha: string;
+  checkedAt: string;
+  note: string;
+}
+
+export interface UnknownPublicationIncident extends IncidentBase {
   candidateArtifactId: number;
   stagedArtifactId: number;
   repositoryDeploymentId: number;
   outcome: "resolved-unknown-no-publication";
   publicReleaseId: "NONE_404";
-  checkedAt: string;
-  note: string;
 }
+
+export interface LegacyPreSubmissionIncident extends IncidentBase {
+  outcome: "resolved-legacy-pre-submission-failure";
+  legacyEvidence: {
+    validationFailure: LegacyStepEvidence;
+    deploymentBoundary: LegacyStepEvidence;
+  };
+}
+
+export type Incident = UnknownPublicationIncident | LegacyPreSubmissionIncident;
 
 export interface FinalState {
   repository: { id: number; full_name: string };
@@ -68,6 +82,7 @@ export interface PriorAttemptEvidence {
   finalGateConclusion: string | null;
   submissionBoundaryConclusion: string | null;
   deploymentConclusion: string | null;
+  legacyEvidence: LegacyAttemptEvidence;
   receipt: null | {
     artifactId: number;
     artifactDigest: string;
@@ -184,33 +199,120 @@ export function verifyFinalState(options: {
     throw new Error("Promotion unexpectedly carries rollback authority.");
   }
 
-  if (options.incidents.historyVersion !== "lionlog.pages-incident-history.v1" || !Array.isArray(options.incidents.incidents)) {
+  if (
+    !hasExactKeys(options.incidents, ["historyVersion", "incidents"])
+    || options.incidents.historyVersion !== "lionlog.pages-incident-history.v1"
+    || !Array.isArray(options.incidents.incidents)
+  ) {
     throw new Error("Pages incident history is invalid.");
   }
   const incidentMap = new Map<string, Incident>();
   for (const incident of options.incidents.incidents) {
-    if (
-      !positive(incident.runId) || !positive(incident.runAttempt) || !GIT_SHA.test(incident.workflowSha)
-      || !positive(incident.candidateArtifactId) || !positive(incident.stagedArtifactId) || !positive(incident.repositoryDeploymentId)
-      || incident.outcome !== "resolved-unknown-no-publication" || incident.publicReleaseId !== "NONE_404"
-      || !Number.isFinite(Date.parse(incident.checkedAt)) || Date.parse(incident.checkedAt) > options.now.getTime()
-      || typeof incident.note !== "string" || incident.note.length < 20
-      || incidentMap.has(`${incident.runId}/${incident.runAttempt}`)
-    ) throw new Error("Pages incident history contains an invalid or duplicate record.");
+    validateIncident(incident, options.now);
+    if (incidentMap.has(`${incident.runId}/${incident.runAttempt}`)) {
+      throw new Error("Pages incident history contains an invalid or duplicate record.");
+    }
     incidentMap.set(`${incident.runId}/${incident.runAttempt}`, incident);
   }
   for (const prior of state.priorAttempts) {
     if (prior.runId === summary.workflow.runId) continue;
-    if (!positive(prior.runId) || !GIT_SHA.test(prior.workflowSha) || !positive(prior.runAttempt) || prior.jobsComplete !== true) {
+    if (
+      !positive(prior.runId) || !GIT_SHA.test(prior.workflowSha) || !positive(prior.runAttempt)
+      || prior.jobsComplete !== true || !isLegacyEvidenceContainer(prior.legacyEvidence)
+    ) {
       throw new Error("Earlier Pages attempt history is incomplete or invalid.");
     }
     if (isKnownGoodAttempt(prior) || isProvenPreSubmissionFailure(prior)) continue;
     const incident = incidentMap.get(`${prior.runId}/${prior.runAttempt}`);
-    if (!incident || incident.runAttempt !== prior.runAttempt || incident.workflowSha !== prior.workflowSha) {
+    if (
+      !incident || incident.runAttempt !== prior.runAttempt || incident.workflowSha !== prior.workflowSha
+      || (incident.outcome === "resolved-legacy-pre-submission-failure" && !matchesLegacyPreSubmissionFailure(prior, incident))
+    ) {
       throw new Error(`Earlier Pages submission attempt ${prior.runId}/${prior.runAttempt} is unknown or unresolved.`);
     }
   }
   return summary;
+}
+
+function validateIncident(incident: Incident, now: Date): void {
+  const commonValid = positive(incident?.runId) && positive(incident?.runAttempt) && GIT_SHA.test(incident?.workflowSha ?? "")
+    && Number.isFinite(Date.parse(incident?.checkedAt ?? "")) && Date.parse(incident.checkedAt) <= now.getTime()
+    && typeof incident?.note === "string" && incident.note.length >= 20;
+  if (!commonValid) throw new Error("Pages incident history contains an invalid or duplicate record.");
+  if (incident.outcome === "resolved-unknown-no-publication") {
+    if (
+      !hasExactKeys(incident, ["candidateArtifactId", "checkedAt", "note", "outcome", "publicReleaseId", "repositoryDeploymentId", "runAttempt", "runId", "stagedArtifactId", "workflowSha"])
+      || !positive(incident.candidateArtifactId) || !positive(incident.stagedArtifactId) || !positive(incident.repositoryDeploymentId)
+      || incident.publicReleaseId !== "NONE_404"
+    ) throw new Error("Pages incident history contains an invalid or duplicate record.");
+    return;
+  }
+  if (
+    incident.outcome !== "resolved-legacy-pre-submission-failure"
+    || !hasExactKeys(incident, ["checkedAt", "legacyEvidence", "note", "outcome", "runAttempt", "runId", "workflowSha"])
+    || !isLegacyFailureShape(incident.legacyEvidence)
+  ) throw new Error("Pages incident history contains an invalid or duplicate record.");
+}
+
+function matchesLegacyPreSubmissionFailure(attempt: PriorAttemptEvidence, incident: LegacyPreSubmissionIncident): boolean {
+  return attempt.status === "completed" && attempt.conclusion === "failure" && attempt.jobsComplete === true
+    && attempt.finalGateConclusion === null && attempt.submissionBoundaryConclusion === null && attempt.deploymentConclusion === null
+    && attempt.receipt === null && isLegacyFailureShape(attempt.legacyEvidence)
+    && exactLegacyEvidence(attempt.legacyEvidence, incident.legacyEvidence);
+}
+
+function isLegacyFailureShape(value: LegacyAttemptEvidence): value is {
+  validationFailure: LegacyStepEvidence;
+  deploymentBoundary: LegacyStepEvidence;
+} {
+  const validation = value?.validationFailure;
+  const deployment = value?.deploymentBoundary;
+  if (
+    !hasExactKeys(value, ["deploymentBoundary", "validationFailure"])
+    || !isLegacyStep(validation) || !isLegacyStep(deployment)
+    || validation.jobConclusion !== "failure" || validation.stepConclusion !== "failure"
+    || ![
+      "Perform final provenance, state, deadline, and freshness checks",
+      "Verify current attempt separately from the known-good rollback target",
+    ].includes(validation.stepName ?? "")
+  ) return false;
+  return deployment.stepConclusion === "skipped" && (
+    (deployment.stepName === "Deploy exact staged artifact" && deployment.jobConclusion === "failure")
+    || (deployment.stepName === null && deployment.jobName === "deploy" && deployment.jobConclusion === "skipped")
+  );
+}
+
+function isLegacyStep(value: unknown): value is LegacyStepEvidence {
+  const step = value as LegacyStepEvidence;
+  return hasExactKeys(value, ["jobConclusion", "jobId", "jobName", "stepConclusion", "stepName"])
+    && positive(step?.jobId) && typeof step?.jobName === "string" && step.jobName.length > 0
+    && typeof step?.jobConclusion === "string" && step.jobConclusion.length > 0
+    && (step?.stepName === null || (typeof step?.stepName === "string" && step.stepName.length > 0))
+    && typeof step?.stepConclusion === "string" && step.stepConclusion.length > 0;
+}
+
+function exactLegacyEvidence(left: LegacyAttemptEvidence, right: LegacyAttemptEvidence): boolean {
+  return exactLegacyStep(left.validationFailure, right.validationFailure)
+    && exactLegacyStep(left.deploymentBoundary, right.deploymentBoundary);
+}
+
+function exactLegacyStep(left: LegacyStepEvidence | null, right: LegacyStepEvidence | null): boolean {
+  return left === null || right === null
+    ? left === right
+    : left.jobId === right.jobId && left.jobName === right.jobName && left.jobConclusion === right.jobConclusion
+      && left.stepName === right.stepName && left.stepConclusion === right.stepConclusion;
+}
+
+function isLegacyEvidenceContainer(value: unknown): value is LegacyAttemptEvidence {
+  const evidence = value as LegacyAttemptEvidence;
+  return hasExactKeys(value, ["deploymentBoundary", "validationFailure"])
+    && (evidence.validationFailure === null || isLegacyStep(evidence.validationFailure))
+    && (evidence.deploymentBoundary === null || isLegacyStep(evidence.deploymentBoundary));
+}
+
+function hasExactKeys(value: unknown, expected: string[]): boolean {
+  return typeof value === "object" && value !== null
+    && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort());
 }
 
 function isKnownGoodAttempt(attempt: PriorAttemptEvidence): boolean {

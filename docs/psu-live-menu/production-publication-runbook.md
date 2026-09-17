@@ -36,13 +36,15 @@ Every input is required:
 - exact lowercase manifest SHA-256 and release ID;
 - exact candidate source SHA and `YYYY-MM-DD` service date;
 - exact current main SHA containing the reviewed workflow;
+- exact public predecessor release ID, or `NONE_FIRST_PUBLICATION`;
+- operator-supplied approval expiry in canonical UTC form with milliseconds;
 - for promotion, `NONE` for both rollback-receipt fields;
 - for rollback, exact known-good flat-receipt artifact ID and digest;
 - confirmation `PROMOTE_EXACT_LIONLOG_RELEASE`.
 
-Coverage and omissions are not encoded as an operator token. They are derived from exact validated bytes and shown in the protected approval summary. The reviewer decides whether to approve that run. A live promotion still requires at least 15 minutes of truthful freshness immediately before staging and again immediately before submission. Rollback does not require freshness, but it must remain within the candidate's original retention bound and cite a flat receipt that proves the exact bytes were previously known-good.
+Coverage and omissions are not encoded as an operator token. They are derived from exact validated bytes and shown in the protected approval summary. The reviewer decides whether to approve that run. A live promotion requires at least 30 minutes of truthful freshness, retention, candidate-artifact availability, and approval validity during preapproval. Rollback does not require freshness, but it must retain the same 30-minute preapproval margins for its applicable bounds and cite a flat receipt that proves the exact bytes were previously known-good.
 
-There is no operator-supplied approval deadline. Artifact expiry, original freshness, and original retention remain authoritative and are checked from GitHub metadata and validated menu bytes. Human approval does not extend them.
+The operator-supplied approval expiry is part of the digest-bound authorization. Validation writes that exact canonical UTC timestamp into the retained preapproval summary, making the summary's authorization deadline the canonical deadline used by the protected job. Immediately before the supported action, approval validity, retention, artifact availability, and—only for promotion—freshness must each still have at least the 15-minute final action margin. Human approval does not extend any of those bounds.
 
 ## Staging and protected approval
 
@@ -55,15 +57,15 @@ The official Pages artifact is named `lionlog-pages-<workflow-run-id>-<attempt>`
 - parses regular files/directories without following links;
 - requires the exact approved inventory, including the empty `.nojekyll`, with identical paths, sizes, and hashes.
 
-The protected job downloads the compact preapproval evidence by numeric artifact ID and digest. Immediately before the official deploy action it rechecks authoritative `main`, current workflow/run/attempt, candidate producer, candidate artifact availability/digest/expiry, exact-source CI, unique staged artifact, freshness/retention, and prior attempts. Drift fails before the submission boundary.
+The protected job downloads the compact preapproval evidence by numeric artifact ID and digest. Immediately before the official deploy action it rechecks authoritative `main`, current workflow/run/attempt, candidate producer, candidate artifact availability/digest/expiry, exact-source CI, unique staged artifact, the summary-bound approval deadline, freshness/retention, and prior attempts. Drift fails before the submission boundary. This pre-action check and GitHub's subsequent `actions/deploy-pages` invocation are sequential workflow steps, not one atomic transaction; the 15-minute final action margin bounds that documented limitation but cannot eliminate it.
 
 ## Uncertain attempts and the legacy reconciliation
 
 There is no workflow-level deployment retry. If the official deploy step starts and the run does not finish with official success plus complete public verification, the attempt is unresolved. Another submission is blocked until a source-reviewed incident-history entry resolves it from authoritative evidence. A completed successful workflow is self-resolving because its terminal step requires a `knownGood` receipt.
 
-Legacy custom-adapter run `35221481720` at SHA `4a91cda0de93b920607f2aa37163790bb4b662f2` is reconciled once in `infrastructure/publication/pages-incident-history.json`. Its retained candidate artifact was `10497255246`, staged artifact `10496838181`, and automatic repository environment deployment `6502721175`. Available evidence did not establish a completed publication, and the anonymous public marker remained `404`; the historical outcome is therefore `resolved-unknown-no-publication`, not a claim that a missing custom ledger alone proves Pages was never contacted.
+Legacy attempts `34609219734/1` and `34881025561/1` are reconciled from exact immutable attempt-specific job evidence: each contains an affirmative failed validation boundary and an affirmatively skipped deployment step or job. Altered, incomplete, ambiguous, or mismatched evidence remains blocking. Legacy custom-adapter run `35221481720` at SHA `4a91cda0de93b920607f2aa37163790bb4b662f2` is reconciled separately. Its retained candidate artifact was `10497255246`, staged artifact `10496838181`, and automatic repository environment deployment `6502721175`. Available evidence did not establish a completed publication, and the anonymous public marker remained `404`; the historical outcome is therefore `resolved-unknown-no-publication`, not a claim that a missing custom ledger alone proves Pages was never contacted.
 
-The removed custom OIDC adapter, Pages POST/status polling, repository deployment ledgers, partial-coverage tokens, approval-expiry tokens, pre-submission exception tokens, and automatic recovery mode must not be reintroduced as a workaround.
+The removed custom OIDC adapter, Pages POST/status polling, repository deployment ledgers, partial-coverage exception tokens, pre-submission exception tokens, and automatic recovery mode must not be reintroduced as a workaround. The current digest-bound canonical approval-expiry contract remains mandatory.
 
 ## Public acceptance and receipt
 

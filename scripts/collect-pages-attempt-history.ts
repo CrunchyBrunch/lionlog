@@ -22,6 +22,7 @@ export interface CollectedAttemptEvidence {
   finalGateConclusion: string | null;
   submissionBoundaryConclusion: string | null;
   deploymentConclusion: string | null;
+  legacyEvidence: LegacyAttemptEvidence;
   receipt: null | {
     artifactId: number;
     artifactDigest: string;
@@ -29,6 +30,24 @@ export interface CollectedAttemptEvidence {
     content: Record<string, unknown>;
   };
 }
+
+export interface LegacyStepEvidence {
+  jobId: number;
+  jobName: string;
+  jobConclusion: string;
+  stepName: string | null;
+  stepConclusion: string;
+}
+
+export interface LegacyAttemptEvidence {
+  validationFailure: LegacyStepEvidence | null;
+  deploymentBoundary: LegacyStepEvidence | null;
+}
+
+const LEGACY_VALIDATION_STEPS = new Set([
+  "Perform final provenance, state, deadline, and freshness checks",
+  "Verify current attempt separately from the known-good rollback target",
+]);
 
 export async function collectPagesAttemptHistory(options: {
   repository: string;
@@ -68,6 +87,7 @@ export async function collectPagesAttemptHistory(options: {
         if (!Array.isArray(job.steps)) throw new Error("Attempt-specific job steps are malformed.");
         return job.steps as Array<Record<string, unknown>>;
       });
+      const legacyEvidence = collectLegacyEvidence(jobs);
       const jobsComplete = jobs.length > 0 && jobs.every((jobValue) => {
         const job = jobValue as Record<string, unknown>;
         return job.status === "completed" && typeof job.conclusion === "string";
@@ -88,11 +108,63 @@ export async function collectPagesAttemptHistory(options: {
         finalGateConclusion: stepConclusion(steps, "Recheck all authority immediately before submission"),
         submissionBoundaryConclusion: stepConclusion(steps, "Record official submission boundary"),
         deploymentConclusion: stepConclusion(steps, "Deploy with official Pages action"),
+        legacyEvidence,
         receipt,
       });
     }
   }
   return evidence.sort((left, right) => left.runId - right.runId || left.runAttempt - right.runAttempt);
+}
+
+export function collectLegacyEvidence(jobs: unknown[]): LegacyAttemptEvidence {
+  const validationMatches: LegacyStepEvidence[] = [];
+  const deploymentMatches: LegacyStepEvidence[] = [];
+  for (const jobValue of jobs) {
+    const job = jobValue as Record<string, unknown>;
+    const jobId = number(job.id, "Legacy job ID");
+    const jobName = string(job.name, "Legacy job name");
+    const jobConclusion = nullableString(job.conclusion, "Legacy job conclusion");
+    const steps = job.steps;
+    if (!Array.isArray(steps)) throw new Error("Legacy job steps are malformed.");
+    for (const stepValue of steps) {
+      const step = stepValue as Record<string, unknown>;
+      if (typeof step.name !== "string") continue;
+      const evidence = (): LegacyStepEvidence => ({
+        jobId,
+        jobName,
+        jobConclusion: jobConclusion ?? "",
+        stepName: step.name as string,
+        stepConclusion: nullableString(step.conclusion, "Legacy step conclusion") ?? "",
+      });
+      if (LEGACY_VALIDATION_STEPS.has(step.name)) validationMatches.push(evidence());
+      if (step.name === "Deploy exact staged artifact") deploymentMatches.push(evidence());
+    }
+  }
+  if (validationMatches.length > 1 || deploymentMatches.length > 1) {
+    throw new Error("Legacy attempt evidence is ambiguous.");
+  }
+  if (deploymentMatches.length === 0) {
+    const skippedDeployJobs = jobs.filter((jobValue) => {
+      const job = jobValue as Record<string, unknown>;
+      return job.name === "deploy" && job.status === "completed" && job.conclusion === "skipped"
+        && Array.isArray(job.steps) && job.steps.length === 0;
+    });
+    if (skippedDeployJobs.length > 1) throw new Error("Legacy skipped-deploy evidence is ambiguous.");
+    if (skippedDeployJobs.length === 1) {
+      const job = skippedDeployJobs[0] as Record<string, unknown>;
+      deploymentMatches.push({
+        jobId: number(job.id, "Legacy skipped-deploy job ID"),
+        jobName: "deploy",
+        jobConclusion: "skipped",
+        stepName: null,
+        stepConclusion: "skipped",
+      });
+    }
+  }
+  return {
+    validationFailure: validationMatches[0] ?? null,
+    deploymentBoundary: deploymentMatches[0] ?? null,
+  };
 }
 
 async function readReceipt(

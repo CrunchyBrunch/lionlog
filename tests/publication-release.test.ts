@@ -21,7 +21,7 @@ import {
 import { createFlatReceipt, verifyFinalState, type PreapprovalSummary, type PriorAttemptEvidence } from "../scripts/supported-pages-control.ts";
 import { assertNoBrowserDiagnostics, assertPageState } from "../scripts/verify-public-pwa.mjs";
 import { assertExpectedPredecessor, FIRST_PUBLICATION, observePublicRelease } from "../scripts/public-release-state.ts";
-import { collectPagesAttemptHistory } from "../scripts/collect-pages-attempt-history.ts";
+import { collectLegacyEvidence, collectPagesAttemptHistory } from "../scripts/collect-pages-attempt-history.ts";
 import { selectBrowserVerificationContext } from "../scripts/select-browser-verification-context.ts";
 import { assertArtifactDigest, normalizeArtifactDigest } from "../scripts/artifact-digest.ts";
 
@@ -283,6 +283,7 @@ test("mobile PWA verifier requires attribution, no overflow, and zero warnings/e
   assert.throws(() => assertPageState({ ...page, samplePressed: true, livePressed: false }, expected), /sample/);
   assert.doesNotThrow(() => assertNoBrowserDiagnostics([{ kind: "console", type: "log" }]));
   assert.throws(() => assertNoBrowserDiagnostics([{ kind: "console", type: "warning" }]), /diagnostics/);
+  assert.throws(() => assertNoBrowserDiagnostics([{ kind: "service-worker", text: "install failed" }]), /diagnostics/);
 });
 
 test("public predecessor authorization is exact and fail-closed", async () => {
@@ -355,6 +356,56 @@ test("only known-good or affirmative pre-submission failures clear attempt histo
   }
 });
 
+test("real legacy pre-submission identities reconcile only against exact affirmative evidence", async () => {
+  const incidents = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
+  const attempts = [legacyAttempt346(), legacyAttempt348()];
+  assert.doesNotThrow(() => verifyFinalState({
+    summary: summaryFixture(), state: { ...finalState(), priorAttempts: attempts }, incidents, now,
+  }));
+
+  const altered = structuredClone(attempts[0]);
+  altered.legacyEvidence.deploymentBoundary!.stepConclusion = "success";
+  const missing = structuredClone(attempts[0]);
+  missing.legacyEvidence.validationFailure = null;
+  const incomplete = { ...attempts[0], jobsComplete: false };
+  const mismatched = { ...attempts[0], workflowSha: "f".repeat(40) };
+  for (const attempt of [altered, missing, incomplete, mismatched]) {
+    assert.throws(() => verifyFinalState({
+      summary: summaryFixture(), state: { ...finalState(), priorAttempts: [attempt] }, incidents, now,
+    }), /incomplete|unknown or unresolved/);
+  }
+
+  const duplicate = { ...incidents, incidents: [...incidents.incidents, structuredClone(incidents.incidents[0])] };
+  assert.throws(() => verifyFinalState({
+    summary: summaryFixture(), state: { ...finalState(), priorAttempts: attempts }, incidents: duplicate, now,
+  }), /invalid or duplicate/);
+});
+
+test("legacy collector rejects ambiguous immutable step evidence", () => {
+  const job = {
+    id: 103295384726, name: "deploy", status: "completed", conclusion: "failure",
+    steps: [
+      { name: "Perform final provenance, state, deadline, and freshness checks", conclusion: "failure" },
+      { name: "Deploy exact staged artifact", conclusion: "skipped" },
+    ],
+  };
+  assert.deepEqual(collectLegacyEvidence([job]), legacyAttempt346().legacyEvidence);
+  assert.deepEqual(collectLegacyEvidence([{
+    id: 104100073427,
+    name: "verify-and-stage",
+    status: "completed",
+    conclusion: "failure",
+    steps: [{ name: "Verify current attempt separately from the known-good rollback target", conclusion: "failure" }],
+  }, {
+    id: 104100243029,
+    name: "deploy",
+    status: "completed",
+    conclusion: "skipped",
+    steps: [],
+  }]), legacyAttempt348().legacyEvidence);
+  assert.throws(() => collectLegacyEvidence([job, { ...job, id: job.id + 1 }]), /ambiguous/);
+});
+
 test("attempt history uses attempt-specific bounded job evidence and preserves incomplete attempts", async () => {
   const requested: string[] = [];
   const fetchImpl: typeof fetch = async (input) => {
@@ -380,6 +431,8 @@ test("attempt history uses attempt-specific bounded job evidence and preserves i
     if (jobsAttempt) return jsonResponse({
       total_count: 1,
       jobs: [{
+        id: 700 + Number(jobsAttempt),
+        name: "deploy",
         status: jobsAttempt === "1" ? "completed" : "in_progress",
         conclusion: jobsAttempt === "1" ? "failure" : null,
         steps: [{ name: "Recheck all authority immediately before submission", conclusion: jobsAttempt === "1" ? "failure" : null }],
@@ -445,9 +498,56 @@ function priorAttempt(overrides: Partial<PriorAttemptEvidence> = {}): PriorAttem
     finalGateConclusion: null,
     submissionBoundaryConclusion: null,
     deploymentConclusion: null,
+    legacyEvidence: { validationFailure: null, deploymentBoundary: null },
     receipt: null,
     ...overrides,
   };
+}
+
+function legacyAttempt346(): PriorAttemptEvidence {
+  return priorAttempt({
+    runId: 34609219734,
+    workflowSha: "3d5181c962486aa25345f4f16fbdd75932e0d831",
+    legacyEvidence: {
+      validationFailure: {
+        jobId: 103295384726,
+        jobName: "deploy",
+        jobConclusion: "failure",
+        stepName: "Perform final provenance, state, deadline, and freshness checks",
+        stepConclusion: "failure",
+      },
+      deploymentBoundary: {
+        jobId: 103295384726,
+        jobName: "deploy",
+        jobConclusion: "failure",
+        stepName: "Deploy exact staged artifact",
+        stepConclusion: "skipped",
+      },
+    },
+  });
+}
+
+function legacyAttempt348(): PriorAttemptEvidence {
+  return priorAttempt({
+    runId: 34881025561,
+    workflowSha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64",
+    legacyEvidence: {
+      validationFailure: {
+        jobId: 104100073427,
+        jobName: "verify-and-stage",
+        jobConclusion: "failure",
+        stepName: "Verify current attempt separately from the known-good rollback target",
+        stepConclusion: "failure",
+      },
+      deploymentBoundary: {
+        jobId: 104100243029,
+        jobName: "deploy",
+        jobConclusion: "skipped",
+        stepName: null,
+        stepConclusion: "skipped",
+      },
+    },
+  });
 }
 
 function receiptEvidence(options: {
