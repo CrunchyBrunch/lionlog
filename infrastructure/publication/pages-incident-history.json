@@ -1,0 +1,16 @@
+{
+  "historyVersion": "lionlog.pages-incident-history.v1",
+  "incidents": [
+    {
+      "runId": 35221481720,
+      "workflowSha": "4a91cda0de93b920607f2aa37163790bb4b662f2",
+      "candidateArtifactId": 10497255246,
+      "stagedArtifactId": 10496838181,
+      "repositoryDeploymentId": 6502721175,
+      "outcome": "resolved-unknown-no-publication",
+      "publicReleaseId": "NONE_404",
+      "checkedAt": "2026-09-17T00:00:00.000Z",
+      "note": "The retained attempt evidence did not establish a completed publication, and the public release marker remained absent. This source-reviewed record resolves the legacy custom-adapter attempt without treating missing custom ledger data alone as proof."
+    }
+  ]
+}
