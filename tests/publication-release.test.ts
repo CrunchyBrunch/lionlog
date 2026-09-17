@@ -2063,6 +2063,69 @@ test("exact Pages adapter submits once, returns the deployment ID, and never ret
   assert.equal((temporalEvidence.at(-1) as { phase: string } | undefined)?.phase, "submission-rejected");
 });
 
+test("exact Pages adapter polls the documented status endpoint instead of response-provided links", async () => {
+  const canonicalStatusUrl = "https://api.github.com/repos/CrunchyBrunch/lionlog/pages/deployments/deployment-url";
+  for (const statusUrl of [
+    canonicalStatusUrl,
+    `${canonicalStatusUrl}/status`,
+    "https://attacker.example/status",
+    "/repos/CrunchyBrunch/lionlog/pages/deployments/deployment-url/status",
+    undefined,
+  ]) {
+    const requests: Array<{ url: string; redirect: RequestRedirect | undefined }> = [];
+    const accepted: unknown[] = [];
+    const result = await deployExactPagesArtifact({
+      artifactId: 456,
+      buildVersion: sourceSha,
+      repositoryDeploymentId: 77,
+      githubToken: "token",
+      oidcToken: "oidc",
+      approvalExpiresAt: "2099-01-01T00:00:00.000Z",
+      wait: async () => {},
+      recordAccepted: async (value: unknown) => { accepted.push(value); },
+      fetchImpl: async (input, init) => {
+        requests.push({ url: String(input), redirect: init?.redirect });
+        return init?.method === "POST"
+          ? Response.json({ id: "deployment-url", status_url: statusUrl, page_url: "https://crunchybrunch.github.io/lionlog/" })
+          : Response.json({ status: "succeed" });
+      },
+    });
+    assert.equal(result.deploymentId, "deployment-url");
+    assert.deepEqual(accepted, [{ repositoryDeploymentId: 77, pagesDeploymentId: "deployment-url" }]);
+    assert.equal(requests[1]?.url, canonicalStatusUrl);
+    assert.equal(requests[1]?.redirect, "error");
+  }
+});
+
+test("exact Pages adapter records an accepted deployment's terminal failure without retry ambiguity", async () => {
+  const evidence: Array<{ phase: string; deploymentId: string | null; status: string; uncertain: boolean }> = [];
+  let polls = 0;
+  await assert.rejects(deployExactPagesArtifact({
+    artifactId: 456,
+    buildVersion: sourceSha,
+    repositoryDeploymentId: 77,
+    githubToken: "token",
+    oidcToken: "oidc",
+    approvalExpiresAt: "2099-01-01T00:00:00.000Z",
+    wait: async () => {},
+    recordAttempt: async (value: { phase: string; deploymentId: string | null; status: string; uncertain: boolean }) => { evidence.push(value); },
+    fetchImpl: async (_input, init) => {
+      if (init?.method === "POST") return Response.json({
+        id: "deployment-failed",
+        status_url: "https://api.github.com/repos/CrunchyBrunch/lionlog/pages/deployments/deployment-failed/status",
+        page_url: "https://crunchybrunch.github.io/lionlog/",
+      });
+      polls += 1;
+      return Response.json({ status: "deployment_failed" });
+    },
+  }), /failed with status deployment_failed/);
+  assert.equal(polls, 1);
+  assert.deepEqual(
+    { phase: evidence.at(-1)?.phase, deploymentId: evidence.at(-1)?.deploymentId, status: evidence.at(-1)?.status, uncertain: evidence.at(-1)?.uncertain },
+    { phase: "terminal", deploymentId: "deployment-failed", status: "deployment_failed", uncertain: false },
+  );
+});
+
 test("final promotion gate blocks state and time mutations before OIDC and submission", async () => {
   const expected = {
     operation: "promote",
