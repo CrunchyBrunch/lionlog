@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { parseArtifactZip } from "../scripts/artifact-zip.ts";
-import { createPublicationTar } from "../scripts/publication-tar.ts";
+import { createPublicationTar, readPublicationFiles } from "../scripts/publication-tar.ts";
 import { createPublicationBundle, sha256 } from "../scripts/create-publication-bundle.ts";
 import { getPsuHall, getPsuMealPeriod, PSU_PARSER_VERSION, PSU_SNAPSHOT_VERSION, sourceDateFromIso } from "../infrastructure/psu/constants.ts";
 import { catalogEntryForSnapshot, PSU_CATALOG_VERSION, validatePsuPublicationCatalog } from "../infrastructure/psu/publication-catalog.ts";
 import { PSU_RELEASE_HALL_IDS } from "../infrastructure/psu/release-plan.ts";
 import { buildPsuSnapshot } from "../infrastructure/psu/snapshot-schema.ts";
+import { preparePagesArtifact, validatePagesArtifact } from "../scripts/prepare-pages-artifact.ts";
 import {
   createPreapprovalSummary,
   inspectPagesActionTar,
@@ -17,8 +18,12 @@ import {
   type GithubArtifact,
   type ValidatedRelease,
 } from "../scripts/supported-pages-release.ts";
-import { createFlatReceipt, verifyFinalState, type PreapprovalSummary } from "../scripts/supported-pages-control.ts";
+import { createFlatReceipt, verifyFinalState, type PreapprovalSummary, type PriorAttemptEvidence } from "../scripts/supported-pages-control.ts";
 import { assertNoBrowserDiagnostics, assertPageState } from "../scripts/verify-public-pwa.mjs";
+import { assertExpectedPredecessor, FIRST_PUBLICATION, observePublicRelease } from "../scripts/public-release-state.ts";
+import { collectPagesAttemptHistory } from "../scripts/collect-pages-attempt-history.ts";
+import { selectBrowserVerificationContext } from "../scripts/select-browser-verification-context.ts";
+import { assertArtifactDigest, normalizeArtifactDigest } from "../scripts/artifact-digest.ts";
 
 const workflowSha = "a".repeat(40);
 const sourceSha = "b".repeat(40);
@@ -38,6 +43,13 @@ test("artifact ZIP parser rejects traversal, symlinks, extras, and header disagr
   const tampered = Buffer.from(valid);
   tampered.writeUInt32LE(99, 18);
   assert.throws(() => parseArtifactZip(tampered, ["artifact.tar"]), /disagree|bounds|overlap/);
+});
+
+test("artifact digest normalization accepts GitHub bare hex output without weakening equality", () => {
+  const bare = "d".repeat(64);
+  assert.equal(normalizeArtifactDigest(bare), `sha256:${bare}`);
+  assert.equal(assertArtifactDigest(bare, `sha256:${bare}`), `sha256:${bare}`);
+  assert.throws(() => assertArtifactDigest(bare, `sha256:${"e".repeat(64)}`), /mismatch/);
 });
 
 test("official Pages tar inspection preserves exact paths, sizes, hashes, and hidden marker", () => {
@@ -70,17 +82,25 @@ test("staged Pages artifact must have unique run identity and exact candidate in
   await writeFile(tarPath, tar);
   const validated = validatedFixture(inspectPagesActionTar(tar));
   const artifact = stagedArtifact();
-  const result = await createPreapprovalSummary({ validated, stagedArtifact: artifact, stagedArtifactName: artifact.name, stagedTarPath: tarPath });
+  const result = await createPreapprovalSummary({ validated, stagedArtifact: artifact, stagedArtifactName: artifact.name, stagedTarPath: tarPath, now });
   assert.equal(result.summaryVersion, "lionlog.pages-preapproval.v1");
   await assert.rejects(createPreapprovalSummary({
     validated,
     stagedArtifact: { ...artifact, name: "github-pages" },
     stagedArtifactName: "github-pages",
     stagedTarPath: tarPath,
+    now,
   }), /not unique/);
+  await assert.rejects(createPreapprovalSummary({
+    validated,
+    stagedArtifact: { ...artifact, expires_at: "2026-09-17T12:29:59.999Z" },
+    stagedArtifactName: artifact.name,
+    stagedTarPath: tarPath,
+    now,
+  }), /availability headroom/);
   const changed = createPublicationTar([{ path: "index.html", data: Buffer.from("changed") }]);
   await writeFile(tarPath, changed);
-  await assert.rejects(createPreapprovalSummary({ validated, stagedArtifact: artifact, stagedArtifactName: artifact.name, stagedTarPath: tarPath }), /inventory differs/);
+  await assert.rejects(createPreapprovalSummary({ validated, stagedArtifact: artifact, stagedArtifactName: artifact.name, stagedTarPath: tarPath, now }), /inventory differs/);
 });
 
 test("candidate verification fails closed before touching untrusted bytes when GitHub authority differs", async () => {
@@ -106,8 +126,42 @@ test("candidate verification fails closed before touching untrusted bytes when G
     expectedReleaseId: hash,
     expectedSourceSha: sourceSha,
     expectedServiceDate: "2026-09-17",
+    approvalExpiresAt: "2026-09-17T13:00:00.000Z",
+    expectedPredecessorReleaseId: FIRST_PUBLICATION,
+    publicPredecessor: { state: "absent", releaseId: null },
     now,
   }), /Repository identity mismatch/);
+});
+
+test("candidate verification enforces canonical approval expiry with preapproval headroom", async () => {
+  const options = {
+    operation: "promote" as const,
+    bundleDirectory: "missing",
+    extractionDirectory: "missing-output",
+    metadata: {
+      repository: { id: 1_346_360_244, full_name: "CrunchyBrunch/lionlog" },
+      main: { sha: workflowSha },
+      workflowRun: currentWorkflowRun(),
+      candidateRun: candidateRun(),
+      candidateArtifact: candidateArtifact(),
+      ciRun: ciRun(),
+      ciJobs: [{ name: "verify", head_sha: sourceSha, status: "completed", conclusion: "success" }],
+    },
+    workflowSha,
+    workflowRunId: 100,
+    candidateRunId: 200,
+    candidateArtifactId: 300,
+    candidateArtifactDigest: digest,
+    candidateManifestSha256: hash,
+    expectedReleaseId: hash,
+    expectedSourceSha: sourceSha,
+    expectedServiceDate: "2026-09-17",
+    expectedPredecessorReleaseId: FIRST_PUBLICATION,
+    publicPredecessor: { state: "absent" as const, releaseId: null },
+    now,
+  };
+  await assert.rejects(verifySupportedCandidate({ ...options, approvalExpiresAt: "2026-09-17T12:29:59.999Z" }), /headroom/);
+  await assert.rejects(verifySupportedCandidate({ ...options, approvalExpiresAt: "2026-09-17T13:00:00Z" }), /invalid/);
 });
 
 test("supported candidate verifier accepts a complete frozen live bundle and exact provenance", async () => {
@@ -137,10 +191,22 @@ test("supported candidate verifier accepts a complete frozen live bundle and exa
     },
     workflowSha, workflowRunId: 100, candidateRunId: 200, candidateArtifactId: 300, candidateArtifactDigest: digest,
     candidateManifestSha256: manifestSha256, expectedReleaseId: manifest.releaseId, expectedSourceSha: sourceSha,
-    expectedServiceDate: "2026-09-17", now,
+    expectedServiceDate: "2026-09-17", approvalExpiresAt: "2026-09-17T13:00:00.000Z",
+    expectedPredecessorReleaseId: FIRST_PUBLICATION, publicPredecessor: { state: "absent", releaseId: null }, now,
   });
   assert.equal(validated.release.coverage, "complete");
   assert.equal(validated.site.inventory.length > 5, true);
+  assert.deepEqual(await selectBrowserVerificationContext(liveBundle), {
+    contextVersion: "lionlog.pages-browser-context.v1",
+    releaseId: manifest.releaseId,
+    shellRevision: sourceSha,
+    serviceDate: "2026-09-17",
+    hallId: PSU_RELEASE_HALL_IDS[0],
+    mealPeriodId: "lunch",
+    snapshotId: catalogSnapshotId(await readFile(path.join(liveSite, "menu-data", "v2", "catalog.json"), "utf8")),
+    expectedItemCount: 1,
+    expectedFirstFoodName: "Fixture Food",
+  });
 });
 
 test("protected final check rejects main drift, artifact drift, expiration, and unresolved prior submissions", () => {
@@ -157,14 +223,14 @@ test("protected final check rejects main drift, artifact drift, expiration, and 
   assert.throws(() => verifyFinalState({
     summary: { ...summary, release: { ...summary.release, earliestRetainUntil: "2026-09-17T11:59:00.000Z" } },
     state: finalState(), incidents: emptyHistory, now,
-  }), /retention elapsed/);
-  const unresolved = { runId: 99, workflowSha, runAttempt: 1, conclusion: "failure", officialStepConclusion: "failure" };
-  assert.throws(() => verifyFinalState({ summary, state: { ...finalState(), priorRuns: [unresolved] }, incidents: emptyHistory, now }), /remains unresolved/);
+  }), /retention.*headroom/);
+  const unresolved = priorAttempt({ runId: 99, conclusion: "failure", deploymentConclusion: "failure" });
+  assert.throws(() => verifyFinalState({ summary, state: { ...finalState(), priorAttempts: [unresolved] }, incidents: emptyHistory, now }), /unknown or unresolved/);
   assert.doesNotThrow(() => verifyFinalState({
     summary,
-    state: { ...finalState(), priorRuns: [unresolved] },
+    state: { ...finalState(), priorAttempts: [unresolved] },
     incidents: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [{
-      runId: 99, workflowSha, candidateArtifactId: 1, stagedArtifactId: 2, repositoryDeploymentId: 3,
+      runId: 99, runAttempt: 1, workflowSha, candidateArtifactId: 1, stagedArtifactId: 2, repositoryDeploymentId: 3,
       outcome: "resolved-unknown-no-publication", publicReleaseId: "NONE_404", checkedAt: "2026-09-17T11:00:00.000Z",
       note: "Reviewed fixture incident with no publication.",
     }] },
@@ -192,19 +258,231 @@ test("flat receipt becomes known-good only after official success and all public
 });
 
 test("mobile PWA verifier requires attribution, no overflow, and zero warnings/errors", () => {
+  const expected = browserContext();
   const page = {
     url: "https://crunchybrunch.github.io/lionlog/",
     title: "Build a meal | LionLog",
     text: "LionLog Retrieved one minute ago. LionLog is independent and is not affiliated with or endorsed by Penn State.",
     scrollWidth: 390,
     clientWidth: 390,
+    shellRevision: workflowSha,
+    publicReleaseId: hash,
+    selectedHall: "east",
+    selectedPeriod: "lunch",
+    selectedDate: "2026-09-17",
+    itemNames: ["Fixture Food"],
+    sourceState: "Live PSU snapshots",
+    livePressed: true,
+    samplePressed: false,
   };
-  assert.doesNotThrow(() => assertPageState(page));
-  assert.throws(() => assertPageState({ ...page, scrollWidth: 391 }), /overflows/);
-  assert.throws(() => assertPageState({ ...page, text: "LionLog" }), /retrieval time/);
+  assert.doesNotThrow(() => assertPageState(page, expected));
+  assert.doesNotThrow(() => assertPageState({ ...page, publicReleaseId: undefined }, expected, { offline: true }));
+  assert.throws(() => assertPageState({ ...page, scrollWidth: 391 }, expected), /overflows/);
+  assert.throws(() => assertPageState({ ...page, text: "LionLog" }, expected), /retrieval time/);
+  assert.throws(() => assertPageState({ ...page, itemNames: [] }, expected), /identity\/count/);
+  assert.throws(() => assertPageState({ ...page, samplePressed: true, livePressed: false }, expected), /sample/);
   assert.doesNotThrow(() => assertNoBrowserDiagnostics([{ kind: "console", type: "log" }]));
   assert.throws(() => assertNoBrowserDiagnostics([{ kind: "console", type: "warning" }]), /diagnostics/);
 });
+
+test("public predecessor authorization is exact and fail-closed", async () => {
+  assert.deepEqual(assertExpectedPredecessor(FIRST_PUBLICATION, { state: "absent", releaseId: null }), { state: "absent", releaseId: null });
+  assert.deepEqual(assertExpectedPredecessor(hash, { state: "present", releaseId: hash }), { state: "present", releaseId: hash });
+  assert.throws(() => assertExpectedPredecessor(FIRST_PUBLICATION, { state: "present", releaseId: hash }), /already exists/);
+  assert.throws(() => assertExpectedPredecessor(hash, { state: "absent", releaseId: null }), /absent or differs/);
+  assert.throws(() => assertExpectedPredecessor(hash, { state: "present", releaseId: "e".repeat(64) }), /absent or differs/);
+  await assert.rejects(observePublicRelease(async () => new Response("unavailable", { status: 503 })), /unavailable or ambiguous/);
+  await assert.rejects(observePublicRelease(async () => new Response("not json", {
+    status: 200,
+    headers: { "content-type": "text/plain" },
+  })), /unavailable or ambiguous|content type/);
+});
+
+test("final gate requires exact predecessor and time headroom", () => {
+  const summary = summaryFixture();
+  const incidents = { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] };
+  assert.throws(() => verifyFinalState({
+    summary,
+    state: { ...finalState(), publicPredecessor: { state: "present", releaseId: hash } },
+    incidents,
+    now,
+  }), /already exists/);
+  assert.throws(() => verifyFinalState({
+    summary: { ...summary, authorization: { ...summary.authorization, approvalExpiresAt: "2026-09-17T12:14:59.999Z" } },
+    state: finalState(), incidents, now,
+  }), /approval expired|headroom/);
+  assert.throws(() => verifyFinalState({
+    summary: { ...summary, release: { ...summary.release, earliestFreshUntil: "2026-09-17T12:14:59.999Z" } },
+    state: finalState(), incidents, now,
+  }), /freshness/);
+  assert.throws(() => verifyFinalState({
+    summary,
+    state: {
+      ...finalState(),
+      candidateArtifact: { ...finalState().candidateArtifact, expires_at: "2026-09-17T12:14:59.999Z" },
+    },
+    incidents,
+    now,
+  }), /Candidate artifact state drifted/);
+});
+
+test("only known-good or affirmative pre-submission failures clear attempt history", () => {
+  const summary = summaryFixture();
+  const incidents = { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] };
+  const knownGood = priorAttempt({
+    conclusion: "success",
+    finalGateConclusion: "success",
+    submissionBoundaryConclusion: "success",
+    deploymentConclusion: "success",
+    receipt: receiptEvidence({ submissionStarted: true, result: "success", knownGood: true, unresolved: false, publicVerified: true }),
+  });
+  const preSubmission = priorAttempt({
+    conclusion: "failure",
+    finalGateConclusion: "failure",
+    submissionBoundaryConclusion: "skipped",
+    deploymentConclusion: "skipped",
+    receipt: receiptEvidence({ submissionStarted: false, result: "failure", knownGood: false, unresolved: false, publicVerified: false }),
+  });
+  assert.doesNotThrow(() => verifyFinalState({ summary, state: { ...finalState(), priorAttempts: [knownGood, preSubmission] }, incidents, now }));
+  const unsafe = [
+    priorAttempt({ status: "completed", conclusion: "cancelled", receipt: null }),
+    priorAttempt({ conclusion: "failure", receipt: null }),
+    priorAttempt({ status: "in_progress", conclusion: null, jobsComplete: false }),
+    priorAttempt({ runAttempt: 2, conclusion: "failure", finalGateConclusion: "failure", submissionBoundaryConclusion: "skipped", deploymentConclusion: "skipped", receipt: null }),
+  ];
+  for (const attempt of unsafe) {
+    assert.throws(() => verifyFinalState({ summary, state: { ...finalState(), priorAttempts: [attempt] }, incidents, now }), /incomplete|unknown or unresolved/);
+  }
+});
+
+test("attempt history uses attempt-specific bounded job evidence and preserves incomplete attempts", async () => {
+  const requested: string[] = [];
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+    requested.push(url);
+    if (url.includes(`/actions/workflows/347992874/runs?`)) {
+      return jsonResponse({ total_count: 1, workflow_runs: [{ id: 77, run_attempt: 2 }] });
+    }
+    if (url.includes("/actions/runs/77/artifacts?")) return jsonResponse({ total_count: 0, artifacts: [] });
+    const attempt = url.match(/\/actions\/runs\/77\/attempts\/(\d+)(?:\?|$)/)?.[1];
+    if (attempt) return jsonResponse({
+      id: 77,
+      workflow_id: 347_992_874,
+      run_attempt: Number(attempt),
+      path: ".github/workflows/deploy-github-pages.yml",
+      event: "workflow_dispatch",
+      head_branch: "main",
+      head_sha: workflowSha,
+      status: "completed",
+      conclusion: "failure",
+    });
+    const jobsAttempt = url.match(/\/actions\/runs\/77\/attempts\/(\d+)\/jobs\?/)?.[1];
+    if (jobsAttempt) return jsonResponse({
+      total_count: 1,
+      jobs: [{
+        status: jobsAttempt === "1" ? "completed" : "in_progress",
+        conclusion: jobsAttempt === "1" ? "failure" : null,
+        steps: [{ name: "Recheck all authority immediately before submission", conclusion: jobsAttempt === "1" ? "failure" : null }],
+      }],
+    });
+    return new Response("not found", { status: 404 });
+  };
+  const evidence = await collectPagesAttemptHistory({
+    repository: "CrunchyBrunch/lionlog",
+    currentRunId: 88,
+    token: "fixture-token",
+    fetchImpl,
+  });
+  assert.equal(evidence.length, 2);
+  assert.equal(evidence[0].jobsComplete, true);
+  assert.equal(evidence[1].jobsComplete, false);
+  assert.ok(requested.some((url) => url.includes("/attempts/1/jobs?")));
+  assert.ok(requested.some((url) => url.includes("/attempts/2/jobs?")));
+  assert.ok(!requested.some((url) => /\/actions\/runs\/77\/jobs\?/.test(url)));
+});
+
+test("representative 22-file Pages candidate preserves the exact candidate-to-stage inventory bytewise", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "lionlog-real-stage-"));
+  const source = path.join(root, "source");
+  const prepared = path.join(root, "prepared");
+  await writeShellSite(source);
+  for (let index = 0; index < 16; index += 1) {
+    await writeFile(path.join(source, "_next", "static", `chunk-${String(index).padStart(2, "0")}.js`), `export default ${index};\n`);
+  }
+  await preparePagesArtifact(source, prepared);
+  const paths = await validatePagesArtifact(prepared);
+  assert.equal(paths.length, 22);
+  const entries = await readPublicationFiles(prepared, paths);
+  const candidateInventory = entries
+    .map((entry) => ({ path: entry.path, bytes: entry.data.byteLength, sha256: sha256(entry.data) }))
+    .sort(bytewisePathOrder);
+  const stagedInventory = inspectPagesActionTar(createPublicationTar(entries));
+  assert.deepEqual(stagedInventory, candidateInventory);
+  assert.equal(stagedInventory[0].path, ".nojekyll");
+});
+
+function browserContext() {
+  return {
+    contextVersion: "lionlog.pages-browser-context.v1",
+    releaseId: hash,
+    shellRevision: workflowSha,
+    serviceDate: "2026-09-17",
+    hallId: "east",
+    mealPeriodId: "lunch",
+    expectedItemCount: 1,
+    expectedFirstFoodName: "Fixture Food",
+  };
+}
+
+function priorAttempt(overrides: Partial<PriorAttemptEvidence> = {}): PriorAttemptEvidence {
+  return {
+    runId: 99,
+    workflowSha,
+    runAttempt: 1,
+    status: "completed",
+    conclusion: "failure",
+    jobsComplete: true,
+    finalGateConclusion: null,
+    submissionBoundaryConclusion: null,
+    deploymentConclusion: null,
+    receipt: null,
+    ...overrides,
+  };
+}
+
+function receiptEvidence(options: {
+  submissionStarted: boolean;
+  result: string;
+  knownGood: boolean;
+  unresolved: boolean;
+  publicVerified: boolean;
+}) {
+  return {
+    artifactId: 600,
+    artifactDigest: digest,
+    artifactExpiresAt: "2026-12-01T00:00:00.000Z",
+    content: {
+      receiptVersion: "lionlog.pages-flat-receipt.v1",
+      workflow: { runId: 99, runAttempt: 1 },
+      official: { submissionStarted: options.submissionStarted, result: options.result },
+      public: {
+        markerVerified: options.publicVerified,
+        inventoryVerified: options.publicVerified,
+        browserVerified: options.publicVerified,
+      },
+      knownGood: options.knownGood,
+      unresolved: options.unresolved,
+    },
+  };
+}
+
+function bytewisePathOrder(left: { path: string }, right: { path: string }): number {
+  return left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
+}
+
+function jsonResponse(value: unknown): Response {
+  return new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
+}
 
 function validatedFixture(inventory: Array<{ path: string; bytes: number; sha256: string }>): ValidatedRelease {
   return {
@@ -222,6 +500,7 @@ function validatedFixture(inventory: Array<{ path: string; bytes: number; sha256
     },
     site: { tarFile: "site.tar", tarSha256: hash, bytes: 1, inventory },
     rollbackReceipt: null,
+    authorization: { approvalExpiresAt: "2026-09-17T13:00:00.000Z", predecessorReleaseId: FIRST_PUBLICATION },
   };
 }
 
@@ -253,7 +532,8 @@ function finalState() {
     candidateArtifact: { id: 300, digest, expired: false, expires_at: "2026-12-01T00:00:00.000Z" },
     stagedArtifacts: [{ id: 500, name: "lionlog-pages-100-1", digest, expired: false, expires_at: "2026-12-01T00:00:00.000Z" }],
     ciRun: ciRun(),
-    priorRuns: [],
+    priorAttempts: [],
+    publicPredecessor: { state: "absent" as const, releaseId: null },
     rollbackReceiptArtifact: null,
     rollbackReceiptRun: null,
   };
@@ -298,13 +578,18 @@ async function writeLiveSite(root: string): Promise<void> {
   await writeShellSite(root);
   const retrievedAt = new Date("2026-09-17T11:20:00.000Z");
   const cachedAt = new Date("2026-09-17T11:30:00.000Z");
-  const snapshots = PSU_RELEASE_HALL_IDS.map((hallId) => {
+  const snapshots = PSU_RELEASE_HALL_IDS.map((hallId, index) => {
     const hall = getPsuHall(hallId);
     const period = getPsuMealPeriod("lunch");
+    const hasItem = index === 0;
     return buildPsuSnapshot(
       { serviceDate: "2026-09-17", hallId, mealPeriodId: period.id, venueIds: [] },
-      { context: { sourceCampusId: hall.sourceCampusId, sourceDate: sourceDateFromIso("2026-09-17"), sourceMeal: period.sourceValue }, stations: [], empty: true },
-      new Map(),
+      {
+        context: { sourceCampusId: hall.sourceCampusId, sourceDate: sourceDateFromIso("2026-09-17"), sourceMeal: period.sourceValue },
+        stations: hasItem ? [{ displayName: "Fixture Station", items: [{ name: "Fixture Food", nameIssue: null, sourceHandle: "900000001", dietaryTraits: ["vegan" as const] }] }] : [],
+        empty: !hasItem,
+      },
+      hasItem ? new Map([["900000001", fixtureNutrition()]]) : new Map(),
       { retrievedAt, cachedAt, freshForMs: 18 * 60 * 60_000, retainForMs: 48 * 60 * 60_000 },
     );
   });
@@ -314,8 +599,8 @@ async function writeLiveSite(root: string): Promise<void> {
     publication: {
       mode: "field-release", sourceKind: "psu-public-menu-html", commitSha: sourceSha, serviceDate: "2026-09-17",
       hallIds: [...PSU_RELEASE_HALL_IDS], retrievalStartedAt: "2026-09-17T11:00:00.000Z", retrievalCompletedAt: cachedAt.toISOString(),
-      expectedSnapshotCount: 5, publishedSnapshotCount: 5, recognizedEmptySnapshotCount: 5, itemCount: 0,
-      coverage: "complete", sourceObservationCount: 0, publishedObservationCount: 0, omissions: { "invalid-name": 0 },
+      expectedSnapshotCount: 5, publishedSnapshotCount: 5, recognizedEmptySnapshotCount: 4, itemCount: 1,
+      coverage: "complete", sourceObservationCount: 1, publishedObservationCount: 1, omissions: { "invalid-name": 0 },
       requestCount: 10, nutritionRequests: 0, nutritionCacheHits: 0,
     },
     serviceDates: ["2026-09-17"],
@@ -330,6 +615,40 @@ async function writeLiveSite(root: string): Promise<void> {
   }
   await mkdir(path.join(root, "menu-data", "v2"), { recursive: true });
   await writeFile(path.join(root, "menu-data", "v2", "catalog.json"), `${JSON.stringify(catalog, null, 2)}\n`);
+}
+
+function fixtureNutrition() {
+  return {
+    name: "Fixture Food",
+    nameIssue: null,
+    servingLabel: "1 plate",
+    sourceQuantity: 1,
+    sourceUnit: "plate",
+    calories: 420,
+    proteinG: 18,
+    carbsG: 52,
+    fatG: 14,
+    additional: {
+      saturatedFatG: null,
+      transFatG: null,
+      cholesterolMg: null,
+      sodiumMg: 480,
+      fiberG: null,
+      sugarsG: null,
+      addedSugarsG: null,
+      vitaminDMcg: null,
+      calciumMg: null,
+      ironMg: null,
+      potassiumMg: null,
+    },
+    ingredients: "Fixture ingredients.",
+    allergens: [],
+  } as const;
+}
+
+function catalogSnapshotId(catalogText: string): string {
+  const catalog = JSON.parse(catalogText) as { snapshots: Array<{ snapshotId: string }> };
+  return catalog.snapshots[0].snapshotId;
 }
 
 function createStoredZip(entries: Array<{ path: string; data: Buffer; mode?: number }>): Buffer {

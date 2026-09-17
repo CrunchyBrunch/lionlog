@@ -20,11 +20,13 @@ import { deriveMenuEvidence } from "../infrastructure/publication/menu-evidence.
 import { computePublicationReleaseId, sha256 } from "./create-publication-bundle.ts";
 import { extractPublicationTar, parsePublicationTar } from "./publication-tar.ts";
 import { validatePagesArtifact, validatePublicationEntryPath } from "./prepare-pages-artifact.ts";
+import { assertExpectedPredecessor, validateExpectedPredecessor, type PublicReleaseObservation } from "./public-release-state.ts";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const GIT_SHA = /^[a-f0-9]{40}$/;
 const ARTIFACT_DIGEST = /^sha256:[a-f0-9]{64}$/;
-const MINIMUM_FRESHNESS_MS = 15 * 60_000;
+export const PREAPPROVAL_HEADROOM_MS = 30 * 60_000;
+export const ACTION_HEADROOM_MS = 15 * 60_000;
 const MAX_ARTIFACT_BYTES = 110 * 1024 * 1024;
 const PROMOTION_WORKFLOW = ".github/workflows/deploy-github-pages.yml";
 
@@ -88,6 +90,7 @@ export interface ValidatedRelease {
     artifactId: number; artifactDigest: string; artifactExpiresAt: string; runId: number;
     releaseId: string; sourceWorkflowSha: string;
   };
+  authorization: { approvalExpiresAt: string; predecessorReleaseId: string };
 }
 
 export async function verifySupportedCandidate(options: {
@@ -109,6 +112,9 @@ export async function verifySupportedCandidate(options: {
   rollbackReceiptArtifactDigest?: string;
   rollbackReceiptArtifact?: GithubArtifact;
   rollbackReceiptRun?: GithubRun;
+  approvalExpiresAt: string;
+  expectedPredecessorReleaseId: string;
+  publicPredecessor: PublicReleaseObservation;
   now: Date;
 }): Promise<ValidatedRelease> {
   const { metadata } = options;
@@ -122,6 +128,10 @@ export async function verifySupportedCandidate(options: {
   assertPositive(options.candidateArtifactId, "Candidate artifact ID");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(options.expectedServiceDate)) throw new Error("Expected service date is invalid.");
   if (!Number.isFinite(options.now.getTime())) throw new Error("Verification time is invalid.");
+  const approvalExpiresAt = parseStrictTimestamp(options.approvalExpiresAt, "Approval expiry");
+  if (approvalExpiresAt < options.now.getTime() + PREAPPROVAL_HEADROOM_MS) throw new Error("Approval expiry lacks preapproval headroom.");
+  const predecessorReleaseId = validateExpectedPredecessor(options.expectedPredecessorReleaseId);
+  assertExpectedPredecessor(predecessorReleaseId, options.publicPredecessor);
 
   validateTrustedMetadata(metadata, options);
   const manifestPath = path.join(options.bundleDirectory, "release-manifest.json");
@@ -177,10 +187,13 @@ export async function verifySupportedCandidate(options: {
 
   const freshUntil = Date.parse(manifest.menu.earliestFreshUntil);
   const retainUntil = Date.parse(manifest.menu.earliestRetainUntil);
-  if (options.operation === "promote" && freshUntil < options.now.getTime() + MINIMUM_FRESHNESS_MS) {
-    throw new Error("Candidate lacks fifteen minutes of truthful freshness.");
+  if (options.operation === "promote" && freshUntil < options.now.getTime() + PREAPPROVAL_HEADROOM_MS) {
+    throw new Error("Candidate lacks the required preapproval freshness headroom.");
   }
-  if (retainUntil <= options.now.getTime()) throw new Error("Candidate retention has elapsed.");
+  if (retainUntil < options.now.getTime() + PREAPPROVAL_HEADROOM_MS) throw new Error("Candidate lacks the required preapproval retention headroom.");
+  if (Date.parse(metadata.candidateArtifact.expires_at) < options.now.getTime() + PREAPPROVAL_HEADROOM_MS) {
+    throw new Error("Candidate artifact lacks the required preapproval availability headroom.");
+  }
 
   let rollbackReceipt: ValidatedRelease["rollbackReceipt"] = null;
   if (options.operation === "rollback") {
@@ -245,6 +258,7 @@ export async function verifySupportedCandidate(options: {
     },
     site: manifest.site,
     rollbackReceipt,
+    authorization: { approvalExpiresAt: options.approvalExpiresAt, predecessorReleaseId },
   };
 }
 
@@ -290,7 +304,7 @@ export function inspectPagesActionTar(archive: Buffer): Array<{ path: string; by
     offset += Math.ceil(size / 512) * 512;
   }
   if (terminators < 2 || files.length === 0) throw new Error("Staged Pages tar is incomplete.");
-  return files.sort((left, right) => left.path.localeCompare(right.path));
+  return files.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
 }
 
 export async function createPreapprovalSummary(options: {
@@ -298,6 +312,7 @@ export async function createPreapprovalSummary(options: {
   stagedArtifact: GithubArtifact;
   stagedArtifactName: string;
   stagedTarPath: string;
+  now: Date;
 }): Promise<Record<string, unknown>> {
   const expectedName = `lionlog-pages-${options.validated.workflow.runId}-${options.validated.workflow.runAttempt}`;
   if (options.stagedArtifactName !== expectedName || options.stagedArtifact.name !== expectedName) throw new Error("Staged Pages artifact name is not unique to this run attempt.");
@@ -311,6 +326,9 @@ export async function createPreapprovalSummary(options: {
     || options.stagedArtifact.workflow_run.head_branch !== "main"
     || options.stagedArtifact.workflow_run.head_repository_id !== LIONLOG_REPOSITORY_ID
   ) throw new Error("Staged Pages artifact provenance mismatch.");
+  if (!Number.isFinite(options.now.getTime()) || Date.parse(options.stagedArtifact.expires_at) < options.now.getTime() + PREAPPROVAL_HEADROOM_MS) {
+    throw new Error("Staged Pages artifact lacks the required preapproval availability headroom.");
+  }
   const stagedTar = await readFile(options.stagedTarPath);
   const inventory = inspectPagesActionTar(stagedTar);
   if (JSON.stringify(inventory) !== JSON.stringify(options.validated.site.inventory)) throw new Error("Staged Pages artifact inventory differs from the approved candidate.");
@@ -468,6 +486,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
       rollbackReceiptRun: args.has("--rollback-receipt-run-metadata")
         ? JSON.parse(await readFile(required("--rollback-receipt-run-metadata"), "utf8")) : undefined,
       now: new Date(args.get("--now") ?? Date.now()),
+      approvalExpiresAt: required("--approval-expires-at"),
+      expectedPredecessorReleaseId: required("--predecessor-release-id"),
+      publicPredecessor: JSON.parse(await readFile(required("--public-predecessor"), "utf8")),
     });
     process.stdout.write(`${JSON.stringify(validated, null, 2)}\n`);
   } else if (mode === "stage") {
@@ -476,9 +497,17 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
       stagedArtifact: JSON.parse(await readFile(required("--staged-metadata"), "utf8")),
       stagedArtifactName: required("--staged-name"),
       stagedTarPath: required("--staged-tar"),
+      now: new Date(args.get("--now") ?? Date.now()),
     });
     process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
   } else {
     throw new Error("Supported Pages release mode is invalid.");
   }
+}
+
+function parseStrictTimestamp(value: unknown, label: string): number {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) throw new Error(`${label} is invalid.`);
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) throw new Error(`${label} is invalid.`);
+  return parsed;
 }

@@ -40,6 +40,14 @@ on:
         description: Exact main SHA containing this reviewed workflow
         required: true
         type: string
+      expected_predecessor_release_id:
+        description: Exact public predecessor release ID, or NONE_FIRST_PUBLICATION
+        required: true
+        type: string
+      approval_expires_at:
+        description: Exact PM approval expiry in canonical UTC milliseconds
+        required: true
+        type: string
       rollback_receipt_artifact_id:
         description: Exact known-good flat receipt artifact ID, or NONE for promotion
         required: true
@@ -56,7 +64,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: lionlog-pages-production
+  group: github-pages-production
   cancel-in-progress: false
 
 jobs:
@@ -78,7 +86,7 @@ jobs:
       staged_artifact_digest: ${{ steps.staged.outputs.digest }}
       staged_artifact_expires_at: ${{ steps.staged.outputs.expires_at }}
       summary_artifact_id: ${{ steps.summary-upload.outputs.artifact-id }}
-      summary_artifact_digest: ${{ steps.summary-upload.outputs.artifact-digest }}
+      summary_artifact_digest: ${{ steps.summary-digest.outputs.digest }}
       summary_artifact_name: ${{ steps.names.outputs.summary }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
@@ -88,7 +96,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci --ignore-scripts
+      - run: npm ci --ignore-scripts --omit=dev
       - name: Validate immutable input shapes
         shell: bash
         env:
@@ -101,6 +109,8 @@ jobs:
           EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
           EXPECTED_SERVICE_DATE: ${{ inputs.expected_service_date }}
           EXPECTED_WORKFLOW_SHA: ${{ inputs.expected_workflow_sha }}
+          EXPECTED_PREDECESSOR: ${{ inputs.expected_predecessor_release_id }}
+          APPROVAL_EXPIRES_AT: ${{ inputs.approval_expires_at }}
           ROLLBACK_RECEIPT_ID: ${{ inputs.rollback_receipt_artifact_id }}
           ROLLBACK_RECEIPT_DIGEST: ${{ inputs.rollback_receipt_artifact_digest }}
         run: |
@@ -113,6 +123,8 @@ jobs:
           [[ "$EXPECTED_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
           [[ "$EXPECTED_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]
           [[ "$EXPECTED_SERVICE_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+          [[ "$EXPECTED_PREDECESSOR" == "NONE_FIRST_PUBLICATION" || "$EXPECTED_PREDECESSOR" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$APPROVAL_EXPIRES_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$ ]]
           if [[ "$OPERATION" == "promote" ]]; then
             test "$ROLLBACK_RECEIPT_ID" = NONE
             test "$ROLLBACK_RECEIPT_DIGEST" = NONE
@@ -151,6 +163,11 @@ jobs:
             --slurpfile ciJobs work/supported-pages/metadata/ci-jobs.json \
             '{repository:$repository[0],main:$main[0],workflowRun:$workflowRun[0],candidateRun:$candidateRun[0],candidateArtifact:$candidateArtifact[0],ciRun:$ciRun[0],ciJobs:$ciJobs[0]}' \
             > work/supported-pages/metadata.json
+      - name: Bind the exact public predecessor before approval
+        run: >-
+          node --experimental-strip-types scripts/public-release-state.ts
+          --expected=${{ inputs.expected_predecessor_release_id }}
+          --output=work/supported-pages/public-predecessor.json
       - name: Download exact retained inputs
         shell: bash
         env:
@@ -193,6 +210,8 @@ jobs:
             --candidate-run-id=${{ inputs.candidate_run_id }} --candidate-artifact-id=${{ inputs.candidate_artifact_id }} \
             --candidate-artifact-digest=${{ inputs.candidate_artifact_digest }} --candidate-manifest-sha256=${{ inputs.candidate_manifest_sha256 }} \
             --release-id=${{ inputs.expected_release_id }} --source-sha=${{ inputs.expected_source_sha }} --service-date=${{ inputs.expected_service_date }} \
+            --approval-expires-at=${{ inputs.approval_expires_at }} --predecessor-release-id=${{ inputs.expected_predecessor_release_id }} \
+            --public-predecessor=work/supported-pages/public-predecessor.json \
             "${EXTRA_ARGS[@]}" > work/supported-pages/validated.json
       - id: stage
         name: Stage exact bytes with official Pages artifact action
@@ -235,6 +254,15 @@ jobs:
           retention-days: 90
           if-no-files-found: error
           overwrite: false
+      - id: summary-digest
+        name: Normalize retained preapproval wrapper digest
+        shell: bash
+        env:
+          RAW_DIGEST: ${{ steps.summary-upload.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          NORMALIZED="$(node --experimental-strip-types scripts/artifact-digest.ts --expected="$RAW_DIGEST" --actual="$RAW_DIGEST")"
+          echo "digest=$NORMALIZED" >> "$GITHUB_OUTPUT"
       - name: Publish human review summary
         shell: bash
         run: |
@@ -248,6 +276,8 @@ jobs:
             echo "- Coverage: \`$(jq -r .release.coverage work/supported-pages/preapproval.json)\`; invalid-name omissions: \`$(jq -r '.release.omissions[\"invalid-name\"]' work/supported-pages/preapproval.json)\`"
             echo "- Fresh until: \`$(jq -r .release.earliestFreshUntil work/supported-pages/preapproval.json)\`"
             echo "- Retained until: \`$(jq -r .release.earliestRetainUntil work/supported-pages/preapproval.json)\`"
+            echo "- Public predecessor: \`${{ inputs.expected_predecessor_release_id }}\`"
+            echo "- Approval expires: \`${{ inputs.approval_expires_at }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
@@ -273,7 +303,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci --ignore-scripts
+      - run: npm ci --ignore-scripts --omit=dev
       - name: Download exact preapproval summary
         shell: bash
         env:
@@ -284,7 +314,7 @@ jobs:
           set -euo pipefail
           mkdir -p work/supported-pages-final
           gh api "repos/${{ github.repository }}/actions/artifacts/$SUMMARY_ID/zip" > work/supported-pages-final/summary.zip
-          test "sha256:$(sha256sum work/supported-pages-final/summary.zip | cut -d' ' -f1)" = "$SUMMARY_DIGEST"
+          node --experimental-strip-types scripts/artifact-digest.ts --expected="$SUMMARY_DIGEST" --file=work/supported-pages-final/summary.zip > /dev/null
           node --experimental-strip-types scripts/artifact-zip.ts --zip=work/supported-pages-final/summary.zip \
             --output=work/supported-pages-final/summary --expected=preapproval.json
       - name: Recheck all authority immediately before submission
@@ -304,6 +334,9 @@ jobs:
           gh api "repos/${{ github.repository }}/actions/artifacts/$CANDIDATE_ARTIFACT_ID" > work/supported-pages-final/candidate-artifact.json
           gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?per_page=100" --jq .artifacts > work/supported-pages-final/staged-artifacts.json
           gh api "repos/${{ github.repository }}/actions/runs/$CI_RUN_ID" > work/supported-pages-final/ci-run.json
+          node --experimental-strip-types scripts/public-release-state.ts \
+            --expected="$(jq -er .authorization.predecessorReleaseId "$SUMMARY")" \
+            --output=work/supported-pages-final/public-predecessor.json
           if [[ "$(jq -r .operation "$SUMMARY")" == rollback ]]; then
             RECEIPT_ARTIFACT_ID="$(jq -er .rollbackReceipt.artifactId "$SUMMARY")"
             RECEIPT_RUN_ID="$(jq -er .rollbackReceipt.runId "$SUMMARY")"
@@ -313,26 +346,15 @@ jobs:
             echo null > work/supported-pages-final/rollback-receipt-artifact.json
             echo null > work/supported-pages-final/rollback-receipt-run.json
           fi
-          echo '[]' > work/supported-pages-final/prior-runs.json
-          gh api "repos/${{ github.repository }}/actions/workflows/347992874/runs?per_page=100" > work/supported-pages-final/runs-page.json
-          test "$(jq -er .total_count work/supported-pages-final/runs-page.json)" -le 100
-          jq .workflow_runs work/supported-pages-final/runs-page.json > work/supported-pages-final/runs.json
-          jq -c '.[] | select(.id != $current) | {id,head_sha,run_attempt,conclusion}' --argjson current "${{ github.run_id }}" work/supported-pages-final/runs.json | while read -r prior; do
-            RUN_ID="$(jq -r .id <<< "$prior")"
-            gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/jobs?per_page=100" > work/supported-pages-final/prior-jobs.json
-            test "$(jq -er .total_count work/supported-pages-final/prior-jobs.json)" -le 100
-            STEP="$(jq '[.jobs[].steps[]? | select(.name == "Deploy with official Pages action" or .name == "Deploy exact staged artifact") | .conclusion] | last // null' work/supported-pages-final/prior-jobs.json)"
-            jq --argjson run "$prior" --argjson step "$STEP" '. + [{runId:$run.id,workflowSha:$run.head_sha,runAttempt:$run.run_attempt,conclusion:$run.conclusion,officialStepConclusion:$step}]' \
-              work/supported-pages-final/prior-runs.json > work/supported-pages-final/prior-runs.next.json
-            mv work/supported-pages-final/prior-runs.next.json work/supported-pages-final/prior-runs.json
-          done
+          node --experimental-strip-types scripts/collect-pages-attempt-history.ts --output=work/supported-pages-final/prior-attempts.json
           jq -n --slurpfile repository work/supported-pages-final/repository.json --slurpfile main work/supported-pages-final/main.json \
             --slurpfile workflowRun work/supported-pages-final/workflow-run.json --slurpfile candidateRun work/supported-pages-final/candidate-run.json \
             --slurpfile candidateArtifact work/supported-pages-final/candidate-artifact.json --slurpfile stagedArtifacts work/supported-pages-final/staged-artifacts.json \
-            --slurpfile ciRun work/supported-pages-final/ci-run.json --slurpfile priorRuns work/supported-pages-final/prior-runs.json \
+            --slurpfile ciRun work/supported-pages-final/ci-run.json --slurpfile priorAttempts work/supported-pages-final/prior-attempts.json \
             --slurpfile rollbackReceiptArtifact work/supported-pages-final/rollback-receipt-artifact.json \
             --slurpfile rollbackReceiptRun work/supported-pages-final/rollback-receipt-run.json \
-            '{repository:$repository[0],main:$main[0],workflowRun:$workflowRun[0],candidateRun:$candidateRun[0],candidateArtifact:$candidateArtifact[0],stagedArtifacts:$stagedArtifacts[0],ciRun:$ciRun[0],priorRuns:$priorRuns[0],rollbackReceiptArtifact:$rollbackReceiptArtifact[0],rollbackReceiptRun:$rollbackReceiptRun[0]}' \
+            --slurpfile publicPredecessor work/supported-pages-final/public-predecessor.json \
+            '{repository:$repository[0],main:$main[0],workflowRun:$workflowRun[0],candidateRun:$candidateRun[0],candidateArtifact:$candidateArtifact[0],stagedArtifacts:$stagedArtifacts[0],ciRun:$ciRun[0],priorAttempts:$priorAttempts[0],rollbackReceiptArtifact:$rollbackReceiptArtifact[0],rollbackReceiptRun:$rollbackReceiptRun[0],publicPredecessor:$publicPredecessor[0]}' \
             > work/supported-pages-final/state.json
           node --experimental-strip-types scripts/supported-pages-control.ts verify --summary="$SUMMARY" \
             --state=work/supported-pages-final/state.json --incidents=infrastructure/publication/pages-incident-history.json \
@@ -343,9 +365,10 @@ jobs:
         run: echo "started=true" >> "$GITHUB_OUTPUT"
       - id: deployment
         name: Deploy with official Pages action
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.0
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
         with:
           artifact_name: ${{ needs.validate-and-stage.outputs.staged_artifact_name }}
+          timeout: 600000
 
   verify-public:
     if: ${{ always() && needs.validate-and-stage.result == 'success' && needs.deploy.result != 'skipped' }}
@@ -363,7 +386,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci --ignore-scripts
+      - run: npm ci --ignore-scripts --omit=dev
       - name: Recover exact summary and manifest
         shell: bash
         env:
@@ -376,11 +399,14 @@ jobs:
           set -euo pipefail
           mkdir -p work/supported-pages-public
           gh api "repos/${{ github.repository }}/actions/artifacts/$SUMMARY_ID/zip" > work/supported-pages-public/summary.zip
-          test "sha256:$(sha256sum work/supported-pages-public/summary.zip | cut -d' ' -f1)" = "$SUMMARY_DIGEST"
+          node --experimental-strip-types scripts/artifact-digest.ts --expected="$SUMMARY_DIGEST" --file=work/supported-pages-public/summary.zip > /dev/null
           node --experimental-strip-types scripts/artifact-zip.ts --zip=work/supported-pages-public/summary.zip --output=work/supported-pages-public/summary --expected=preapproval.json
           gh api "repos/${{ github.repository }}/actions/artifacts/$CANDIDATE_ARTIFACT_ID/zip" > work/supported-pages-public/candidate.zip
           test "sha256:$(sha256sum work/supported-pages-public/candidate.zip | cut -d' ' -f1)" = "$CANDIDATE_ARTIFACT_DIGEST"
           node --experimental-strip-types scripts/artifact-zip.ts --zip=work/supported-pages-public/candidate.zip --output=work/supported-pages-public/candidate --expected=release-manifest.json,site.tar
+          node --experimental-strip-types scripts/select-browser-verification-context.ts \
+            --bundle=work/supported-pages-public/candidate \
+            --output=work/supported-pages-public/browser-context.json
           printf '%s\n' '{"markerVerified":false,"inventoryVerified":false,"browserVerified":false}' > work/supported-pages-public/checks.json
       - name: Verify public inventory and mobile PWA behavior
         if: ${{ needs.deploy.result == 'success' && needs.deploy.outputs.submission_started == 'true' }}
@@ -388,6 +414,7 @@ jobs:
         env:
           RELEASE_MANIFEST_PATH: work/supported-pages-public/candidate/release-manifest.json
           PUBLIC_URL: https://crunchybrunch.github.io/lionlog/
+          BROWSER_CONTEXT_PATH: work/supported-pages-public/browser-context.json
         run: |
           set -euo pipefail
           RELEASE_ID="$(jq -er .releaseId "$RELEASE_MANIFEST_PATH")"

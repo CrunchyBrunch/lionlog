@@ -5,12 +5,12 @@ Use this checklist against the public production URL after the exact merged comm
 ## Required device pass
 
 - Open the public URL in Safari on an iPhone and confirm LionLog appears directly without any sign-in screen.
-- Confirm the sample-data label is visible and the meal-builder controls work.
+- Confirm the approved live snapshot label, service date, hall, meal period, retrieval time, and source attribution are visible and the meal-builder controls work. Sample mode must not activate unless selected explicitly.
 - Choose **Share → Add to Home Screen**, accept the LionLog name, and launch the new icon.
 - Confirm LionLog opens without Safari chrome in standalone mode and respects the safe areas.
 - Close and relaunch the installed app; confirm it returns directly to LionLog without any sign-in screen.
 - Turn on airplane mode, fully close LionLog, then reopen it from the home screen.
-- Confirm the core interface and sample menu load, and the offline status bar is visible.
+- Confirm the core interface and the same previously validated live menu load from browser storage, and the offline/cached status is visible. An empty shell or silent sample substitution is a failure.
 - Restore connectivity and confirm the offline status bar clears without losing the current interface.
 - After a later deployment, reopen LionLog, tap **Update LionLog** if prompted, and confirm the refreshed app still loads.
 

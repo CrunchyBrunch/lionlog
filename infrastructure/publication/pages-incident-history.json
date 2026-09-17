@@ -3,6 +3,7 @@
   "incidents": [
     {
       "runId": 35221481720,
+      "runAttempt": 1,
       "workflowSha": "4a91cda0de93b920607f2aa37163790bb4b662f2",
       "candidateArtifactId": 10497255246,
       "stagedArtifactId": 10496838181,

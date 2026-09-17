@@ -1,17 +1,26 @@
 import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const EXPECTED_URL = "https://crunchybrunch.github.io/lionlog/";
 
-export function assertPageState(state, { offline = false } = {}) {
+export function assertPageState(state, expected, { offline = false } = {}) {
   if (state.url !== EXPECTED_URL) throw new Error(`Browser reached an unexpected URL: ${state.url}`);
   if (state.title !== "Build a meal | LionLog") throw new Error("LionLog document title is missing.");
-  if (!state.text.includes("LionLog")) throw new Error("LionLog application content is missing.");
+  if (state.shellRevision !== expected.shellRevision) throw new Error("Rendered shell revision differs from the approved release.");
+  if (state.selectedHall !== expected.hallId || state.selectedPeriod !== expected.mealPeriodId || state.selectedDate !== expected.serviceDate) {
+    throw new Error("Browser did not retain the selected approved menu context.");
+  }
+  if (state.itemNames.length !== expected.expectedItemCount || state.itemNames[0] !== expected.expectedFirstFoodName) {
+    throw new Error("Browser menu item identity/count differs from the approved snapshot.");
+  }
+  if (state.samplePressed || !state.livePressed || /sample/i.test(state.sourceState)) throw new Error("Browser silently switched to sample data.");
   if (state.scrollWidth > state.clientWidth) throw new Error(`Mobile viewport overflows horizontally (${state.scrollWidth} > ${state.clientWidth}).`);
   if (!offline) {
+    if (state.publicReleaseId !== expected.releaseId) throw new Error("Browser release marker differs from the approved release.");
     if (!state.text.includes("Retrieved")) throw new Error("Live source retrieval time is not visible.");
     if (!state.text.includes("independent") || !state.text.includes("not affiliated with or endorsed by Penn State")) {
       throw new Error("Independent/not-endorsed disclosure is not visible.");
@@ -27,6 +36,9 @@ export function assertNoBrowserDiagnostics(events) {
 async function verify() {
   const targetUrl = process.env.PUBLIC_URL ?? EXPECTED_URL;
   if (targetUrl !== EXPECTED_URL) throw new Error("Public browser verification URL is not the canonical Pages URL.");
+  const contextPath = process.env.BROWSER_CONTEXT_PATH;
+  if (!contextPath) throw new Error("Browser verification context is missing.");
+  const expected = validateExpectedContext(JSON.parse(await readFile(contextPath, "utf8")));
   const profile = await mkdtemp(path.join(tmpdir(), "lionlog-pages-chrome-"));
   const port = 9222;
   const chrome = spawn(process.env.CHROME_BIN ?? "google-chrome", [
@@ -52,14 +64,17 @@ async function verify() {
     await client.command("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
     await navigate(client, targetUrl);
     await evaluate(client, `Promise.race([navigator.serviceWorker.ready.then(() => true), new Promise((_, reject) => setTimeout(() => reject(new Error("service worker timeout")), 15000))])`, true);
-    const online = await waitForPageState(client, (state) => state.text.includes("Retrieved"));
-    assertPageState(online);
+    await selectMenuContext(client, expected);
+    const online = await waitForPageState(client, (state) => state.itemNames.length === expected.expectedItemCount && state.itemNames[0] === expected.expectedFirstFoodName);
+    online.publicReleaseId = await evaluate(client, `fetch("./release.json", {cache:"no-store"}).then((response) => { if (!response.ok) throw new Error("release marker unavailable"); return response.json(); }).then((marker) => marker.releaseId)`, true);
+    assertPageState(online, expected);
     assertNoBrowserDiagnostics(diagnostics);
 
     await client.command("Network.emulateNetworkConditions", { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 });
     await reload(client);
-    const offline = await waitForPageState(client, (state) => state.text.includes("LionLog"));
-    assertPageState(offline, { offline: true });
+    await selectMenuContext(client, expected);
+    const offline = await waitForPageState(client, (state) => state.itemNames.length === expected.expectedItemCount && state.itemNames[0] === expected.expectedFirstFoodName);
+    assertPageState(offline, expected, { offline: true });
     assertNoBrowserDiagnostics(diagnostics);
     client.close();
     process.stdout.write(`${JSON.stringify({ online, offline, diagnostics: diagnostics.length })}\n`);
@@ -141,7 +156,33 @@ async function evaluate(client, expression, awaitPromise = false) {
 }
 
 async function pageState(client) {
-  return evaluate(client, `({url: location.href, title: document.title, text: document.body.innerText, scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth})`);
+  return evaluate(client, `({
+    url: location.href,
+    title: document.title,
+    text: document.body.innerText,
+    shellRevision: document.documentElement.getAttribute("data-lionlog-shell"),
+    selectedHall: document.querySelectorAll("select")[0]?.value ?? null,
+    selectedPeriod: document.querySelectorAll("select")[1]?.value ?? null,
+    selectedDate: document.querySelector('input[type="date"]')?.value ?? null,
+    itemNames: [...document.querySelectorAll(".food-row h3")].map((node) => node.textContent),
+    sourceState: document.querySelector(".menu-section .section-kicker")?.textContent ?? "",
+    livePressed: document.querySelector('button[aria-pressed="true"]')?.textContent === "PSU snapshots",
+    samplePressed: [...document.querySelectorAll("button")].some((button) => button.textContent === "Sample demo" && button.getAttribute("aria-pressed") === "true"),
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+  })`);
+}
+
+async function selectMenuContext(client, expected) {
+  await evaluate(client, `(async () => {
+    const change = (element, value) => { element.value = value; element.dispatchEvent(new Event("change", {bubbles:true})); };
+    const selects = document.querySelectorAll("select");
+    if (selects.length < 2) throw new Error("menu selectors unavailable");
+    change(selects[0], ${JSON.stringify(expected.hallId)});
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    change(document.querySelectorAll("select")[1], ${JSON.stringify(expected.mealPeriodId)});
+    change(document.querySelector('input[type="date"]'), ${JSON.stringify(expected.serviceDate)});
+  })()`, true);
 }
 
 async function waitForPageState(client, ready) {
@@ -158,6 +199,19 @@ function withTimeout(promise, label) {
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out.`)), 20_000)),
   ]);
+}
+
+function validateExpectedContext(value) {
+  if (
+    value?.contextVersion !== "lionlog.pages-browser-context.v1"
+    || !/^[a-f0-9]{64}$/.test(value.releaseId ?? "")
+    || !/^[a-f0-9]{40}$/.test(value.shellRevision ?? "")
+    || !/^\d{4}-\d{2}-\d{2}$/.test(value.serviceDate ?? "")
+    || typeof value.hallId !== "string" || typeof value.mealPeriodId !== "string"
+    || !Number.isSafeInteger(value.expectedItemCount) || value.expectedItemCount < 1
+    || typeof value.expectedFirstFoodName !== "string" || value.expectedFirstFoodName.length < 1
+  ) throw new Error("Browser verification context is invalid or empty.");
+  return value;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await verify();

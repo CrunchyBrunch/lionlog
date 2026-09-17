@@ -3,7 +3,7 @@
 Date: 2026-09-01  
 Audited base: `37706c119f4b2f12d089004a3e59de6ae8f8223f`
 
-Status update: the repository was subsequently made public. A separate manual-only Pages deployment workflow was added for review in commit `bb46104e4bb222e2f01c638f9a148f8d7dd6e337`; it has not been run, Pages settings remain an owner action, and the original audit conclusions remain historical context.
+Status update (2026-09-17): the repository was subsequently made public. The earlier custom production adapter was superseded by a draft, manual-only supported-actions workflow using the official Pages upload/deploy actions. The original Alpha 3 counts and audit conclusions below remain dated historical context; current production handoff rules are authoritative in `docs/github-pages-deployment.md`.
 
 ## Result
 
