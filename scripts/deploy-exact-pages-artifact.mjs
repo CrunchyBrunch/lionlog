@@ -128,11 +128,8 @@ export async function deployExactPagesArtifact({
     throw new Error("Pages deployment response omitted a safe deployment ID; reconcile before retrying.");
   }
   await recordAttempt(evidence({ phase: "accepted", artifactId, buildVersion, deploymentId: created.id, status: "accepted", uncertain: true, recordedAt: new Date(now()).toISOString() }));
-  const statusUrl = new URL(created.status_url ?? "", API_ROOT);
-  if (statusUrl.origin !== API_ROOT || statusUrl.pathname !== `/repos/${REPOSITORY}/pages/deployments/${created.id}/status`) {
-    throw new Error("Pages deployment returned an unexpected status URL.");
-  }
   await recordAccepted({ repositoryDeploymentId, pagesDeploymentId: created.id });
+  const statusUrl = new URL(`${API_ROOT}/repos/${REPOSITORY}/pages/deployments/${created.id}`);
   const deadline = now() + timeoutMs;
   while (now() < deadline) {
     await wait(5_000);
