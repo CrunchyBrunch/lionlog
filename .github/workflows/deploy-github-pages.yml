@@ -391,6 +391,7 @@ jobs:
           SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
           SOURCE_MANIFEST_DIGEST: ${{ inputs.source_manifest_digest }}
           RELEASE_MANIFEST_PATH: work/pages-promotion/bundle/release-manifest.json
+          CURRENT_RECEIPT_ARTIFACT_ID: ${{ inputs.current_attempt_receipt_artifact_id }}
           CURRENT_RECEIPT_ARTIFACT_DIGEST: ${{ inputs.current_attempt_receipt_artifact_digest }}
         run: |
           set -euo pipefail
