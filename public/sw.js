@@ -126,10 +126,14 @@ self.addEventListener("fetch", (event) => {
     const cached = await cache.match(request);
     if (cached) return cached;
 
-    const response = await fetch(request);
-    if (response.ok && !response.redirected && isWithinApplicationScope(response.url)) {
-      await cache.put(request, response.clone());
+    try {
+      const response = await fetch(request);
+      if (response.ok && !response.redirected && isWithinApplicationScope(response.url)) {
+        await cache.put(request, response.clone());
+      }
+      return response;
+    } catch {
+      return Response.error();
     }
-    return response;
   })());
 });

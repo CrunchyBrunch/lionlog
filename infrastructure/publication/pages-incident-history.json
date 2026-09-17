@@ -1,0 +1,65 @@
+{
+  "historyVersion": "lionlog.pages-incident-history.v1",
+  "incidents": [
+    {
+      "runId": 34609219734,
+      "runAttempt": 1,
+      "workflowSha": "3d5181c962486aa25345f4f16fbdd75932e0d831",
+      "outcome": "resolved-legacy-pre-submission-failure",
+      "legacyEvidence": {
+        "validationFailure": {
+          "jobId": 103295384726,
+          "jobName": "deploy",
+          "jobConclusion": "failure",
+          "stepName": "Perform final provenance, state, deadline, and freshness checks",
+          "stepConclusion": "failure"
+        },
+        "deploymentBoundary": {
+          "jobId": 103295384726,
+          "jobName": "deploy",
+          "jobConclusion": "failure",
+          "stepName": "Deploy exact staged artifact",
+          "stepConclusion": "skipped"
+        }
+      },
+      "checkedAt": "2026-09-17T00:00:00.000Z",
+      "note": "Immutable attempt-specific job evidence records a failed final validation and a skipped deployment step; the legacy receipt alone is not treated as proof of non-submission."
+    },
+    {
+      "runId": 34881025561,
+      "runAttempt": 1,
+      "workflowSha": "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64",
+      "outcome": "resolved-legacy-pre-submission-failure",
+      "legacyEvidence": {
+        "validationFailure": {
+          "jobId": 104100073427,
+          "jobName": "verify-and-stage",
+          "jobConclusion": "failure",
+          "stepName": "Verify current attempt separately from the known-good rollback target",
+          "stepConclusion": "failure"
+        },
+        "deploymentBoundary": {
+          "jobId": 104100243029,
+          "jobName": "deploy",
+          "jobConclusion": "skipped",
+          "stepName": null,
+          "stepConclusion": "skipped"
+        }
+      },
+      "checkedAt": "2026-09-17T00:00:00.000Z",
+      "note": "Immutable attempt-specific job evidence records a failed validation/staging step and an entirely skipped deployment job before any Pages submission boundary."
+    },
+    {
+      "runId": 35221481720,
+      "runAttempt": 1,
+      "workflowSha": "4a91cda0de93b920607f2aa37163790bb4b662f2",
+      "candidateArtifactId": 10497255246,
+      "stagedArtifactId": 10496838181,
+      "repositoryDeploymentId": 6502721175,
+      "outcome": "resolved-unknown-no-publication",
+      "publicReleaseId": "NONE_404",
+      "checkedAt": "2026-09-17T00:00:00.000Z",
+      "note": "The retained attempt evidence did not establish a completed publication, and the public release marker remained absent. This source-reviewed record resolves the legacy custom-adapter attempt without treating missing custom ledger data alone as proof."
+    }
+  ]
+}

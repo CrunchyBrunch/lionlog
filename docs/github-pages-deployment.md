@@ -1,51 +1,47 @@
 # Manual GitHub Pages deployment handoff
 
-Date: 2026-09-09
+Date: 2026-09-17
 Expected project URL: `https://crunchybrunch.github.io/lionlog/`
 
-## Current state
+## Supported architecture
 
-The repository contains a manual-only production publication workflow at `.github/workflows/deploy-github-pages.yml`. Its first protected promotion attempt on September 11, 2026 failed at the final manifest boundary. The immutable job record shows the separately named Pages adapter step was skipped, so that job did not enter LionLog's OIDC/Pages adapter; the retained receipt remains conservatively `submission-uncertain`. The exact bounded incident record, reconciliation tuple, automatic environment-deployment relationship, and next-attempt prerequisites are in the [production publication runbook](psu-live-menu/production-publication-runbook.md).
+The manual production workflow uses GitHub's supported Pages actions:
 
-The separate review-artifact boundary was proven at commit `6858a885f12484e5843daaf68de6c14fbd61d424` by GitHub Actions run `33567755269`. The downloaded tar had SHA-256 `F3A9EF4DA047856D18FAEFFB35084267EBB007EF7D719CBC0207813C43B9CA43`. It retained `.nojekyll`, project-prefixed framework and self-hosted font URLs, and no menu publication.
+validated retained candidate → `actions/upload-pages-artifact` → protected `github-pages` approval → `actions/deploy-pages` → exact public inventory and mobile/offline verification → one flat retained receipt.
 
-## Workflow safety boundary
+LionLog does not create Pages deployments, request OIDC tokens, or poll Pages status itself. Those responsibilities belong to the pinned official action. The removed custom adapter, deployment ledgers, partial-approval tokens, and automatic first-release recovery are not part of this workflow. A Project Manager approval still has an exact digest-bound expiry; the workflow requires 30 minutes of headroom before staging and 15 minutes immediately before submission.
 
-- Trigger: `workflow_dispatch` only. There is no `push`, pull-request, or cron trigger.
-- Repository/ref guard: only `CrunchyBrunch/lionlog` on `refs/heads/main` can run its jobs.
-- Default permissions: none.
-- Verification job permissions: `contents: read`, `actions: read`, and `deployments: read`.
-- Protected deploy job permissions: `contents: read`, `actions: read`, `deployments: write`, `pages: write`, and `id-token: write`.
-- Receipt collector permissions: `contents: read`, `actions: read`, and `deployments: write`; public-product requests are anonymous.
-- The deploy job waits for the validated build artifact and targets the protected `github-pages` environment.
-- Official actions are pinned to immutable commit SHAs.
-- The workflow contains no PSU ingestion command, ingestion authorization variable, schedule, DNS operation, custom-domain file, Pages-settings mutation, or repository-visibility mutation.
-- The artifact validator rejects raw HTML, source maps, browser retrieval code, secrets, private-key patterns, local paths, hidden files other than the empty `.nojekyll`, and same-origin root paths that would break `/lionlog/` hosting. A live candidate may contain only validated normalized public menu JSON covered by its versioned manifest.
+## Safety boundary
 
-Candidate ingestion and publication remain separate explicit manual operations. The promotion workflow never contacts PSU and never rebuilds candidate bytes.
+- `workflow_dispatch` is the only trigger; there is no push, pull-request, or schedule trigger.
+- Top-level permissions are `{}`. Validation and public verification have only `contents: read` and `actions: read`. Only the protected deploy job receives `pages: write` and `id-token: write`.
+- The workflow runs only for `CrunchyBrunch/lionlog`, `refs/heads/main`, and attempt 1, at an operator-supplied exact workflow SHA. Its shared production lock is exactly `github-pages-production` with cancellation disabled; operators must let any run using the predecessor lock finish before merging this lock-name migration.
+- Candidate run, artifact, wrapper digest, manifest digest, release ID, source SHA, service date, exact-source CI, expiry, freshness/retention, complete inventory, catalog/snapshots, marker, and `/lionlog/` paths are revalidated.
+- The official staged artifact has the unique name `lionlog-pages-<run>-<attempt>`, is uploaded once without overwrite, then downloaded again by numeric ID. Its wrapper digest and every tar path, size, and hash must match the approved candidate.
+- The authorization binds either the exact currently published release ID or the explicit `NONE_FIRST_PUBLICATION` sentinel. The public marker is checked before staging and re-observed after protected approval.
+- The protected job repeats main, run, CI, candidate, artifact, staged-artifact, approval-expiry, freshness/retention, public-predecessor, and attempt-specific unresolved-submission checks after human approval and immediately before the official deploy action. GitHub cannot make a shell check and the later action-internal HTTP submission one atomic operation, so a stopped or ambiguous action remains unresolved rather than being inferred safe.
+- Promotion never builds, runs candidate code, contacts PSU, changes Pages settings, modifies DNS, or changes repository visibility.
+- A successful official action is not enough for `knownGood`: the exact public marker and full inventory must match, and a 390×844 Chrome check must render an approved non-empty hall/date/meal snapshot with the exact shell revision, item count, and first item online and after a service-worker-backed offline reload. Sample fallback, console warnings/errors, and horizontal overflow fail verification.
 
-## Owner activation checklist
+Official actions are pinned to immutable commits:
 
-Do not perform these steps until the deployment PR is reviewed and merged and its exact resulting `main` SHA is recorded.
+- `actions/upload-pages-artifact` v5: `fc324d3547104276b827a68afc52ff2a11cc49c9`
+- `actions/deploy-pages` v5: `368f82528645a54fb793d4d04e342629a3f51346`
 
-1. Confirm `main` contains the reviewed workflow commit and all required checks pass.
-2. Run **Build reviewable GitHub Pages artifact** manually on `main`; download and inspect `github-pages-review` before enabling deployment.
-3. In **Settings → Pages**, select **GitHub Actions** as the build/deployment source.
-4. Leave **Custom domain** blank and enable **Enforce HTTPS**.
-5. Optionally configure required reviewers on the `github-pages` environment for a human approval gate.
-6. From the Actions tab, select **Promote exact LionLog release to GitHub Pages**, choose `main`, verify every candidate/current-attempt/rollback-target identity and deadline, and dispatch it intentionally.
-7. Verify the resulting deployment reports `https://crunchybrunch.github.io/lionlog/`, then perform the iPhone/PWA checklist in `docs/iphone-pwa-verification.md`.
+## Operation
 
-Selecting GitHub Actions as the Pages source does not itself run this workflow. No automated deployment or ingestion is introduced.
+Do not dispatch until the workflow is reviewed, merged, exact-source CI succeeds, the candidate remains retained, and a human has reviewed the candidate receipt and inventory.
 
-## Rollback
+Promotion inputs identify one exact fresh live candidate, exact public predecessor, and approval deadline. Rollback uses the same workflow and exact retained candidate bytes, plus the flat receipt artifact ID/digest from a prior fully verified `knownGood` deployment. Rollback never rebuilds or re-scrapes. Automated first-release recovery is intentionally absent; a first-release incident requires a separately reviewed change and authorization. Candidate construction still retains the existing first-release recovery artifact as reviewed recovery material, but the supported deployment workflow neither consumes nor promotes it automatically; removing that candidate-build artifact is deferred to a separately scoped change.
 
-For a publication regression, use the runbook's exact-byte rollback path with the latest attempt receipt and a separately identified known-good target receipt. Do not rebuild, re-scrape, rewrite shared history, or deploy an unreviewed branch.
+The `github-pages` environment must restrict deployment to `main` and require reviewer approval. GitHub Pages must separately be configured to use GitHub Actions. Workflow YAML does not create or attest those settings.
 
-For an urgent publication stop, an owner may disable Pages in repository settings. That is a separate administrative action; the workflow does not change settings itself. Restoring a prior live release restores its exact normalized menu snapshot bytes; retained data still displays according to its original freshness and retention deadlines.
+## Failed and uncertain attempts
 
-## License and scope
+The workflow never retries a deployment. History collection uses bounded, attempt-specific run/job and uniquely named receipt evidence. Only an exact fully verified `knownGood` attempt or an affirmative final-gate failure whose submission boundary and deploy step were both skipped clears automatically. Cancellation, interruption, missing evidence, incomplete jobs, and ambiguous multi-attempt history remain unresolved and block a later submission. A source-reviewed incident-history entry is required to resolve historical uncertainty from authoritative evidence.
 
-The public repository still has no project license. Public visibility and Pages publication do not grant general reuse rights; choosing a license remains an explicit owner decision.
+Legacy run `35221481720` is reconciled once in `infrastructure/publication/pages-incident-history.json` as `resolved-unknown-no-publication`: retained evidence did not establish a completed publication and the public marker remained absent. The record preserves uncertainty and does not infer non-submission merely from missing custom-ledger data.
 
-This handoff does not authorize scheduled ingestion, production menu publication, optimizer work, accounts, diary, analytics, custom domains, DNS, repository visibility changes, or Sites deployment.
+## Scope
+
+This handoff does not authorize a workflow dispatch, environment approval, deployment, ingestion, schedule, GitHub Pages/settings change, DNS/hosting change, repository visibility change, or optimizer work.
