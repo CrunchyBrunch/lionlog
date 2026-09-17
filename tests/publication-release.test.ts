@@ -148,6 +148,14 @@ test("the protected workflow passes the canonical manifest into verification bef
   assert.match(workflow, /authorization:\{partialApproval:\$partialApproval,expiredRollbackApproval:\$expiredRollbackApproval,preSubmissionFailureApproval:\$preSubmissionFailureApproval\}/);
   assert.match(workflow, /MINIMUM_FRESH_UNTIL=\$\(jq -er '\.minimumFreshUntil \| strings' work\/pages-deployment\/preapproval\/pre-approval-summary\.json\)/);
   assert.doesNotMatch(workflow, /echo "MINIMUM_FRESH_UNTIL="/);
+
+  const preApprovalStart = workflow.indexOf("- name: Verify current attempt separately from the known-good rollback target");
+  const preApprovalEnd = workflow.indexOf("\n      - name:", preApprovalStart + 1);
+  assert.ok(preApprovalStart >= 0 && preApprovalEnd > preApprovalStart);
+  const preApprovalStep = workflow.slice(preApprovalStart, preApprovalEnd);
+  assert.match(preApprovalStep, /CURRENT_RECEIPT_ARTIFACT_ID: \$\{\{ inputs\.current_attempt_receipt_artifact_id \}\}/);
+  assert.match(preApprovalStep, /CURRENT_RECEIPT_ARTIFACT_DIGEST: \$\{\{ inputs\.current_attempt_receipt_artifact_digest \}\}/);
+  assert.ok(preApprovalStep.indexOf("CURRENT_RECEIPT_ARTIFACT_ID:") < preApprovalStep.indexOf("node scripts/verify-current-publication.mjs"));
 });
 
 test("the actual protected adapter command loads on a clean production-only install", async () => {
@@ -1682,6 +1690,44 @@ test("the exact failed first promotion can be reconciled only by its immutable r
     preSubmissionFailureApproval: exactApproval,
     fetchImpl: failedPreSubmissionApiFixture(),
   }), /exactly match the reviewed/);
+});
+
+test("the current-publication environment contract receives the exact incident artifact ID and rejects legacy or invalid names", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "lionlog-current-receipt-contract-"));
+  const receiptPath = path.join(root, "deployment-receipt.json");
+  const manifestPath = path.join(root, "release-manifest.json");
+  const receiptDigest = "sha256:bf3c1430abf5bf1ebc8707e601b51f3776705cde507997ff3b606fcc88601874";
+  await writeFile(receiptPath, JSON.stringify(failedPreSubmissionReceipt()));
+  await writeFile(manifestPath, JSON.stringify({ releaseId: "e".repeat(64) }));
+
+  const environment = {
+    OPERATION: "promote",
+    GITHUB_TOKEN: "token",
+    EXPECTED_CURRENT_RECEIPT_PATH: receiptPath,
+    ROLLBACK_TARGET_RECEIPT_PATH: "NONE_FIRST_DEPLOYMENT",
+    RELEASE_MANIFEST_PATH: manifestPath,
+    SOURCE_ARTIFACT_ID: "999",
+    SOURCE_ARTIFACT_DIGEST: artifactDigest,
+    SOURCE_MANIFEST_DIGEST: "1".repeat(64),
+    CURRENT_RECEIPT_ARTIFACT_ID: "10267367634",
+    CURRENT_RECEIPT_ARTIFACT_DIGEST: receiptDigest,
+    PRE_SUBMISSION_FAILURE_APPROVAL: `RECONCILE_PRE_SUBMISSION:${receiptDigest}:6394978446`,
+    GITHUB_JOB: "verify-and-stage",
+  };
+  await assert.doesNotReject(verifyCurrentPublicationFromEnvironment(environment, {
+    fetchImpl: failedPreSubmissionApiFixture(),
+  }));
+
+  for (const invalidEnvironment of [
+    { ...environment, CURRENT_RECEIPT_ARTIFACT_ID: undefined },
+    { ...environment, CURRENT_RECEIPT_ARTIFACT_ID: "not-an-artifact-id" },
+    { ...environment, CURRENT_RECEIPT_ARTIFACT_ID: "10267367635" },
+    { ...environment, CURRENT_RECEIPT_ARTIFACT_ID: undefined, CURRENT_RECEIPT_ID: "10267367634" },
+  ]) {
+    await assert.rejects(verifyCurrentPublicationFromEnvironment(invalidEnvironment, {
+      fetchImpl: failedPreSubmissionApiFixture(),
+    }), /not the reviewed incident artifact/);
+  }
 });
 
 test("new final-gate failures remain definitive non-submissions without weakening ordinary missing-ID failures", async () => {
