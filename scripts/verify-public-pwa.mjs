@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
-import { createServer } from "node:net";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { connect as connectTcp, createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -28,12 +30,30 @@ export function assertNoBrowserDiagnostics(events) {
   if (failures.length > 0) throw new Error(`Browser console/runtime diagnostics were emitted: ${JSON.stringify(failures)}`);
 }
 
-export async function verifyBrowserSession({ targetUrl, expected: expectedValue, chromeBin = process.env.CHROME_BIN ?? "google-chrome", onOfflineStart, getOfflineServerRequestCount }) {
+export async function verifyBrowserSession({
+  targetUrl,
+  expected: expectedValue,
+  chromeBin = process.env.CHROME_BIN ?? "google-chrome",
+  browserNow,
+  onOfflineStart,
+  onBeforeOfflineReload,
+  getOfflineServerRequestCount,
+}) {
   const expected = validateExpectedContext(expectedValue);
   const expectedUrl = new URL(targetUrl).href;
   const profile = await mkdtemp(path.join(tmpdir(), "lionlog-pages-chrome-"));
   const port = await availablePort();
-  const chrome = spawn(chromeBin, ["--headless=new", "--no-sandbox", "--disable-dev-shm-usage", `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, "about:blank"], { stdio: "ignore" });
+  const networkGate = await createBrowserNetworkGate();
+  const chrome = spawn(chromeBin, [
+    "--headless=new",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${profile}`,
+    `--proxy-server=http://127.0.0.1:${networkGate.port}`,
+    "--proxy-bypass-list=<-loopback>",
+    "about:blank",
+  ], { stdio: "ignore" });
   const exited = new Promise((resolve) => chrome.once("exit", resolve));
   let pageClient;
   let browserClient;
@@ -42,16 +62,19 @@ export async function verifyBrowserSession({ targetUrl, expected: expectedValue,
     pageClient = await connectCdp(endpoint.page.webSocketDebuggerUrl);
     browserClient = await connectCdp(endpoint.browser.webSocketDebuggerUrl);
     const diagnostics = [];
-    pageClient.onEvent((event) => {
+    const recordDiagnostic = (event) => {
       if (event.method === "Runtime.exceptionThrown") diagnostics.push({ kind: "exception", text: event.params?.exceptionDetails?.text ?? "exception" });
       if (event.method === "Runtime.consoleAPICalled") diagnostics.push({ kind: "console", type: event.params?.type, text: JSON.stringify(event.params?.args ?? []) });
       if (event.method === "ServiceWorker.workerErrorReported") diagnostics.push({ kind: "service-worker", text: event.params?.errorMessage?.errorMessage ?? "service worker error" });
-    });
+    };
+    pageClient.onEvent(recordDiagnostic);
+    browserClient.onEvent(recordDiagnostic);
     await pageClient.command("Page.enable");
     await pageClient.command("Runtime.enable");
     await pageClient.command("Network.enable");
     await pageClient.command("ServiceWorker.enable");
     await pageClient.command("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
+    if (browserNow !== undefined) await installFixedClock(pageClient, browserNow);
     await navigate(pageClient, expectedUrl);
     await waitForMenuControls(pageClient);
     await waitForServiceWorker(pageClient, diagnostics);
@@ -64,10 +87,20 @@ export async function verifyBrowserSession({ targetUrl, expected: expectedValue,
 
     const isolation = await enforceOfflineIsolation(browserClient, pageClient);
     if (!isolation.targetTypes.includes("service_worker")) throw new Error("No service-worker target was isolated for the offline check.");
+    networkGate.disconnect();
     await onOfflineStart?.();
     const negativeControlUrl = new URL(`./api/offline-negative-control-${Date.now()}-${Math.random().toString(16).slice(2)}`, expectedUrl).href;
+    const workerNegativeControlUrl = new URL(`./api/offline-worker-negative-control-${Date.now()}-${Math.random().toString(16).slice(2)}`, expectedUrl).href;
+    const dedicatedWorkerUncachedResourceFailed = await dedicatedWorkerNegativeControl(pageClient, workerNegativeControlUrl);
+    if (dedicatedWorkerUncachedResourceFailed !== true) throw new Error("A newly created dedicated worker escaped offline isolation.");
+    await isolation.settle();
     const uncachedResourceFailed = await evaluate(pageClient, `fetch(${JSON.stringify(negativeControlUrl)}, {cache:"no-store"}).then(() => false, () => true)`, true);
     if (uncachedResourceFailed !== true) throw new Error("Uncached offline negative control unexpectedly reached a response.");
+    const preReloadOfflineServerRequestCount = await getOfflineServerRequestCount?.();
+    if (preReloadOfflineServerRequestCount !== undefined && preReloadOfflineServerRequestCount !== 0) {
+      throw new Error(`The origin recorded ${preReloadOfflineServerRequestCount} request(s) during the isolated negative controls.`);
+    }
+    await onBeforeOfflineReload?.();
     await reload(pageClient);
     await waitForMenuControls(pageClient);
     await selectMenuContext(pageClient, expected);
@@ -76,12 +109,22 @@ export async function verifyBrowserSession({ targetUrl, expected: expectedValue,
     assertNoBrowserDiagnostics(diagnostics);
     const offlineServerRequestCount = await getOfflineServerRequestCount?.();
     if (offlineServerRequestCount !== undefined && offlineServerRequestCount !== 0) throw new Error(`The origin recorded ${offlineServerRequestCount} request(s) during the offline phase.`);
-    return { online, offline, diagnostics: diagnostics.length, uncachedResourceFailed, offlineServerRequestCount: offlineServerRequestCount ?? null, isolatedTargetTypes: isolation.targetTypes, approvedReleaseId: expected.releaseId };
+    return {
+      online,
+      offline,
+      diagnostics: diagnostics.length,
+      uncachedResourceFailed,
+      dedicatedWorkerUncachedResourceFailed,
+      offlineServerRequestCount: offlineServerRequestCount ?? null,
+      isolatedTargetTypes: isolation.targetTypes,
+      approvedReleaseId: expected.releaseId,
+    };
   } finally {
     pageClient?.close();
     browserClient?.close();
     if (chrome.exitCode === null && chrome.signalCode === null) chrome.kill("SIGKILL");
     await exited;
+    await networkGate.close();
     await rm(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 }
@@ -95,52 +138,163 @@ async function verify() {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
-async function enforceOfflineIsolation(browserClient, pageClient) {
+export async function enforceOfflineIsolation(browserClient, pageClient) {
   const configuredSessions = new Set();
   const configuredTargets = new Map();
   const pending = new Set();
-  const configure = (sessionId, targetInfo) => {
-    if (!sessionId || configuredSessions.has(sessionId)) return;
-    configuredSessions.add(sessionId);
+  const failures = [];
+  const configure = (owner, ownerName, sessionId, targetInfo) => {
+    const sessionKey = `${ownerName}:${sessionId}`;
+    if (!sessionId || configuredSessions.has(sessionKey)) return;
+    configuredSessions.add(sessionKey);
     if (OFFLINE_TARGET_TYPES.has(targetInfo.type)) configuredTargets.set(targetInfo.targetId, targetInfo.type);
     const task = (async () => {
-      if (OFFLINE_TARGET_TYPES.has(targetInfo.type)) {
-        await browserClient.command("Network.enable", {}, sessionId);
-        await browserClient.command("Network.emulateNetworkConditions", offlineConditions(), sessionId);
+      try {
+        if (OFFLINE_TARGET_TYPES.has(targetInfo.type)) {
+          await owner.command("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, sessionId).catch((error) => {
+            if (String(error?.message ?? error) === "Not supported") return;
+            throw new Error(`Could not recursively auto-attach ${targetInfo.type}: ${String(error?.message ?? error)}`);
+          });
+          await owner.command("Runtime.enable", {}, sessionId).catch((error) => { throw new Error(`Could not enable runtime for ${targetInfo.type}: ${String(error?.message ?? error)}`); });
+          await owner.command("Network.enable", {}, sessionId).catch((error) => { throw new Error(`Could not enable network control for ${targetInfo.type}: ${String(error?.message ?? error)}`); });
+          await owner.command("Network.emulateNetworkConditions", offlineConditions(), sessionId).catch((error) => {
+            if (targetInfo.type === "worker" && String(error?.message ?? error) === "Not supported") return;
+            throw new Error(`Could not isolate ${targetInfo.type}: ${String(error?.message ?? error)}`);
+          });
+        }
+      } finally {
+        await owner.command("Runtime.runIfWaitingForDebugger", {}, sessionId).catch(() => undefined);
       }
-      await browserClient.command("Runtime.runIfWaitingForDebugger", {}, sessionId).catch(() => undefined);
     })();
-    pending.add(task);
-    task.finally(() => pending.delete(task));
+    const tracked = task.catch((error) => failures.push(error)).finally(() => pending.delete(tracked));
+    pending.add(tracked);
   };
   browserClient.onEvent((event) => {
-    if (event.method === "Target.attachedToTarget") configure(event.params?.sessionId, event.params?.targetInfo ?? {});
+    if (event.method === "Target.attachedToTarget") configure(browserClient, "browser", event.params?.sessionId, event.params?.targetInfo ?? {});
+  });
+  pageClient.onEvent((event) => {
+    if (event.method === "Target.attachedToTarget") configure(pageClient, "page", event.params?.sessionId, event.params?.targetInfo ?? {});
   });
   await browserClient.command("Target.setDiscoverTargets", { discover: true });
   await browserClient.command("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
+  await pageClient.command("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
   const targets = await browserClient.command("Target.getTargets");
   for (const targetInfo of targets.targetInfos ?? []) {
     if (!OFFLINE_TARGET_TYPES.has(targetInfo.type) || configuredTargets.has(targetInfo.targetId)) continue;
     const attached = await browserClient.command("Target.attachToTarget", { targetId: targetInfo.targetId, flatten: true });
-    configure(attached.sessionId, targetInfo);
+    configure(browserClient, "browser", attached.sessionId, targetInfo);
   }
-  await flushPending(pending);
+  const settle = async () => {
+    await flushPending(pending);
+    if (failures.length > 0) throw failures[0];
+  };
+  await settle();
   await pageClient.command("Network.emulateNetworkConditions", offlineConditions());
-  await flushPending(pending);
-  return { targetTypes: [...new Set(configuredTargets.values())].sort() };
+  await settle();
+  return {
+    get targetTypes() { return [...new Set(configuredTargets.values())].sort(); },
+    settle,
+  };
 }
 
 function offlineConditions() { return { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 }; }
 async function flushPending(pending) { while (pending.size > 0) await Promise.all([...pending]); }
 
+async function dedicatedWorkerNegativeControl(client, url) {
+  return evaluate(client, `(async () => {
+    const source = 'self.onmessage=async(event)=>{try{await fetch(event.data,{cache:"no-store"});self.postMessage(false)}catch{self.postMessage(true)}}';
+    const blobUrl = URL.createObjectURL(new Blob([source], {type:"text/javascript"}));
+    const worker = new Worker(blobUrl);
+    try {
+      return await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("dedicated worker negative control timed out")), 15000);
+        worker.onmessage = (event) => { clearTimeout(timer); resolve(event.data); };
+        worker.onerror = (event) => { clearTimeout(timer); reject(new Error(event.message || "dedicated worker failed")); };
+        worker.postMessage(${JSON.stringify(url)});
+      });
+    } finally {
+      worker.terminate();
+      URL.revokeObjectURL(blobUrl);
+    }
+  })()`, true);
+}
+
+async function installFixedClock(client, value) {
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) throw new Error("Browser test clock is invalid.");
+  await client.command("Page.addScriptToEvaluateOnNewDocument", {
+    source: `(() => { const NativeDate = Date; const fixed = ${JSON.stringify(time)}; class FixedDate extends NativeDate { constructor(...args) { super(...(args.length === 0 ? [fixed] : args)); } static now() { return fixed; } } Object.setPrototypeOf(FixedDate, NativeDate); globalThis.Date = FixedDate; })();`,
+  });
+}
+
 async function availablePort() {
-  const server = createServer();
+  const server = createTcpServer();
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : 0;
   await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   if (!port) throw new Error("Could not reserve a Chrome debugging port.");
   return port;
+}
+
+async function createBrowserNetworkGate() {
+  let disconnected = false;
+  const sockets = new Set();
+  const server = createHttpServer((request, response) => {
+    if (disconnected) {
+      request.socket.destroy();
+      return;
+    }
+    let target;
+    try {
+      target = new URL(request.url ?? "");
+    } catch {
+      response.destroy(new Error("Proxy request URL is invalid."));
+      return;
+    }
+    const headers = { ...request.headers, host: target.host };
+    delete headers["proxy-connection"];
+    const forward = (target.protocol === "https:" ? httpsRequest : httpRequest)(target, {
+      method: request.method,
+      headers,
+    }, (upstream) => {
+      response.writeHead(upstream.statusCode ?? 502, upstream.headers);
+      upstream.pipe(response);
+    });
+    forward.on("error", () => response.destroy());
+    request.pipe(forward);
+  });
+  server.on("connect", (request, clientSocket, head) => {
+    if (disconnected) {
+      clientSocket.destroy();
+      return;
+    }
+    const authority = new URL(`http://${request.url}`);
+    const upstream = connectTcp(Number(authority.port || 443), authority.hostname, () => {
+      clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head.length > 0) upstream.write(head);
+      upstream.pipe(clientSocket);
+      clientSocket.pipe(upstream);
+    });
+    upstream.on("error", () => clientSocket.destroy());
+  });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  const address = server.address();
+  if (!address || typeof address !== "object") throw new Error("Browser network gate did not start.");
+  return {
+    port: address.port,
+    disconnect() {
+      disconnected = true;
+      for (const socket of sockets) socket.destroy();
+    },
+    close() {
+      return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    },
+  };
 }
 
 async function waitForEndpoint(port) {

@@ -346,7 +346,9 @@ jobs:
             echo null > work/supported-pages-final/rollback-receipt-artifact.json
             echo null > work/supported-pages-final/rollback-receipt-run.json
           fi
-          node --experimental-strip-types scripts/collect-pages-attempt-history.ts --output=work/supported-pages-final/prior-attempts.json
+          node --experimental-strip-types scripts/collect-pages-attempt-history.ts \
+            --output=work/supported-pages-final/prior-attempts.json \
+            --incidents=infrastructure/publication/pages-incident-history.json
           jq -n --slurpfile repository work/supported-pages-final/repository.json --slurpfile main work/supported-pages-final/main.json \
             --slurpfile workflowRun work/supported-pages-final/workflow-run.json --slurpfile candidateRun work/supported-pages-final/candidate-run.json \
             --slurpfile candidateArtifact work/supported-pages-final/candidate-artifact.json --slurpfile stagedArtifacts work/supported-pages-final/staged-artifacts.json \

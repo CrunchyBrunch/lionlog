@@ -224,13 +224,26 @@ test("protected final check rejects main drift, artifact drift, expiration, and 
     summary: { ...summary, release: { ...summary.release, earliestRetainUntil: "2026-09-17T11:59:00.000Z" } },
     state: finalState(), incidents: emptyHistory, now,
   }), /retention.*headroom/);
-  const unresolved = priorAttempt({ runId: 99, conclusion: "failure", deploymentConclusion: "failure" });
+  const fixtureIncidentEvidence = {
+    workflowId: 347_992_874,
+    workflowPath: ".github/workflows/deploy-github-pages.yml",
+    event: "workflow_dispatch",
+    headBranch: "main",
+    status: "completed",
+    conclusion: "failure",
+    jobs: [{
+      jobId: 901, runId: 99, runAttempt: 1, headSha: workflowSha, jobName: "deploy", jobStatus: "completed", jobConclusion: "failure",
+      steps: [{ stepNumber: 1, stepName: "Deploy fixture", stepStatus: "completed", stepConclusion: "failure" }],
+    }],
+  };
+  const unresolved = priorAttempt({ runId: 99, conclusion: "failure", deploymentConclusion: "failure", incidentEvidence: fixtureIncidentEvidence });
   assert.throws(() => verifyFinalState({ summary, state: { ...finalState(), priorAttempts: [unresolved] }, incidents: emptyHistory, now }), /unknown or unresolved/);
   assert.doesNotThrow(() => verifyFinalState({
     summary,
     state: { ...finalState(), priorAttempts: [unresolved] },
     incidents: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [{
       runId: 99, runAttempt: 1, workflowSha, candidateArtifactId: 1, stagedArtifactId: 2, repositoryDeploymentId: 3,
+      collectorEvidence: fixtureIncidentEvidence,
       outcome: "resolved-unknown-no-publication", publicReleaseId: "NONE_404", checkedAt: "2026-09-17T11:00:00.000Z",
       note: "Reviewed fixture incident with no publication.",
     }] },
@@ -338,11 +351,12 @@ test("only known-good or affirmative pre-submission failures clear attempt histo
     receipt: receiptEvidence({ submissionStarted: true, result: "success", knownGood: true, unresolved: false, publicVerified: true }),
   });
   const preSubmission = priorAttempt({
+    runId: 98,
     conclusion: "failure",
     finalGateConclusion: "failure",
     submissionBoundaryConclusion: "skipped",
     deploymentConclusion: "skipped",
-    receipt: receiptEvidence({ submissionStarted: false, result: "failure", knownGood: false, unresolved: false, publicVerified: false }),
+    receipt: receiptEvidence({ runId: 98, submissionStarted: false, result: "failure", knownGood: false, unresolved: false, publicVerified: false }),
   });
   assert.doesNotThrow(() => verifyFinalState({ summary, state: { ...finalState(), priorAttempts: [knownGood, preSubmission] }, incidents, now }));
   const unsafe = [
@@ -358,7 +372,7 @@ test("only known-good or affirmative pre-submission failures clear attempt histo
 
 test("real legacy pre-submission identities reconcile only against exact affirmative evidence", async () => {
   const incidents = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
-  const attempts = [legacyAttempt346(), legacyAttempt348()];
+  const attempts = [legacyAttempt346(), legacyAttempt348(), legacyAttempt352()];
   assert.doesNotThrow(() => verifyFinalState({
     summary: summaryFixture(), state: { ...finalState(), priorAttempts: attempts }, incidents, now,
   }));
@@ -369,7 +383,14 @@ test("real legacy pre-submission identities reconcile only against exact affirma
   missing.legacyEvidence.validationFailure = null;
   const incomplete = { ...attempts[0], jobsComplete: false };
   const mismatched = { ...attempts[0], workflowSha: "f".repeat(40) };
-  for (const attempt of [altered, missing, incomplete, mismatched]) {
+  const changedIncidentEvidence = structuredClone(attempts[2]);
+  changedIncidentEvidence.incidentEvidence!.jobs[1].steps[1].stepConclusion = "success";
+  const wrongWorkflowId = { ...attempts[0], workflowId: 1 };
+  const wrongWorkflowPath = { ...attempts[0], workflowPath: ".github/workflows/other.yml" };
+  const wrongEvent = { ...attempts[0], event: "push" };
+  const wrongBranch = { ...attempts[0], headBranch: "feature" };
+  const missingIncidentEvidence = { ...attempts[2], incidentEvidence: null };
+  for (const attempt of [altered, missing, incomplete, mismatched, changedIncidentEvidence, wrongWorkflowId, wrongWorkflowPath, wrongEvent, wrongBranch, missingIncidentEvidence]) {
     assert.throws(() => verifyFinalState({
       summary: summaryFixture(), state: { ...finalState(), priorAttempts: [attempt] }, incidents, now,
     }), /incomplete|unknown or unresolved/);
@@ -379,34 +400,45 @@ test("real legacy pre-submission identities reconcile only against exact affirma
   assert.throws(() => verifyFinalState({
     summary: summaryFixture(), state: { ...finalState(), priorAttempts: attempts }, incidents: duplicate, now,
   }), /invalid or duplicate/);
+  assert.throws(() => verifyFinalState({
+    summary: summaryFixture(), state: { ...finalState(), priorAttempts: [...attempts, structuredClone(attempts[1])] }, incidents, now,
+  }), /duplicate run\/attempt/);
 });
 
-test("legacy collector rejects ambiguous immutable step evidence", () => {
+test("legacy collector selects exact incident-bound evidence without fuzzy-name ambiguity", () => {
   const job = {
     id: 103295384726, name: "deploy", status: "completed", conclusion: "failure",
     steps: [
-      { name: "Perform final provenance, state, deadline, and freshness checks", conclusion: "failure" },
-      { name: "Deploy exact staged artifact", conclusion: "skipped" },
+      { number: 7, name: "Perform final provenance, state, deadline, and freshness checks", status: "completed", conclusion: "failure" },
+      { number: 8, name: "Deploy exact staged artifact", status: "completed", conclusion: "skipped" },
     ],
   };
-  assert.deepEqual(collectLegacyEvidence([job]), legacyAttempt346().legacyEvidence);
-  assert.deepEqual(collectLegacyEvidence([{
+  const successfulOverlappingName = {
+    id: 103295186583,
+    name: "verify-and-stage",
+    status: "completed",
+    conclusion: "success",
+    steps: [{ number: 11, name: "Verify current attempt separately from the known-good rollback target", status: "completed", conclusion: "success" }],
+  };
+  assert.deepEqual(collectLegacyEvidence([successfulOverlappingName, job], legacyAttempt346().legacyEvidence), legacyAttempt346().legacyEvidence);
+  const jobs348 = [{
     id: 104100073427,
     name: "verify-and-stage",
     status: "completed",
     conclusion: "failure",
-    steps: [{ name: "Verify current attempt separately from the known-good rollback target", conclusion: "failure" }],
+    steps: [{ number: 11, name: "Verify current attempt separately from the known-good rollback target", status: "completed", conclusion: "failure" }],
   }, {
     id: 104100243029,
     name: "deploy",
     status: "completed",
     conclusion: "skipped",
     steps: [],
-  }]), legacyAttempt348().legacyEvidence);
-  assert.throws(() => collectLegacyEvidence([job, { ...job, id: job.id + 1 }]), /ambiguous/);
+  }];
+  assert.deepEqual(collectLegacyEvidence(jobs348, legacyAttempt348().legacyEvidence), legacyAttempt348().legacyEvidence);
+  assert.throws(() => collectLegacyEvidence([job, { ...job, id: job.id + 1 }], legacyAttempt346().legacyEvidence), /ambiguous/);
 });
 
-test("attempt history uses attempt-specific bounded job evidence and preserves incomplete attempts", async () => {
+test("attempt history binds every completed job and step to the exact requested attempt", async () => {
   const requested: string[] = [];
   const fetchImpl: typeof fetch = async (input) => {
     const url = String(input);
@@ -424,8 +456,7 @@ test("attempt history uses attempt-specific bounded job evidence and preserves i
       event: "workflow_dispatch",
       head_branch: "main",
       head_sha: workflowSha,
-      status: "completed",
-      conclusion: "failure",
+        status: "completed", conclusion: "failure",
     });
     const jobsAttempt = url.match(/\/actions\/runs\/77\/attempts\/(\d+)\/jobs\?/)?.[1];
     if (jobsAttempt) return jsonResponse({
@@ -433,9 +464,12 @@ test("attempt history uses attempt-specific bounded job evidence and preserves i
       jobs: [{
         id: 700 + Number(jobsAttempt),
         name: "deploy",
-        status: jobsAttempt === "1" ? "completed" : "in_progress",
-        conclusion: jobsAttempt === "1" ? "failure" : null,
-        steps: [{ name: "Recheck all authority immediately before submission", conclusion: jobsAttempt === "1" ? "failure" : null }],
+        run_id: 77,
+        run_attempt: Number(jobsAttempt),
+        head_sha: workflowSha,
+        status: "completed",
+        conclusion: "failure",
+        steps: [{ number: 1, name: "Recheck all authority immediately before submission", status: "completed", conclusion: "failure" }],
       }],
     });
     return new Response("not found", { status: 404 });
@@ -444,14 +478,87 @@ test("attempt history uses attempt-specific bounded job evidence and preserves i
     repository: "CrunchyBrunch/lionlog",
     currentRunId: 88,
     token: "fixture-token",
+    incidentHistory: emptyIncidentHistory(),
     fetchImpl,
   });
   assert.equal(evidence.length, 2);
   assert.equal(evidence[0].jobsComplete, true);
-  assert.equal(evidence[1].jobsComplete, false);
+  assert.equal(evidence[1].jobsComplete, true);
   assert.ok(requested.some((url) => url.includes("/attempts/1/jobs?")));
   assert.ok(requested.some((url) => url.includes("/attempts/2/jobs?")));
   assert.ok(!requested.some((url) => /\/actions\/runs\/77\/jobs\?/.test(url)));
+});
+
+test("all three real historical attempts collect and reconcile only with exact incident contracts", async () => {
+  const incidents = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
+  const evidence = await collectPagesAttemptHistory({
+    repository: "CrunchyBrunch/lionlog",
+    currentRunId: 999,
+    token: "fixture-token",
+    incidentHistory: incidents,
+    fetchImpl: historicalAttemptFetch(),
+  });
+  assert.deepEqual(evidence.map((attempt) => [attempt.runId, attempt.runAttempt]), [
+    [34609219734, 1], [34881025561, 1], [35221481720, 1],
+  ]);
+  assert.doesNotThrow(() => verifyFinalState({
+    summary: summaryFixture(), state: { ...finalState(), priorAttempts: evidence }, incidents, now,
+  }));
+
+  const mutations: Array<(jobs: Array<Record<string, unknown>>) => void> = [
+    (jobs) => { jobs[1].run_id = 1; },
+    (jobs) => { jobs[1].run_attempt = 2; },
+    (jobs) => { jobs[1].head_sha = "f".repeat(40); },
+    (jobs) => { jobs[1].status = "in_progress"; jobs[1].conclusion = null; },
+    (jobs) => { (jobs[1].steps as Array<Record<string, unknown>>)[0].status = "in_progress"; },
+    (jobs) => { (jobs[1].steps as Array<Record<string, unknown>>)[0].conclusion = "success"; },
+    (jobs) => { (jobs[1].steps as Array<Record<string, unknown>>).splice(0, 1); },
+    (jobs) => { (jobs[1].steps as Array<Record<string, unknown>>).push(structuredClone((jobs[1].steps as Array<Record<string, unknown>>)[0])); },
+    (jobs) => { jobs.push(structuredClone(jobs[1])); },
+  ];
+  for (const mutate of mutations) {
+    await assert.rejects(() => collectPagesAttemptHistory({
+      repository: "CrunchyBrunch/lionlog",
+      currentRunId: 999,
+      token: "fixture-token",
+      incidentHistory: incidents,
+      fetchImpl: historicalAttemptFetch(mutate),
+    }), /invalid|missing|ambiguous|duplicate|nonterminal|contract/);
+  }
+
+  const attemptMutations: Array<(attempt: Record<string, unknown>) => void> = [
+    (attempt) => { attempt.workflow_id = 1; },
+    (attempt) => { attempt.path = ".github/workflows/other.yml"; },
+    (attempt) => { attempt.head_sha = "f".repeat(40); },
+    (attempt) => { attempt.status = "in_progress"; attempt.conclusion = null; },
+  ];
+  for (const mutateAttempt of attemptMutations) {
+    await assert.rejects(() => collectPagesAttemptHistory({
+      repository: "CrunchyBrunch/lionlog",
+      currentRunId: 999,
+      token: "fixture-token",
+      incidentHistory: incidents,
+      fetchImpl: historicalAttemptFetch(undefined, mutateAttempt),
+    }), /invalid|terminal|match/);
+  }
+});
+
+test("workflow-run pagination rejects duplicate run/attempt evidence across pages", async () => {
+  const firstPage = Array.from({ length: 100 }, (_, index) => ({ id: 1_000 + index, run_attempt: 1 }));
+  firstPage[0] = { id: 34881025561, run_attempt: 1 };
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.searchParams.get("page") === "1") return jsonResponse({ total_count: 101, workflow_runs: firstPage });
+    if (url.searchParams.get("page") === "2") return jsonResponse({ total_count: 101, workflow_runs: [{ id: 34881025561, run_attempt: 1 }] });
+    return new Response("not found", { status: 404 });
+  };
+  await assert.rejects(() => collectPagesAttemptHistory({
+    repository: "CrunchyBrunch/lionlog",
+    currentRunId: 999,
+    token: "fixture-token",
+    incidentHistory: emptyIncidentHistory(),
+    fetchImpl,
+  }), /duplicate evidence/);
 });
 
 test("representative 22-file Pages candidate preserves the exact candidate-to-stage inventory bytewise", async () => {
@@ -490,7 +597,11 @@ function browserContext() {
 function priorAttempt(overrides: Partial<PriorAttemptEvidence> = {}): PriorAttemptEvidence {
   return {
     runId: 99,
+    workflowId: 347_992_874,
+    workflowPath: ".github/workflows/deploy-github-pages.yml",
     workflowSha,
+    event: "workflow_dispatch",
+    headBranch: "main",
     runAttempt: 1,
     status: "completed",
     conclusion: "failure",
@@ -498,6 +609,7 @@ function priorAttempt(overrides: Partial<PriorAttemptEvidence> = {}): PriorAttem
     finalGateConclusion: null,
     submissionBoundaryConclusion: null,
     deploymentConclusion: null,
+    incidentEvidence: null,
     legacyEvidence: { validationFailure: null, deploymentBoundary: null },
     receipt: null,
     ...overrides,
@@ -508,19 +620,26 @@ function legacyAttempt346(): PriorAttemptEvidence {
   return priorAttempt({
     runId: 34609219734,
     workflowSha: "3d5181c962486aa25345f4f16fbdd75932e0d831",
+    incidentEvidence: incidentEvidence346(),
     legacyEvidence: {
       validationFailure: {
         jobId: 103295384726,
         jobName: "deploy",
+        jobStatus: "completed",
         jobConclusion: "failure",
+        stepNumber: 7,
         stepName: "Perform final provenance, state, deadline, and freshness checks",
+        stepStatus: "completed",
         stepConclusion: "failure",
       },
       deploymentBoundary: {
         jobId: 103295384726,
         jobName: "deploy",
+        jobStatus: "completed",
         jobConclusion: "failure",
+        stepNumber: 8,
         stepName: "Deploy exact staged artifact",
+        stepStatus: "completed",
         stepConclusion: "skipped",
       },
     },
@@ -531,26 +650,109 @@ function legacyAttempt348(): PriorAttemptEvidence {
   return priorAttempt({
     runId: 34881025561,
     workflowSha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64",
+    incidentEvidence: incidentEvidence348(),
     legacyEvidence: {
       validationFailure: {
         jobId: 104100073427,
         jobName: "verify-and-stage",
+        jobStatus: "completed",
         jobConclusion: "failure",
+        stepNumber: 11,
         stepName: "Verify current attempt separately from the known-good rollback target",
+        stepStatus: "completed",
         stepConclusion: "failure",
       },
       deploymentBoundary: {
         jobId: 104100243029,
         jobName: "deploy",
+        jobStatus: "completed",
         jobConclusion: "skipped",
+        stepNumber: null,
         stepName: null,
+        stepStatus: "completed",
         stepConclusion: "skipped",
       },
     },
   });
 }
 
+function legacyAttempt352(): PriorAttemptEvidence {
+  return priorAttempt({
+    runId: 35221481720,
+    workflowSha: "4a91cda0de93b920607f2aa37163790bb4b662f2",
+    incidentEvidence: incidentEvidence352(),
+  });
+}
+
+function incidentEvidence346() {
+  return {
+    workflowId: 347_992_874,
+    workflowPath: ".github/workflows/deploy-github-pages.yml",
+    event: "workflow_dispatch",
+    headBranch: "main",
+    status: "completed",
+    conclusion: "failure",
+    jobs: [{
+      jobId: 103295384726, runId: 34609219734, runAttempt: 1,
+      headSha: "3d5181c962486aa25345f4f16fbdd75932e0d831", jobName: "deploy", jobStatus: "completed", jobConclusion: "failure",
+      steps: [
+        { stepNumber: 7, stepName: "Perform final provenance, state, deadline, and freshness checks", stepStatus: "completed", stepConclusion: "failure" },
+        { stepNumber: 8, stepName: "Deploy exact staged artifact", stepStatus: "completed", stepConclusion: "skipped" },
+      ],
+    }],
+  };
+}
+
+function incidentEvidence348() {
+  return {
+    workflowId: 347_992_874,
+    workflowPath: ".github/workflows/deploy-github-pages.yml",
+    event: "workflow_dispatch",
+    headBranch: "main",
+    status: "completed",
+    conclusion: "failure",
+    jobs: [
+      {
+        jobId: 104100073427, runId: 34881025561, runAttempt: 1,
+        headSha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64", jobName: "verify-and-stage", jobStatus: "completed", jobConclusion: "failure",
+        steps: [{ stepNumber: 11, stepName: "Verify current attempt separately from the known-good rollback target", stepStatus: "completed", stepConclusion: "failure" }],
+      },
+      {
+        jobId: 104100243029, runId: 34881025561, runAttempt: 1,
+        headSha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64", jobName: "deploy", jobStatus: "completed", jobConclusion: "skipped", steps: [],
+      },
+    ],
+  };
+}
+
+function incidentEvidence352() {
+  return {
+    workflowId: 347_992_874,
+    workflowPath: ".github/workflows/deploy-github-pages.yml",
+    event: "workflow_dispatch",
+    headBranch: "main",
+    status: "completed",
+    conclusion: "failure",
+    jobs: [
+      {
+        jobId: 105202455538, runId: 35221481720, runAttempt: 1,
+        headSha: "4a91cda0de93b920607f2aa37163790bb4b662f2", jobName: "verify-and-stage", jobStatus: "completed", jobConclusion: "success",
+        steps: [{ stepNumber: 11, stepName: "Verify current attempt separately from the known-good rollback target", stepStatus: "completed", stepConclusion: "success" }],
+      },
+      {
+        jobId: 105202673533, runId: 35221481720, runAttempt: 1,
+        headSha: "4a91cda0de93b920607f2aa37163790bb4b662f2", jobName: "deploy", jobStatus: "completed", jobConclusion: "failure",
+        steps: [
+          { stepNumber: 9, stepName: "Perform final provenance, state, deadline, and freshness checks", stepStatus: "completed", stepConclusion: "success" },
+          { stepNumber: 10, stepName: "Deploy exact staged artifact", stepStatus: "completed", stepConclusion: "failure" },
+        ],
+      },
+    ],
+  };
+}
+
 function receiptEvidence(options: {
+  runId?: number;
   submissionStarted: boolean;
   result: string;
   knownGood: boolean;
@@ -563,7 +765,7 @@ function receiptEvidence(options: {
     artifactExpiresAt: "2026-12-01T00:00:00.000Z",
     content: {
       receiptVersion: "lionlog.pages-flat-receipt.v1",
-      workflow: { runId: 99, runAttempt: 1 },
+      workflow: { runId: options.runId ?? 99, runAttempt: 1 },
       official: { submissionStarted: options.submissionStarted, result: options.result },
       public: {
         markerVerified: options.publicVerified,
@@ -574,6 +776,85 @@ function receiptEvidence(options: {
       unresolved: options.unresolved,
     },
   };
+}
+
+function emptyIncidentHistory() {
+  return { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] };
+}
+
+function historicalAttemptFetch(
+  mutate346?: (jobs: Array<Record<string, unknown>>) => void,
+  mutate346Attempt?: (attempt: Record<string, unknown>) => void,
+): typeof fetch {
+  const identities = new Map([
+    [34609219734, "3d5181c962486aa25345f4f16fbdd75932e0d831"],
+    [34881025561, "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64"],
+    [35221481720, "4a91cda0de93b920607f2aa37163790bb4b662f2"],
+  ]);
+  return async (input) => {
+    const url = String(input);
+    if (url.includes(`/actions/workflows/347992874/runs?`)) {
+      return jsonResponse({ total_count: 3, workflow_runs: [...identities.keys()].map((id) => ({ id, run_attempt: 1 })) });
+    }
+    const artifactRun = Number(url.match(/\/actions\/runs\/(\d+)\/artifacts\?/)?.[1]);
+    if (identities.has(artifactRun)) return jsonResponse({ total_count: 0, artifacts: [] });
+    const jobsRun = Number(url.match(/\/actions\/runs\/(\d+)\/attempts\/1\/jobs\?/)?.[1]);
+    if (identities.has(jobsRun)) {
+      const jobs = historicalJobs(jobsRun, identities.get(jobsRun)!);
+      if (jobsRun === 34609219734) mutate346?.(jobs);
+      return jsonResponse({ total_count: jobs.length, jobs });
+    }
+    const attemptRun = Number(url.match(/\/actions\/runs\/(\d+)\/attempts\/1(?:\?|$)/)?.[1]);
+    const headSha = identities.get(attemptRun);
+    if (headSha) {
+      const attempt: Record<string, unknown> = {
+      id: attemptRun,
+      workflow_id: 347_992_874,
+      run_attempt: 1,
+      path: ".github/workflows/deploy-github-pages.yml",
+      event: "workflow_dispatch",
+      head_branch: "main",
+      head_sha: headSha,
+      status: "completed",
+      conclusion: "failure",
+      };
+      if (attemptRun === 34609219734) mutate346Attempt?.(attempt);
+      return jsonResponse(attempt);
+    }
+    return new Response("not found", { status: 404 });
+  };
+}
+
+function historicalJobs(runId: number, headSha: string): Array<Record<string, unknown>> {
+  const job = (id: number, name: string, conclusion: string, steps: Array<Record<string, unknown>>) => ({
+    id, run_id: runId, run_attempt: 1, head_sha: headSha, name, status: "completed", conclusion, steps,
+  });
+  const step = (number: number, name: string, conclusion: string) => ({ number, name, status: "completed", conclusion });
+  if (runId === 34609219734) return [
+    job(103295186583, "verify-and-stage", "success", [
+      step(11, "Verify current attempt separately from the known-good rollback target", "success"),
+    ]),
+    job(103295384726, "deploy", "failure", [
+      step(7, "Perform final provenance, state, deadline, and freshness checks", "failure"),
+      step(8, "Deploy exact staged artifact", "skipped"),
+    ]),
+  ];
+  if (runId === 34881025561) return [
+    job(104100073427, "verify-and-stage", "failure", [
+      step(11, "Verify current attempt separately from the known-good rollback target", "failure"),
+    ]),
+    job(104100243029, "deploy", "skipped", []),
+  ];
+  if (runId === 35221481720) return [
+    job(105202455538, "verify-and-stage", "success", [
+      step(11, "Verify current attempt separately from the known-good rollback target", "success"),
+    ]),
+    job(105202673533, "deploy", "failure", [
+      step(9, "Perform final provenance, state, deadline, and freshness checks", "success"),
+      step(10, "Deploy exact staged artifact", "failure"),
+    ]),
+  ];
+  throw new Error(`Unexpected historical run fixture: ${runId}`);
 }
 
 function bytewisePathOrder(left: { path: string }, right: { path: string }): number {

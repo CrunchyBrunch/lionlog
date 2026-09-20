@@ -11,7 +11,13 @@ import {
 import type { ValidatedRelease } from "./supported-pages-release.ts";
 import { ACTION_HEADROOM_MS } from "./supported-pages-release.ts";
 import { assertExpectedPredecessor, validateExpectedPredecessor, type PublicReleaseObservation } from "./public-release-state.ts";
-import type { LegacyAttemptEvidence, LegacyStepEvidence } from "./collect-pages-attempt-history.ts";
+import type {
+  IncidentCollectionEvidence,
+  IncidentJobEvidence,
+  IncidentStepEvidence,
+  LegacyAttemptEvidence,
+  LegacyStepEvidence,
+} from "./collect-pages-attempt-history.ts";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const GIT_SHA = /^[a-f0-9]{40}$/;
@@ -33,6 +39,7 @@ interface IncidentBase {
   runId: number;
   runAttempt: number;
   workflowSha: string;
+  collectorEvidence: IncidentCollectionEvidence;
   checkedAt: string;
   note: string;
 }
@@ -74,7 +81,11 @@ export interface FinalState {
 
 export interface PriorAttemptEvidence {
   runId: number;
+  workflowId: number;
+  workflowPath: string;
   workflowSha: string;
+  event: string;
+  headBranch: string;
   runAttempt: number;
   status: string;
   conclusion: string | null;
@@ -82,6 +93,7 @@ export interface PriorAttemptEvidence {
   finalGateConclusion: string | null;
   submissionBoundaryConclusion: string | null;
   deploymentConclusion: string | null;
+  incidentEvidence: IncidentCollectionEvidence | null;
   legacyEvidence: LegacyAttemptEvidence;
   receipt: null | {
     artifactId: number;
@@ -214,18 +226,28 @@ export function verifyFinalState(options: {
     }
     incidentMap.set(`${incident.runId}/${incident.runAttempt}`, incident);
   }
+  const priorKeys = new Set<string>();
   for (const prior of state.priorAttempts) {
-    if (prior.runId === summary.workflow.runId) continue;
+    const priorKey = `${prior.runId}/${prior.runAttempt}`;
+    if (priorKeys.has(priorKey)) throw new Error("Earlier Pages attempt history contains duplicate run/attempt evidence.");
+    priorKeys.add(priorKey);
     if (
-      !positive(prior.runId) || !GIT_SHA.test(prior.workflowSha) || !positive(prior.runAttempt)
-      || prior.jobsComplete !== true || !isLegacyEvidenceContainer(prior.legacyEvidence)
+      prior.runId === summary.workflow.runId || !positive(prior.runId) || prior.workflowId !== PROMOTION_WORKFLOW_ID
+      || prior.workflowPath !== WORKFLOW_PATH || !GIT_SHA.test(prior.workflowSha) || prior.event !== "workflow_dispatch"
+      || prior.headBranch !== "main" || !positive(prior.runAttempt) || prior.jobsComplete !== true
+      || !isLegacyEvidenceContainer(prior.legacyEvidence)
+      || (prior.incidentEvidence !== null && !isIncidentCollectionEvidence(prior.incidentEvidence))
     ) {
       throw new Error("Earlier Pages attempt history is incomplete or invalid.");
     }
-    if (isKnownGoodAttempt(prior) || isProvenPreSubmissionFailure(prior)) continue;
-    const incident = incidentMap.get(`${prior.runId}/${prior.runAttempt}`);
+    const incident = incidentMap.get(priorKey);
+    if (isKnownGoodAttempt(prior) || isProvenPreSubmissionFailure(prior)) {
+      if (prior.incidentEvidence !== null) throw new Error("Earlier Pages attempt carries unexpected incident evidence.");
+      continue;
+    }
     if (
       !incident || incident.runAttempt !== prior.runAttempt || incident.workflowSha !== prior.workflowSha
+      || !exactIncidentEvidence(prior.incidentEvidence, incident.collectorEvidence)
       || (incident.outcome === "resolved-legacy-pre-submission-failure" && !matchesLegacyPreSubmissionFailure(prior, incident))
     ) {
       throw new Error(`Earlier Pages submission attempt ${prior.runId}/${prior.runAttempt} is unknown or unresolved.`);
@@ -237,21 +259,40 @@ export function verifyFinalState(options: {
 function validateIncident(incident: Incident, now: Date): void {
   const commonValid = positive(incident?.runId) && positive(incident?.runAttempt) && GIT_SHA.test(incident?.workflowSha ?? "")
     && Number.isFinite(Date.parse(incident?.checkedAt ?? "")) && Date.parse(incident.checkedAt) <= now.getTime()
-    && typeof incident?.note === "string" && incident.note.length >= 20;
+    && typeof incident?.note === "string" && incident.note.length >= 20
+    && isIncidentCollectionEvidence(incident?.collectorEvidence)
+    && incident.collectorEvidence.jobs.every((job) => (
+      job.runId === incident.runId && job.runAttempt === incident.runAttempt && job.headSha === incident.workflowSha
+    ));
   if (!commonValid) throw new Error("Pages incident history contains an invalid or duplicate record.");
   if (incident.outcome === "resolved-unknown-no-publication") {
     if (
-      !hasExactKeys(incident, ["candidateArtifactId", "checkedAt", "note", "outcome", "publicReleaseId", "repositoryDeploymentId", "runAttempt", "runId", "stagedArtifactId", "workflowSha"])
+      !hasExactKeys(incident, ["candidateArtifactId", "checkedAt", "collectorEvidence", "note", "outcome", "publicReleaseId", "repositoryDeploymentId", "runAttempt", "runId", "stagedArtifactId", "workflowSha"])
       || !positive(incident.candidateArtifactId) || !positive(incident.stagedArtifactId) || !positive(incident.repositoryDeploymentId)
-      || incident.publicReleaseId !== "NONE_404"
+      || incident.publicReleaseId !== "NONE_404" || !isIncidentCollectionEvidence(incident.collectorEvidence)
     ) throw new Error("Pages incident history contains an invalid or duplicate record.");
     return;
   }
   if (
     incident.outcome !== "resolved-legacy-pre-submission-failure"
-    || !hasExactKeys(incident, ["checkedAt", "legacyEvidence", "note", "outcome", "runAttempt", "runId", "workflowSha"])
-    || !isLegacyFailureShape(incident.legacyEvidence)
+    || !hasExactKeys(incident, ["checkedAt", "collectorEvidence", "legacyEvidence", "note", "outcome", "runAttempt", "runId", "workflowSha"])
+    || !isIncidentCollectionEvidence(incident.collectorEvidence) || !isLegacyFailureShape(incident.legacyEvidence)
+    || !legacyEvidenceMatchesCollection(incident.legacyEvidence, incident.collectorEvidence)
   ) throw new Error("Pages incident history contains an invalid or duplicate record.");
+}
+
+function legacyEvidenceMatchesCollection(legacy: LegacyAttemptEvidence, collection: IncidentCollectionEvidence): boolean {
+  return [legacy.validationFailure, legacy.deploymentBoundary].every((step) => {
+    if (step === null) return true;
+    const job = collection.jobs.find((candidate) => candidate.jobId === step.jobId && candidate.jobName === step.jobName);
+    if (!job || job.jobStatus !== step.jobStatus || job.jobConclusion !== step.jobConclusion) return false;
+    if (step.stepNumber === null || step.stepName === null) {
+      return step.stepNumber === null && step.stepName === null && job.steps.length === 0
+        && step.stepStatus === job.jobStatus && step.stepConclusion === job.jobConclusion;
+    }
+    return job.steps.some((candidate) => candidate.stepNumber === step.stepNumber && candidate.stepName === step.stepName
+      && candidate.stepStatus === step.stepStatus && candidate.stepConclusion === step.stepConclusion);
+  });
 }
 
 function matchesLegacyPreSubmissionFailure(attempt: PriorAttemptEvidence, incident: LegacyPreSubmissionIncident): boolean {
@@ -270,13 +311,14 @@ function isLegacyFailureShape(value: LegacyAttemptEvidence): value is {
   if (
     !hasExactKeys(value, ["deploymentBoundary", "validationFailure"])
     || !isLegacyStep(validation) || !isLegacyStep(deployment)
-    || validation.jobConclusion !== "failure" || validation.stepConclusion !== "failure"
+    || validation.jobStatus !== "completed" || validation.jobConclusion !== "failure"
+    || validation.stepStatus !== "completed" || validation.stepConclusion !== "failure"
     || ![
       "Perform final provenance, state, deadline, and freshness checks",
       "Verify current attempt separately from the known-good rollback target",
     ].includes(validation.stepName ?? "")
   ) return false;
-  return deployment.stepConclusion === "skipped" && (
+  return deployment.jobStatus === "completed" && deployment.stepStatus === "completed" && deployment.stepConclusion === "skipped" && (
     (deployment.stepName === "Deploy exact staged artifact" && deployment.jobConclusion === "failure")
     || (deployment.stepName === null && deployment.jobName === "deploy" && deployment.jobConclusion === "skipped")
   );
@@ -284,10 +326,13 @@ function isLegacyFailureShape(value: LegacyAttemptEvidence): value is {
 
 function isLegacyStep(value: unknown): value is LegacyStepEvidence {
   const step = value as LegacyStepEvidence;
-  return hasExactKeys(value, ["jobConclusion", "jobId", "jobName", "stepConclusion", "stepName"])
+  return hasExactKeys(value, ["jobConclusion", "jobId", "jobName", "jobStatus", "stepConclusion", "stepName", "stepNumber", "stepStatus"])
     && positive(step?.jobId) && typeof step?.jobName === "string" && step.jobName.length > 0
+    && step?.jobStatus === "completed"
     && typeof step?.jobConclusion === "string" && step.jobConclusion.length > 0
+    && (step?.stepNumber === null || positive(step?.stepNumber))
     && (step?.stepName === null || (typeof step?.stepName === "string" && step.stepName.length > 0))
+    && step?.stepStatus === "completed"
     && typeof step?.stepConclusion === "string" && step.stepConclusion.length > 0;
 }
 
@@ -299,8 +344,56 @@ function exactLegacyEvidence(left: LegacyAttemptEvidence, right: LegacyAttemptEv
 function exactLegacyStep(left: LegacyStepEvidence | null, right: LegacyStepEvidence | null): boolean {
   return left === null || right === null
     ? left === right
-    : left.jobId === right.jobId && left.jobName === right.jobName && left.jobConclusion === right.jobConclusion
-      && left.stepName === right.stepName && left.stepConclusion === right.stepConclusion;
+    : left.jobId === right.jobId && left.jobName === right.jobName && left.jobStatus === right.jobStatus
+      && left.jobConclusion === right.jobConclusion && left.stepNumber === right.stepNumber
+      && left.stepName === right.stepName && left.stepStatus === right.stepStatus && left.stepConclusion === right.stepConclusion;
+}
+
+function exactIncidentEvidence(left: IncidentCollectionEvidence | null, right: IncidentCollectionEvidence): boolean {
+  return left !== null && JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right));
+}
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entry]) => [key, canonicalize(entry)]));
+}
+
+function isIncidentCollectionEvidence(value: unknown): value is IncidentCollectionEvidence {
+  const evidence = value as IncidentCollectionEvidence;
+  return hasExactKeys(value, ["conclusion", "event", "headBranch", "jobs", "status", "workflowId", "workflowPath"])
+    && evidence.workflowId === PROMOTION_WORKFLOW_ID && evidence.workflowPath === WORKFLOW_PATH
+    && evidence.event === "workflow_dispatch" && evidence.headBranch === "main" && evidence.status === "completed"
+    && terminalConclusion(evidence.conclusion) && Array.isArray(evidence.jobs) && evidence.jobs.length > 0
+    && unique(evidence.jobs.map((job) => job.jobId)) && unique(evidence.jobs.map((job) => job.jobName))
+    && evidence.jobs.every(isIncidentJobEvidence);
+}
+
+function isIncidentJobEvidence(value: unknown): value is IncidentJobEvidence {
+  const job = value as IncidentJobEvidence;
+  return hasExactKeys(value, ["headSha", "jobConclusion", "jobId", "jobName", "jobStatus", "runAttempt", "runId", "steps"])
+    && positive(job.jobId) && positive(job.runId) && positive(job.runAttempt) && GIT_SHA.test(job.headSha ?? "")
+    && typeof job.jobName === "string" && job.jobName.length > 0 && job.jobStatus === "completed"
+    && terminalConclusion(job.jobConclusion) && Array.isArray(job.steps)
+    && unique(job.steps.map((step) => step.stepNumber)) && unique(job.steps.map((step) => step.stepName))
+    && job.steps.every(isIncidentStepEvidence);
+}
+
+function isIncidentStepEvidence(value: unknown): value is IncidentStepEvidence {
+  const step = value as IncidentStepEvidence;
+  return hasExactKeys(value, ["stepConclusion", "stepName", "stepNumber", "stepStatus"])
+    && positive(step.stepNumber) && typeof step.stepName === "string" && step.stepName.length > 0
+    && step.stepStatus === "completed" && terminalConclusion(step.stepConclusion);
+}
+
+function terminalConclusion(value: unknown): value is string {
+  return typeof value === "string" && ["success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", "stale"].includes(value);
+}
+
+function unique(values: unknown[]): boolean {
+  return new Set(values).size === values.length;
 }
 
 function isLegacyEvidenceContainer(value: unknown): value is LegacyAttemptEvidence {

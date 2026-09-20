@@ -6,19 +6,58 @@
       "runAttempt": 1,
       "workflowSha": "3d5181c962486aa25345f4f16fbdd75932e0d831",
       "outcome": "resolved-legacy-pre-submission-failure",
+      "collectorEvidence": {
+        "workflowId": 347992874,
+        "workflowPath": ".github/workflows/deploy-github-pages.yml",
+        "event": "workflow_dispatch",
+        "headBranch": "main",
+        "status": "completed",
+        "conclusion": "failure",
+        "jobs": [
+          {
+            "jobId": 103295384726,
+            "runId": 34609219734,
+            "runAttempt": 1,
+            "headSha": "3d5181c962486aa25345f4f16fbdd75932e0d831",
+            "jobName": "deploy",
+            "jobStatus": "completed",
+            "jobConclusion": "failure",
+            "steps": [
+              {
+                "stepNumber": 7,
+                "stepName": "Perform final provenance, state, deadline, and freshness checks",
+                "stepStatus": "completed",
+                "stepConclusion": "failure"
+              },
+              {
+                "stepNumber": 8,
+                "stepName": "Deploy exact staged artifact",
+                "stepStatus": "completed",
+                "stepConclusion": "skipped"
+              }
+            ]
+          }
+        ]
+      },
       "legacyEvidence": {
         "validationFailure": {
           "jobId": 103295384726,
           "jobName": "deploy",
+          "jobStatus": "completed",
           "jobConclusion": "failure",
+          "stepNumber": 7,
           "stepName": "Perform final provenance, state, deadline, and freshness checks",
+          "stepStatus": "completed",
           "stepConclusion": "failure"
         },
         "deploymentBoundary": {
           "jobId": 103295384726,
           "jobName": "deploy",
+          "jobStatus": "completed",
           "jobConclusion": "failure",
+          "stepNumber": 8,
           "stepName": "Deploy exact staged artifact",
+          "stepStatus": "completed",
           "stepConclusion": "skipped"
         }
       },
@@ -30,19 +69,62 @@
       "runAttempt": 1,
       "workflowSha": "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64",
       "outcome": "resolved-legacy-pre-submission-failure",
+      "collectorEvidence": {
+        "workflowId": 347992874,
+        "workflowPath": ".github/workflows/deploy-github-pages.yml",
+        "event": "workflow_dispatch",
+        "headBranch": "main",
+        "status": "completed",
+        "conclusion": "failure",
+        "jobs": [
+          {
+            "jobId": 104100073427,
+            "runId": 34881025561,
+            "runAttempt": 1,
+            "headSha": "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64",
+            "jobName": "verify-and-stage",
+            "jobStatus": "completed",
+            "jobConclusion": "failure",
+            "steps": [
+              {
+                "stepNumber": 11,
+                "stepName": "Verify current attempt separately from the known-good rollback target",
+                "stepStatus": "completed",
+                "stepConclusion": "failure"
+              }
+            ]
+          },
+          {
+            "jobId": 104100243029,
+            "runId": 34881025561,
+            "runAttempt": 1,
+            "headSha": "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64",
+            "jobName": "deploy",
+            "jobStatus": "completed",
+            "jobConclusion": "skipped",
+            "steps": []
+          }
+        ]
+      },
       "legacyEvidence": {
         "validationFailure": {
           "jobId": 104100073427,
           "jobName": "verify-and-stage",
+          "jobStatus": "completed",
           "jobConclusion": "failure",
+          "stepNumber": 11,
           "stepName": "Verify current attempt separately from the known-good rollback target",
+          "stepStatus": "completed",
           "stepConclusion": "failure"
         },
         "deploymentBoundary": {
           "jobId": 104100243029,
           "jobName": "deploy",
+          "jobStatus": "completed",
           "jobConclusion": "skipped",
+          "stepNumber": null,
           "stepName": null,
+          "stepStatus": "completed",
           "stepConclusion": "skipped"
         }
       },
@@ -58,6 +140,56 @@
       "repositoryDeploymentId": 6502721175,
       "outcome": "resolved-unknown-no-publication",
       "publicReleaseId": "NONE_404",
+      "collectorEvidence": {
+        "workflowId": 347992874,
+        "workflowPath": ".github/workflows/deploy-github-pages.yml",
+        "event": "workflow_dispatch",
+        "headBranch": "main",
+        "status": "completed",
+        "conclusion": "failure",
+        "jobs": [
+          {
+            "jobId": 105202455538,
+            "runId": 35221481720,
+            "runAttempt": 1,
+            "headSha": "4a91cda0de93b920607f2aa37163790bb4b662f2",
+            "jobName": "verify-and-stage",
+            "jobStatus": "completed",
+            "jobConclusion": "success",
+            "steps": [
+              {
+                "stepNumber": 11,
+                "stepName": "Verify current attempt separately from the known-good rollback target",
+                "stepStatus": "completed",
+                "stepConclusion": "success"
+              }
+            ]
+          },
+          {
+            "jobId": 105202673533,
+            "runId": 35221481720,
+            "runAttempt": 1,
+            "headSha": "4a91cda0de93b920607f2aa37163790bb4b662f2",
+            "jobName": "deploy",
+            "jobStatus": "completed",
+            "jobConclusion": "failure",
+            "steps": [
+              {
+                "stepNumber": 9,
+                "stepName": "Perform final provenance, state, deadline, and freshness checks",
+                "stepStatus": "completed",
+                "stepConclusion": "success"
+              },
+              {
+                "stepNumber": 10,
+                "stepName": "Deploy exact staged artifact",
+                "stepStatus": "completed",
+                "stepConclusion": "failure"
+              }
+            ]
+          }
+        ]
+      },
       "checkedAt": "2026-09-17T00:00:00.000Z",
       "note": "The retained attempt evidence did not establish a completed publication, and the public release marker remained absent. This source-reviewed record resolves the legacy custom-adapter attempt without treating missing custom ledger data alone as proof."
     }

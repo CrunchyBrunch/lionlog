@@ -16,6 +16,9 @@ const projectRoot = path.resolve(import.meta.dirname, "..");
 const fixtureRoot = path.join(projectRoot, "tests", "fixtures", "psu");
 const shellRevision = "a".repeat(40);
 const releaseId = "b".repeat(64);
+const fixedBrowserNow = "2026-09-17T12:00:00.000Z";
+const browserBasePath = process.env.LIONLOG_BROWSER_TEST_BASE_PATH ?? "";
+if (!/^(?:|\/[A-Za-z0-9][A-Za-z0-9._-]*)$/.test(browserBasePath)) throw new Error("Browser regression base path is invalid.");
 
 test("React-controlled historical date and target-wide offline reload use only validated saved data", { timeout: 90_000 }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), "lionlog-browser-regression-"));
@@ -70,7 +73,10 @@ test("React-controlled historical date and target-wide offline reload use only v
       try {
         const pathname = decodeURIComponent(new URL(request.url ?? "/", "http://localhost").pathname);
         requestPaths.push(pathname);
-        const relative = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+        const scopedPath = browserBasePath === ""
+          ? pathname
+          : pathname === `${browserBasePath}/` ? "/" : pathname.startsWith(`${browserBasePath}/`) ? pathname.slice(browserBasePath.length) : "__outside_scope__";
+        const relative = scopedPath === "/" ? "index.html" : scopedPath.replace(/^\/+/, "");
         const resolved = path.resolve(site, relative);
         if (resolved !== site && !resolved.startsWith(`${site}${path.sep}`)) throw new Error("path traversal");
         const bytes = await readFile(resolved);
@@ -92,8 +98,9 @@ test("React-controlled historical date and target-wide offline reload use only v
       assert.ok(address && typeof address === "object");
       const itemNames = snapshot.stations.flatMap((station) => station.items.map((item) => item.name));
       const result = await verifyBrowserSession({
-        targetUrl: `http://127.0.0.1:${address.port}/`,
+        targetUrl: `http://127.0.0.1:${address.port}${browserBasePath}/`,
         chromeBin: browserExecutable(),
+        browserNow: fixedBrowserNow,
         expected: {
           contextVersion: "lionlog.pages-browser-context.v1",
           releaseId,
@@ -105,20 +112,24 @@ test("React-controlled historical date and target-wide offline reload use only v
           expectedFirstFoodName: itemNames[0],
         },
         onOfflineStart: async () => {
+          offlinePhase = true;
+        },
+        onBeforeOfflineReload: async () => {
           await new Promise<void>((resolve, reject) => {
             server.close((error) => error ? reject(error) : resolve());
             server.closeAllConnections();
           });
           serverClosed = true;
-          offlinePhase = true;
         },
         getOfflineServerRequestCount: () => offlineRequests,
       }).catch((error) => {
         throw new Error(`${error instanceof Error ? error.message : String(error)}; origin requests: ${JSON.stringify(requestPaths)}`);
       });
       assert.equal(result.uncachedResourceFailed, true);
+      assert.equal(result.dedicatedWorkerUncachedResourceFailed, true);
       assert.equal(result.offlineServerRequestCount, 0);
       assert.ok(result.isolatedTargetTypes.includes("service_worker"));
+      assert.ok(result.isolatedTargetTypes.includes("worker"));
       assert.equal(result.online.selectedDate, "2026-08-31");
       assert.equal(result.offline.selectedDate, "2026-08-31");
       assert.deepEqual(result.offline.itemNames, itemNames);

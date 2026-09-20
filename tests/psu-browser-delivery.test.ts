@@ -163,7 +163,7 @@ test("missing publication is unavailable and never falls back to sample data", a
   assert.match(menu.source.warning ?? "", /sample data was not substituted/i);
 });
 
-test("failed refresh serves stale LKG only inside its bounded retention period", async () => {
+test("failed refresh serves stale LKG inside its bounded retention period", async () => {
   const snapshot = await fixtureSnapshot();
   const applicationStore = new MemoryBrowserMenuApplicationStore();
   await applicationStore.writeCatalog(fixtureCatalog(snapshot));
@@ -177,6 +177,13 @@ test("failed refresh serves stale LKG only inside its bounded retention period",
   });
   assert.equal((await staleStore.readMenuSelection(query))?.state, "stale");
 
+});
+
+test("expired saved content fails closed after bounded retention", async () => {
+  const snapshot = await fixtureSnapshot();
+  const applicationStore = new MemoryBrowserMenuApplicationStore();
+  await applicationStore.writeCatalog(fixtureCatalog(snapshot));
+  await applicationStore.writeSnapshot(snapshot);
   const expiredStore = new BrowserStaticPsuSnapshotStore({
     baseUrl: () => "https://example.test/",
     fetchImpl: rejectingFetch,
