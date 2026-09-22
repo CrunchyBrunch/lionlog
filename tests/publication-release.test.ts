@@ -30,6 +30,7 @@ const sourceSha = "b".repeat(40);
 const hash = "c".repeat(64);
 const digest = `sha256:${"d".repeat(64)}`;
 const now = new Date("2026-09-17T12:00:00.000Z");
+const historicalIncidentHistory = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
 
 test("artifact ZIP parser rejects traversal, symlinks, extras, and header disagreement", () => {
   const valid = createStoredZip([{ path: "artifact.tar", data: Buffer.from("tar") }]);
@@ -384,7 +385,7 @@ test("real legacy pre-submission identities reconcile only against exact affirma
   const incomplete = { ...attempts[0], jobsComplete: false };
   const mismatched = { ...attempts[0], workflowSha: "f".repeat(40) };
   const changedIncidentEvidence = structuredClone(attempts[2]);
-  changedIncidentEvidence.incidentEvidence!.jobs[1].steps[1].stepConclusion = "success";
+  changedIncidentEvidence.incidentEvidence!.jobs[1].steps[9].stepConclusion = "success";
   const wrongWorkflowId = { ...attempts[0], workflowId: 1 };
   const wrongWorkflowPath = { ...attempts[0], workflowPath: ".github/workflows/other.yml" };
   const wrongEvent = { ...attempts[0], event: "push" };
@@ -513,16 +514,16 @@ test("all three real historical attempts collect and reconcile only with exact i
     summary: summaryFixture(), state: { ...finalState(), priorAttempts: evidence }, incidents, now,
   }));
 
-  const mutations: Array<(jobs: Array<Record<string, unknown>>) => void> = [
-    (jobs) => { jobs[1].run_id = 1; },
-    (jobs) => { jobs[1].run_attempt = 2; },
-    (jobs) => { jobs[1].head_sha = "f".repeat(40); },
-    (jobs) => { jobs[1].status = "in_progress"; jobs[1].conclusion = null; },
-    (jobs) => { (jobs[1].steps as Array<Record<string, unknown>>)[0].status = "in_progress"; },
-    (jobs) => { (jobs[1].steps as Array<Record<string, unknown>>)[0].conclusion = "success"; },
-    (jobs) => { (jobs[1].steps as Array<Record<string, unknown>>).splice(0, 1); },
-    (jobs) => { (jobs[1].steps as Array<Record<string, unknown>>).push(structuredClone((jobs[1].steps as Array<Record<string, unknown>>)[0])); },
-    (jobs) => { jobs.push(structuredClone(jobs[1])); },
+  const mutations: Array<(jobs: Array<Record<string, unknown>>, runId: number) => void> = [
+    (jobs, runId) => { if (runId === 34609219734) jobs[1].run_id = 1; },
+    (jobs, runId) => { if (runId === 34609219734) jobs[1].run_attempt = 2; },
+    (jobs, runId) => { if (runId === 34609219734) jobs[1].head_sha = "f".repeat(40); },
+    (jobs, runId) => { if (runId === 34609219734) { jobs[1].status = "in_progress"; jobs[1].conclusion = null; } },
+    (jobs, runId) => { if (runId === 34609219734) (jobs[1].steps as Array<Record<string, unknown>>)[6].status = "in_progress"; },
+    (jobs, runId) => { if (runId === 34609219734) (jobs[1].steps as Array<Record<string, unknown>>)[6].conclusion = "success"; },
+    (jobs, runId) => { if (runId === 34609219734) (jobs[1].steps as Array<Record<string, unknown>>).splice(6, 1); },
+    (jobs, runId) => { if (runId === 34609219734) (jobs[1].steps as Array<Record<string, unknown>>).push(structuredClone((jobs[1].steps as Array<Record<string, unknown>>)[6])); },
+    (jobs, runId) => { if (runId === 34609219734) jobs.push(structuredClone(jobs[1])); },
   ];
   for (const mutate of mutations) {
     await assert.rejects(() => collectPagesAttemptHistory({
@@ -551,7 +552,7 @@ test("all three real historical attempts collect and reconcile only with exact i
   }
 });
 
-test("incident collection rejects conflicting deployment evidence anywhere in the complete jobs set", async () => {
+test("incident collection rejects every unknown or altered job and step before projection", async () => {
   const incidents = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
   const collect = (mutate: (jobs: Array<Record<string, unknown>>, runId: number) => void) => collectPagesAttemptHistory({
     repository: "CrunchyBrunch/lionlog",
@@ -560,70 +561,94 @@ test("incident collection rejects conflicting deployment evidence anywhere in th
     incidentHistory: incidents,
     fetchImpl: historicalAttemptFetch(mutate),
   });
-  const extraStep = (name: string, status = "completed", conclusion: string | null = "success") =>
-    ({ number: 12, name, status, conclusion });
+  const extraStep = (name: string, status = "completed", conclusion: string | null = "success", number = 999) =>
+    ({ number, name, status, conclusion });
+  const appendToValidation = (jobs: Array<Record<string, unknown>>, runId: number, step: Record<string, unknown>) => {
+    if (runId === 34881025561) (jobs[0].steps as Array<Record<string, unknown>>).push(step);
+  };
+  const unknownJob = (id = 104100999999) => ({
+    id, run_id: 34881025561, run_attempt: 1,
+    head_sha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64", name: "release-production",
+    status: "completed", conclusion: "success",
+    steps: [extraStep("Run actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346")],
+  });
   const mutations: Array<(jobs: Array<Record<string, unknown>>, runId: number) => void> = [
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Run actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346")),
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Run node scripts/submit-production-release.mjs --now")),
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Dеploy exact staged artifact")),
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Write harmless summary")),
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Unknown failed validation", "completed", "failure")),
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Unknown skipped validation", "completed", "skipped")),
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Unknown queued validation", "queued", null)),
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Unknown active validation", "in_progress", null)),
+    (jobs, runId) => { if (runId === 34881025561) jobs.push(unknownJob()); },
+    (jobs, runId) => { if (runId === 34881025561) jobs.push(unknownJob(), structuredClone(unknownJob())); },
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Step-number collision", "completed", "success", 11)),
     (jobs, runId) => {
-      if (runId === 34881025561) (jobs[0].steps as Array<Record<string, unknown>>).push(extraStep("Deploy exact staged artifact"));
+      if (runId === 34881025561) {
+        const steps = jobs[0].steps as Array<Record<string, unknown>>;
+        [steps[9], steps[10]] = [steps[10], steps[9]];
+      }
     },
     (jobs, runId) => {
-      if (runId === 34881025561) (jobs[0].steps as Array<Record<string, unknown>>).push(extraStep("Deploy exact staged artifact", "in_progress", null));
+      if (runId === 34881025561) (jobs[0].steps as Array<Record<string, unknown>>)[10].name = "Verify current attempt (renamed)";
     },
     (jobs, runId) => {
-      if (runId === 34881025561) (jobs[0].steps as Array<Record<string, unknown>>).push(extraStep("Deploy exact staged artifact", "queued", null));
+      if (runId === 34881025561) (jobs[0].steps as Array<Record<string, unknown>>)[10].status = "in_progress";
     },
     (jobs, runId) => {
-      if (runId === 34881025561) jobs.push({
-        id: 104100999999, run_id: runId, run_attempt: 1,
-        head_sha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64", name: "deployment", status: "completed", conclusion: "success", steps: [],
-      });
+      if (runId === 34881025561) (jobs[0].steps as Array<Record<string, unknown>>)[10].conclusion = "success";
     },
     (jobs, runId) => {
-      if (runId === 34881025561) (jobs[0].steps as Array<Record<string, unknown>>).push(extraStep("D e p l o y exact staged artifact"));
-    },
-    (jobs, runId) => {
-      if (runId === 34609219734) (jobs[1].steps as Array<Record<string, unknown>>).push({
-        ...(jobs[1].steps as Array<Record<string, unknown>>)[1], number: 99, conclusion: "success",
-      });
+      if (runId === 34881025561) {
+        const steps = jobs[0].steps as Array<Record<string, unknown>>;
+        const unknown = extraStep("Duplicated unknown evidence");
+        steps.push(unknown, structuredClone(unknown));
+      }
     },
   ];
   for (const mutate of mutations) {
-    await assert.rejects(() => collect(mutate), /deployment|nonterminal|ambiguous|duplicate|contract/);
+    await assert.rejects(() => collect(mutate), /graph|nonterminal|duplicate|contract|invalid/);
   }
 
-  const evidence = await collect((jobs, runId) => {
-    if (runId === 34881025561) {
-      (jobs[0].steps as Array<Record<string, unknown>>).push(extraStep("Validate retained public inventory", "completed", "success"));
-      (jobs[0].steps as Array<Record<string, unknown>>).push({ ...extraStep("Publish human review summary", "completed", "success"), number: 13 });
-    }
-  });
+  const evidence = await collect(() => undefined);
   assert.equal(evidence.length, 3);
+  assert.equal(evidence[1].incidentEvidence?.jobs.length, 3);
+  assert.ok(evidence[1].incidentEvidence?.jobs[0].steps.some((step) => step.stepName === "Validate immutable input shapes"));
+  assert.ok(evidence[1].incidentEvidence?.jobs[0].steps.some((step) => step.stepName === "Stage exact Pages tar for protected deployment"));
 });
 
-test("incident collection checks deployment evidence returned on later job pages", async () => {
+test("incident collection rejects later-page additions, incomplete pagination, and conflicting page copies", async () => {
   const incidents = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
-  const baseFetch = historicalAttemptFetch();
-  const fetchImpl: typeof fetch = async (input, init) => {
-    const url = new URL(String(input));
-    if (url.pathname.endsWith("/actions/runs/34881025561/attempts/1/jobs")) {
-      const first = historicalJobs(34881025561, "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64");
-      const fillers = Array.from({ length: 98 }, (_, index) => ({
-        id: 104101000000 + index, run_id: 34881025561, run_attempt: 1,
-        head_sha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64", name: `validation-${index}`,
-        status: "completed", conclusion: "success", steps: [],
-      }));
-      if (url.searchParams.get("page") === "1") return jsonResponse({ total_count: 101, jobs: [...first, ...fillers] });
-      return jsonResponse({ total_count: 101, jobs: [{
-        id: 104101999999, run_id: 34881025561, run_attempt: 1,
-        head_sha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64", name: "deploy-shadow",
-        status: "completed", conclusion: "success", steps: [],
-      }] });
-    }
-    return baseFetch(input, init);
+  const original = historicalJobs(34881025561, "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64");
+  const filler = (index: number) => ({
+    id: 104101000000 + index, run_id: 34881025561, run_attempt: 1,
+    head_sha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64", name: `validation-${index}`,
+    status: "completed", conclusion: "success", steps: [],
+  });
+  const firstPage = [...original, ...Array.from({ length: 97 }, (_, index) => filler(index))];
+  const extraJob = {
+    id: 104101999999, run_id: 34881025561, run_attempt: 1,
+    head_sha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64", name: "release-production",
+    status: "completed", conclusion: "success",
+    steps: [{ number: 999, name: "Run actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346", status: "completed", conclusion: "success" }],
   };
-  await assert.rejects(() => collectPagesAttemptHistory({
-    repository: "CrunchyBrunch/lionlog", currentRunId: 999, token: "fixture-token", incidentHistory: incidents, fetchImpl,
-  }), /deployment job evidence/);
+  const pageVariants: Array<(page: string | null) => { total_count: number; jobs: Array<Record<string, unknown>> }> = [
+    (page) => page === "1" ? { total_count: 101, jobs: firstPage } : { total_count: 101, jobs: [extraJob] },
+    (page) => page === "1" ? { total_count: 101, jobs: firstPage } : { total_count: 101, jobs: [] },
+    (page) => page === "1" ? { total_count: 101, jobs: firstPage } : { total_count: 101, jobs: [structuredClone(original[0])] },
+  ];
+  for (const pages of pageVariants) {
+    const baseFetch = historicalAttemptFetch();
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/actions/runs/34881025561/attempts/1/jobs")) return jsonResponse(pages(url.searchParams.get("page")));
+      return baseFetch(input, init);
+    };
+    await assert.rejects(() => collectPagesAttemptHistory({
+      repository: "CrunchyBrunch/lionlog", currentRunId: 999, token: "fixture-token", incidentHistory: incidents, fetchImpl,
+    }), /graph|duplicate evidence|ended before/);
+  }
 });
 
 test("workflow-run pagination rejects duplicate run/attempt evidence across pages", async () => {
@@ -768,70 +793,21 @@ function legacyAttempt352(): PriorAttemptEvidence {
 }
 
 function incidentEvidence346() {
-  return {
-    workflowId: 347_992_874,
-    workflowPath: ".github/workflows/deploy-github-pages.yml",
-    event: "workflow_dispatch",
-    headBranch: "main",
-    status: "completed",
-    conclusion: "failure",
-    jobs: [{
-      jobId: 103295384726, runId: 34609219734, runAttempt: 1,
-      headSha: "3d5181c962486aa25345f4f16fbdd75932e0d831", jobName: "deploy", jobStatus: "completed", jobConclusion: "failure",
-      steps: [
-        { stepNumber: 7, stepName: "Perform final provenance, state, deadline, and freshness checks", stepStatus: "completed", stepConclusion: "failure" },
-        { stepNumber: 8, stepName: "Deploy exact staged artifact", stepStatus: "completed", stepConclusion: "skipped" },
-      ],
-    }],
-  };
+  return incidentEvidenceForRun(34609219734);
 }
 
 function incidentEvidence348() {
-  return {
-    workflowId: 347_992_874,
-    workflowPath: ".github/workflows/deploy-github-pages.yml",
-    event: "workflow_dispatch",
-    headBranch: "main",
-    status: "completed",
-    conclusion: "failure",
-    jobs: [
-      {
-        jobId: 104100073427, runId: 34881025561, runAttempt: 1,
-        headSha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64", jobName: "verify-and-stage", jobStatus: "completed", jobConclusion: "failure",
-        steps: [{ stepNumber: 11, stepName: "Verify current attempt separately from the known-good rollback target", stepStatus: "completed", stepConclusion: "failure" }],
-      },
-      {
-        jobId: 104100243029, runId: 34881025561, runAttempt: 1,
-        headSha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64", jobName: "deploy", jobStatus: "completed", jobConclusion: "skipped", steps: [],
-      },
-    ],
-  };
+  return incidentEvidenceForRun(34881025561);
 }
 
 function incidentEvidence352() {
-  return {
-    workflowId: 347_992_874,
-    workflowPath: ".github/workflows/deploy-github-pages.yml",
-    event: "workflow_dispatch",
-    headBranch: "main",
-    status: "completed",
-    conclusion: "failure",
-    jobs: [
-      {
-        jobId: 105202455538, runId: 35221481720, runAttempt: 1,
-        headSha: "4a91cda0de93b920607f2aa37163790bb4b662f2", jobName: "verify-and-stage", jobStatus: "completed", jobConclusion: "success",
-        steps: [{ stepNumber: 11, stepName: "Verify current attempt separately from the known-good rollback target", stepStatus: "completed", stepConclusion: "success" }],
-      },
-      {
-        jobId: 105202673533, runId: 35221481720, runAttempt: 1,
-        headSha: "4a91cda0de93b920607f2aa37163790bb4b662f2", jobName: "deploy", jobStatus: "completed", jobConclusion: "failure",
-        steps: [
-          { stepNumber: 9, stepName: "Perform final provenance, state, deadline, and freshness checks", stepStatus: "completed", stepConclusion: "success" },
-          { stepNumber: 10, stepName: "Deploy exact staged artifact", stepStatus: "completed", stepConclusion: "failure" },
-        ],
-      },
-    ],
-  };
+  return incidentEvidenceForRun(35221481720);
+}
+
+function incidentEvidenceForRun(runId: number) {
+  const incident = historicalIncidentHistory.incidents.find((candidate: { runId: number }) => candidate.runId === runId);
+  if (!incident) throw new Error(`Missing historical incident fixture: ${runId}`);
+  return structuredClone(incident.collectorEvidence);
 }
 
 function receiptEvidence(options: {
@@ -909,35 +885,29 @@ function historicalAttemptFetch(
 }
 
 function historicalJobs(runId: number, headSha: string): Array<Record<string, unknown>> {
-  const job = (id: number, name: string, conclusion: string, steps: Array<Record<string, unknown>>) => ({
-    id, run_id: runId, run_attempt: 1, head_sha: headSha, name, status: "completed", conclusion, steps,
+  const evidence = incidentEvidenceForRun(runId);
+  return evidence.jobs.map((job: {
+    jobId: number; runId: number; runAttempt: number; headSha: string; jobName: string;
+    jobStatus: string; jobConclusion: string;
+    steps: Array<{ stepNumber: number; stepName: string; stepStatus: string; stepConclusion: string }>;
+  }) => {
+    assert.equal(job.headSha, headSha);
+    return {
+      id: job.jobId,
+      run_id: job.runId,
+      run_attempt: job.runAttempt,
+      head_sha: job.headSha,
+      name: job.jobName,
+      status: job.jobStatus,
+      conclusion: job.jobConclusion,
+      steps: job.steps.map((step) => ({
+        number: step.stepNumber,
+        name: step.stepName,
+        status: step.stepStatus,
+        conclusion: step.stepConclusion,
+      })),
+    };
   });
-  const step = (number: number, name: string, conclusion: string) => ({ number, name, status: "completed", conclusion });
-  if (runId === 34609219734) return [
-    job(103295186583, "verify-and-stage", "success", [
-      step(11, "Verify current attempt separately from the known-good rollback target", "success"),
-    ]),
-    job(103295384726, "deploy", "failure", [
-      step(7, "Perform final provenance, state, deadline, and freshness checks", "failure"),
-      step(8, "Deploy exact staged artifact", "skipped"),
-    ]),
-  ];
-  if (runId === 34881025561) return [
-    job(104100073427, "verify-and-stage", "failure", [
-      step(11, "Verify current attempt separately from the known-good rollback target", "failure"),
-    ]),
-    job(104100243029, "deploy", "skipped", []),
-  ];
-  if (runId === 35221481720) return [
-    job(105202455538, "verify-and-stage", "success", [
-      step(11, "Verify current attempt separately from the known-good rollback target", "success"),
-    ]),
-    job(105202673533, "deploy", "failure", [
-      step(9, "Perform final provenance, state, deadline, and freshness checks", "success"),
-      step(10, "Deploy exact staged artifact", "failure"),
-    ]),
-  ];
-  throw new Error(`Unexpected historical run fixture: ${runId}`);
 }
 
 function bytewisePathOrder(left: { path: string }, right: { path: string }): number {

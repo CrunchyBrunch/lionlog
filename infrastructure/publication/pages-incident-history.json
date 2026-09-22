@@ -15,6 +15,35 @@
         "conclusion": "failure",
         "jobs": [
           {
+            "jobId": 103295186583,
+            "runId": 34609219734,
+            "runAttempt": 1,
+            "headSha": "3d5181c962486aa25345f4f16fbdd75932e0d831",
+            "jobName": "verify-and-stage",
+            "jobStatus": "completed",
+            "jobConclusion": "success",
+            "steps": [
+              { "stepNumber": 1, "stepName": "Set up job", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 2, "stepName": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 3, "stepName": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 4, "stepName": "Run npm ci --ignore-scripts", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 5, "stepName": "Validate immutable input shapes", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 6, "stepName": "Read exact GitHub provenance", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 7, "stepName": "Download exact candidate and enforce wrapper digest", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 8, "stepName": "Download exact recovery candidate and enforce wrapper digest", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 9, "stepName": "Validate the exact recovery relationship", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 10, "stepName": "Validate candidate, approval tuple, and exact site", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 11, "stepName": "Verify current attempt separately from the known-good rollback target", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 12, "stepName": "Stage exact Pages tar for protected deployment", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 13, "stepName": "Capture staged artifact metadata before approval", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 14, "stepName": "Record the exact pre-approval summary", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 15, "stepName": "Retain the pre-approval summary", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 29, "stepName": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 30, "stepName": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 31, "stepName": "Complete job", "stepStatus": "completed", "stepConclusion": "success" }
+            ]
+          },
+          {
             "jobId": 103295384726,
             "runId": 34609219734,
             "runAttempt": 1,
@@ -23,18 +52,40 @@
             "jobStatus": "completed",
             "jobConclusion": "failure",
             "steps": [
-              {
-                "stepNumber": 7,
-                "stepName": "Perform final provenance, state, deadline, and freshness checks",
-                "stepStatus": "completed",
-                "stepConclusion": "failure"
-              },
-              {
-                "stepNumber": 8,
-                "stepName": "Deploy exact staged artifact",
-                "stepStatus": "completed",
-                "stepConclusion": "skipped"
-              }
+              { "stepNumber": 1, "stepName": "Set up job", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 2, "stepName": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 3, "stepName": "Re-download the exact retained approval summary", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 4, "stepName": "Download exact source and recovery wrappers after protected approval", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 5, "stepName": "Re-download and identify the exact staged artifact", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 6, "stepName": "Re-download current-attempt and rollback-target receipts after approval", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 7, "stepName": "Perform final provenance, state, deadline, and freshness checks", "stepStatus": "completed", "stepConclusion": "failure" },
+              { "stepNumber": 8, "stepName": "Deploy exact staged artifact", "stepStatus": "completed", "stepConclusion": "skipped" },
+              { "stepNumber": 9, "stepName": "Preserve deployment attempt evidence", "stepStatus": "completed", "stepConclusion": "skipped" },
+              { "stepNumber": 18, "stepName": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 19, "stepName": "Complete job", "stepStatus": "completed", "stepConclusion": "success" }
+            ]
+          },
+          {
+            "jobId": 103295723911,
+            "runId": 34609219734,
+            "runAttempt": 1,
+            "headSha": "3d5181c962486aa25345f4f16fbdd75932e0d831",
+            "jobName": "smoke-and-record",
+            "jobStatus": "completed",
+            "jobConclusion": "failure",
+            "steps": [
+              { "stepNumber": 1, "stepName": "Set up job", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 2, "stepName": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 3, "stepName": "Recover exact deployment attempt evidence", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 4, "stepName": "Download exact source manifest for public verification", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 5, "stepName": "Verify the anonymous public marker", "stepStatus": "completed", "stepConclusion": "skipped" },
+              { "stepNumber": 6, "stepName": "Verify the complete anonymous public product", "stepStatus": "completed", "stepConclusion": "skipped" },
+              { "stepNumber": 7, "stepName": "Reconcile the supported repository deployment ledger", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 8, "stepName": "Record complete deployment outcome", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 9, "stepName": "Retain complete deployment receipt even when verification fails", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 10, "stepName": "Fail closed unless the retained receipt is known-good", "stepStatus": "completed", "stepConclusion": "failure" },
+              { "stepNumber": 20, "stepName": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 21, "stepName": "Complete job", "stepStatus": "completed", "stepConclusion": "success" }
             ]
           }
         ]
@@ -86,12 +137,24 @@
             "jobStatus": "completed",
             "jobConclusion": "failure",
             "steps": [
-              {
-                "stepNumber": 11,
-                "stepName": "Verify current attempt separately from the known-good rollback target",
-                "stepStatus": "completed",
-                "stepConclusion": "failure"
-              }
+              { "stepNumber": 1, "stepName": "Set up job", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 2, "stepName": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 3, "stepName": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 4, "stepName": "Run npm ci --ignore-scripts", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 5, "stepName": "Validate immutable input shapes", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 6, "stepName": "Read exact GitHub provenance", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 7, "stepName": "Download exact candidate and enforce wrapper digest", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 8, "stepName": "Download exact recovery candidate and enforce wrapper digest", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 9, "stepName": "Validate the exact recovery relationship", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 10, "stepName": "Validate candidate, approval tuple, and exact site", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 11, "stepName": "Verify current attempt separately from the known-good rollback target", "stepStatus": "completed", "stepConclusion": "failure" },
+              { "stepNumber": 12, "stepName": "Stage exact Pages tar for protected deployment", "stepStatus": "completed", "stepConclusion": "skipped" },
+              { "stepNumber": 13, "stepName": "Capture staged artifact metadata before approval", "stepStatus": "completed", "stepConclusion": "skipped" },
+              { "stepNumber": 14, "stepName": "Record the exact pre-approval summary", "stepStatus": "completed", "stepConclusion": "skipped" },
+              { "stepNumber": 15, "stepName": "Retain the pre-approval summary", "stepStatus": "completed", "stepConclusion": "skipped" },
+              { "stepNumber": 29, "stepName": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020", "stepStatus": "completed", "stepConclusion": "skipped" },
+              { "stepNumber": 30, "stepName": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 31, "stepName": "Complete job", "stepStatus": "completed", "stepConclusion": "success" }
             ]
           },
           {
@@ -100,6 +163,16 @@
             "runAttempt": 1,
             "headSha": "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64",
             "jobName": "deploy",
+            "jobStatus": "completed",
+            "jobConclusion": "skipped",
+            "steps": []
+          },
+          {
+            "jobId": 104100243826,
+            "runId": 34881025561,
+            "runAttempt": 1,
+            "headSha": "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64",
+            "jobName": "smoke-and-record",
             "jobStatus": "completed",
             "jobConclusion": "skipped",
             "steps": []
@@ -157,12 +230,24 @@
             "jobStatus": "completed",
             "jobConclusion": "success",
             "steps": [
-              {
-                "stepNumber": 11,
-                "stepName": "Verify current attempt separately from the known-good rollback target",
-                "stepStatus": "completed",
-                "stepConclusion": "success"
-              }
+              { "stepNumber": 1, "stepName": "Set up job", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 2, "stepName": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 3, "stepName": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 4, "stepName": "Run npm ci --ignore-scripts", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 5, "stepName": "Validate immutable input shapes", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 6, "stepName": "Read exact GitHub provenance", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 7, "stepName": "Download exact candidate and enforce wrapper digest", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 8, "stepName": "Download exact recovery candidate and enforce wrapper digest", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 9, "stepName": "Validate the exact recovery relationship", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 10, "stepName": "Validate candidate, approval tuple, and exact site", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 11, "stepName": "Verify current attempt separately from the known-good rollback target", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 12, "stepName": "Stage exact Pages tar for protected deployment", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 13, "stepName": "Capture staged artifact metadata before approval", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 14, "stepName": "Record the exact pre-approval summary", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 15, "stepName": "Retain the pre-approval summary", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 29, "stepName": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 30, "stepName": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 31, "stepName": "Complete job", "stepStatus": "completed", "stepConclusion": "success" }
             ]
           },
           {
@@ -174,18 +259,43 @@
             "jobStatus": "completed",
             "jobConclusion": "failure",
             "steps": [
-              {
-                "stepNumber": 9,
-                "stepName": "Perform final provenance, state, deadline, and freshness checks",
-                "stepStatus": "completed",
-                "stepConclusion": "success"
-              },
-              {
-                "stepNumber": 10,
-                "stepName": "Deploy exact staged artifact",
-                "stepStatus": "completed",
-                "stepConclusion": "failure"
-              }
+              { "stepNumber": 1, "stepName": "Set up job", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 2, "stepName": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 3, "stepName": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 4, "stepName": "Install locked production validation dependencies", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 5, "stepName": "Re-download the exact retained approval summary", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 6, "stepName": "Download exact source and recovery wrappers after protected approval", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 7, "stepName": "Re-download and identify the exact staged artifact", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 8, "stepName": "Re-download current-attempt and rollback-target receipts after approval", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 9, "stepName": "Perform final provenance, state, deadline, and freshness checks", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 10, "stepName": "Deploy exact staged artifact", "stepStatus": "completed", "stepConclusion": "failure" },
+              { "stepNumber": 11, "stepName": "Preserve deployment attempt evidence", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 21, "stepName": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020", "stepStatus": "completed", "stepConclusion": "skipped" },
+              { "stepNumber": 22, "stepName": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 23, "stepName": "Complete job", "stepStatus": "completed", "stepConclusion": "success" }
+            ]
+          },
+          {
+            "jobId": 105203297419,
+            "runId": 35221481720,
+            "runAttempt": 1,
+            "headSha": "4a91cda0de93b920607f2aa37163790bb4b662f2",
+            "jobName": "smoke-and-record",
+            "jobStatus": "completed",
+            "jobConclusion": "failure",
+            "steps": [
+              { "stepNumber": 1, "stepName": "Set up job", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 2, "stepName": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 3, "stepName": "Recover exact deployment attempt evidence", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 4, "stepName": "Download exact source manifest for public verification", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 5, "stepName": "Verify the anonymous public marker", "stepStatus": "completed", "stepConclusion": "skipped" },
+              { "stepNumber": 6, "stepName": "Verify the complete anonymous public product", "stepStatus": "completed", "stepConclusion": "skipped" },
+              { "stepNumber": 7, "stepName": "Reconcile the supported repository deployment ledger", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 8, "stepName": "Record complete deployment outcome", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 9, "stepName": "Retain complete deployment receipt even when verification fails", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 10, "stepName": "Fail closed unless the retained receipt is known-good", "stepStatus": "completed", "stepConclusion": "failure" },
+              { "stepNumber": 20, "stepName": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "stepStatus": "completed", "stepConclusion": "success" },
+              { "stepNumber": 21, "stepName": "Complete job", "stepStatus": "completed", "stepConclusion": "success" }
             ]
           }
         ]
