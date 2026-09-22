@@ -390,7 +390,15 @@ test("real legacy pre-submission identities reconcile only against exact affirma
   const wrongEvent = { ...attempts[0], event: "push" };
   const wrongBranch = { ...attempts[0], headBranch: "feature" };
   const missingIncidentEvidence = { ...attempts[2], incidentEvidence: null };
-  for (const attempt of [altered, missing, incomplete, mismatched, changedIncidentEvidence, wrongWorkflowId, wrongWorkflowPath, wrongEvent, wrongBranch, missingIncidentEvidence]) {
+  const outerStateMutations = attempts.flatMap((attempt) => [
+    { ...attempt, status: undefined as unknown as string },
+    { ...attempt, status: "in_progress" },
+    { ...attempt, status: "completed", conclusion: "success" },
+    { ...attempt, status: "completed", conclusion: null },
+    { ...attempt, status: "queued", conclusion: "failure" },
+    { ...attempt, status: "unexpected", conclusion: "failure" },
+  ]);
+  for (const attempt of [altered, missing, incomplete, mismatched, changedIncidentEvidence, wrongWorkflowId, wrongWorkflowPath, wrongEvent, wrongBranch, missingIncidentEvidence, ...outerStateMutations]) {
     assert.throws(() => verifyFinalState({
       summary: summaryFixture(), state: { ...finalState(), priorAttempts: [attempt] }, incidents, now,
     }), /incomplete|unknown or unresolved/);
@@ -541,6 +549,81 @@ test("all three real historical attempts collect and reconcile only with exact i
       fetchImpl: historicalAttemptFetch(undefined, mutateAttempt),
     }), /invalid|terminal|match/);
   }
+});
+
+test("incident collection rejects conflicting deployment evidence anywhere in the complete jobs set", async () => {
+  const incidents = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
+  const collect = (mutate: (jobs: Array<Record<string, unknown>>, runId: number) => void) => collectPagesAttemptHistory({
+    repository: "CrunchyBrunch/lionlog",
+    currentRunId: 999,
+    token: "fixture-token",
+    incidentHistory: incidents,
+    fetchImpl: historicalAttemptFetch(mutate),
+  });
+  const extraStep = (name: string, status = "completed", conclusion: string | null = "success") =>
+    ({ number: 12, name, status, conclusion });
+  const mutations: Array<(jobs: Array<Record<string, unknown>>, runId: number) => void> = [
+    (jobs, runId) => {
+      if (runId === 34881025561) (jobs[0].steps as Array<Record<string, unknown>>).push(extraStep("Deploy exact staged artifact"));
+    },
+    (jobs, runId) => {
+      if (runId === 34881025561) (jobs[0].steps as Array<Record<string, unknown>>).push(extraStep("Deploy exact staged artifact", "in_progress", null));
+    },
+    (jobs, runId) => {
+      if (runId === 34881025561) (jobs[0].steps as Array<Record<string, unknown>>).push(extraStep("Deploy exact staged artifact", "queued", null));
+    },
+    (jobs, runId) => {
+      if (runId === 34881025561) jobs.push({
+        id: 104100999999, run_id: runId, run_attempt: 1,
+        head_sha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64", name: "deployment", status: "completed", conclusion: "success", steps: [],
+      });
+    },
+    (jobs, runId) => {
+      if (runId === 34881025561) (jobs[0].steps as Array<Record<string, unknown>>).push(extraStep("D e p l o y exact staged artifact"));
+    },
+    (jobs, runId) => {
+      if (runId === 34609219734) (jobs[1].steps as Array<Record<string, unknown>>).push({
+        ...(jobs[1].steps as Array<Record<string, unknown>>)[1], number: 99, conclusion: "success",
+      });
+    },
+  ];
+  for (const mutate of mutations) {
+    await assert.rejects(() => collect(mutate), /deployment|nonterminal|ambiguous|duplicate|contract/);
+  }
+
+  const evidence = await collect((jobs, runId) => {
+    if (runId === 34881025561) {
+      (jobs[0].steps as Array<Record<string, unknown>>).push(extraStep("Validate retained public inventory", "completed", "success"));
+      (jobs[0].steps as Array<Record<string, unknown>>).push({ ...extraStep("Publish human review summary", "completed", "success"), number: 13 });
+    }
+  });
+  assert.equal(evidence.length, 3);
+});
+
+test("incident collection checks deployment evidence returned on later job pages", async () => {
+  const incidents = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
+  const baseFetch = historicalAttemptFetch();
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/actions/runs/34881025561/attempts/1/jobs")) {
+      const first = historicalJobs(34881025561, "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64");
+      const fillers = Array.from({ length: 98 }, (_, index) => ({
+        id: 104101000000 + index, run_id: 34881025561, run_attempt: 1,
+        head_sha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64", name: `validation-${index}`,
+        status: "completed", conclusion: "success", steps: [],
+      }));
+      if (url.searchParams.get("page") === "1") return jsonResponse({ total_count: 101, jobs: [...first, ...fillers] });
+      return jsonResponse({ total_count: 101, jobs: [{
+        id: 104101999999, run_id: 34881025561, run_attempt: 1,
+        head_sha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64", name: "deploy-shadow",
+        status: "completed", conclusion: "success", steps: [],
+      }] });
+    }
+    return baseFetch(input, init);
+  };
+  await assert.rejects(() => collectPagesAttemptHistory({
+    repository: "CrunchyBrunch/lionlog", currentRunId: 999, token: "fixture-token", incidentHistory: incidents, fetchImpl,
+  }), /deployment job evidence/);
 });
 
 test("workflow-run pagination rejects duplicate run/attempt evidence across pages", async () => {
@@ -783,8 +866,8 @@ function emptyIncidentHistory() {
 }
 
 function historicalAttemptFetch(
-  mutate346?: (jobs: Array<Record<string, unknown>>) => void,
-  mutate346Attempt?: (attempt: Record<string, unknown>) => void,
+  mutateJobs?: (jobs: Array<Record<string, unknown>>, runId: number) => void,
+  mutateAttempt?: (attempt: Record<string, unknown>, runId: number) => void,
 ): typeof fetch {
   const identities = new Map([
     [34609219734, "3d5181c962486aa25345f4f16fbdd75932e0d831"],
@@ -801,7 +884,7 @@ function historicalAttemptFetch(
     const jobsRun = Number(url.match(/\/actions\/runs\/(\d+)\/attempts\/1\/jobs\?/)?.[1]);
     if (identities.has(jobsRun)) {
       const jobs = historicalJobs(jobsRun, identities.get(jobsRun)!);
-      if (jobsRun === 34609219734) mutate346?.(jobs);
+      mutateJobs?.(jobs, jobsRun);
       return jsonResponse({ total_count: jobs.length, jobs });
     }
     const attemptRun = Number(url.match(/\/actions\/runs\/(\d+)\/attempts\/1(?:\?|$)/)?.[1]);
@@ -818,7 +901,7 @@ function historicalAttemptFetch(
       status: "completed",
       conclusion: "failure",
       };
-      if (attemptRun === 34609219734) mutate346Attempt?.(attempt);
+      mutateAttempt?.(attempt, attemptRun);
       return jsonResponse(attempt);
     }
     return new Response("not found", { status: 404 });

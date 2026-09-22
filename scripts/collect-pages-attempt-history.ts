@@ -11,6 +11,11 @@ const PER_PAGE = 100;
 const MAX_PAGES = 10;
 const MAX_ATTEMPTS_PER_RUN = 20;
 const GIT_SHA = /^[a-f0-9]{40}$/;
+const KNOWN_SUBMISSION_STEP_NAMES = new Set([
+  "Deploy exact staged artifact",
+  "Deploy with official Pages action",
+  "Record official submission boundary",
+]);
 
 export interface CollectedAttemptEvidence {
   runId: number;
@@ -132,16 +137,17 @@ export async function collectPagesAttemptHistory(options: {
         `/repos/${options.repository}/actions/runs/${runId}/attempts/${attempt}/jobs`, "jobs");
       assertUniqueRecords(jobs, "id", "Attempt-specific job history");
       validateAttemptJobs(jobs, runId, attempt, attemptRun.head_sha);
+      const key = `${runId}/${attempt}`;
+      const contract = incidentContracts.get(key) ?? null;
+      validateSubmissionEvidenceRoles(jobs, contract?.collectorEvidence ?? null);
       const steps = jobs.flatMap((jobValue) => {
         const job = jobValue as { steps?: unknown };
         if (job.steps === undefined) return [];
         if (!Array.isArray(job.steps)) throw new Error("Attempt-specific job steps are malformed.");
         return job.steps as Array<Record<string, unknown>>;
       });
-      const key = `${runId}/${attempt}`;
       if (evidenceKeys.has(key)) throw new Error("Attempt history contains duplicate run/attempt evidence.");
       evidenceKeys.add(key);
-      const contract = incidentContracts.get(key) ?? null;
       if (contract && contract.workflowSha !== attemptRun.head_sha) throw new Error("Incident-bound workflow SHA does not match the requested attempt.");
       const incidentEvidence = contract ? collectIncidentEvidence(attemptRun, jobs, contract.collectorEvidence) : null;
       const legacyEvidence = collectLegacyEvidence(jobs, contract?.legacyEvidence ?? null);
@@ -406,6 +412,75 @@ function validateAttemptJobs(jobs: unknown[], runId: number, runAttempt: number,
       stepNumbers.add(stepNumber);
     }
   }
+}
+
+function validateSubmissionEvidenceRoles(jobs: unknown[], expected: IncidentCollectionEvidence | null): void {
+  const expectedSensitiveJobs = new Set(
+    (expected?.jobs ?? []).filter((job) => isSubmissionJobName(job.jobName)).map((job) => `${job.jobId}:${job.jobName}`),
+  );
+  const expectedSensitiveSteps = new Set(
+    (expected?.jobs ?? []).flatMap((job) => job.steps
+      .filter((step) => isSubmissionStepName(step.stepName))
+      .map((step) => `${job.jobId}:${step.stepNumber}:${step.stepName}`)),
+  );
+  const seenSensitiveJobs = new Set<string>();
+  const seenSensitiveSteps = new Set<string>();
+  for (const value of jobs) {
+    const job = value as Record<string, unknown>;
+    const jobId = number(job.id, "Submission-evidence job ID");
+    const jobName = string(job.name, "Submission-evidence job name");
+    if (isSubmissionJobName(jobName)) {
+      const key = `${jobId}:${jobName}`;
+      const isAllowed = expected === null ? jobName === "deploy" : expectedSensitiveJobs.has(key);
+      if (!isAllowed || seenSensitiveJobs.has(key)) {
+        throw new Error("Attempt contains unexpected, ambiguous, or duplicate deployment job evidence.");
+      }
+      seenSensitiveJobs.add(key);
+    }
+    for (const stepValue of job.steps as unknown[]) {
+      const step = stepValue as Record<string, unknown>;
+      const stepNumber = number(step.number, "Submission-evidence step number");
+      const stepName = string(step.name, "Submission-evidence step name");
+      if (!isSubmissionStepName(stepName)) continue;
+      const key = `${jobId}:${stepNumber}:${stepName}`;
+      const isAllowed = expected === null
+        ? jobName === "deploy" && KNOWN_SUBMISSION_STEP_NAMES.has(stepName)
+        : expectedSensitiveSteps.has(key);
+      if (!isAllowed || seenSensitiveSteps.has(key)) {
+        throw new Error("Attempt contains unexpected, ambiguous, or duplicate deployment step evidence.");
+      }
+      seenSensitiveSteps.add(key);
+    }
+  }
+  if (expected !== null && (
+    seenSensitiveJobs.size !== expectedSensitiveJobs.size || seenSensitiveSteps.size !== expectedSensitiveSteps.size
+  )) throw new Error("Attempt deployment evidence does not match its exact incident contract.");
+}
+
+function isSubmissionJobName(name: string): boolean {
+  const normalized = normalizeRoleName(name);
+  return /^(?:deploy|deployment|promote|submit|submission)(?:\s|$)/.test(normalized)
+    || (/^(?:publish|publication)(?:\s|$)/.test(normalized) && hasPublicationTarget(normalized))
+    || /^(?:official\s+)?pages\s+(?:deploy|deployment|publication|submission)(?:\s|$)/.test(normalized);
+}
+
+function isSubmissionStepName(name: string): boolean {
+  if (KNOWN_SUBMISSION_STEP_NAMES.has(name)) return true;
+  const normalized = normalizeRoleName(name);
+  const compact = normalized.replaceAll(" ", "");
+  return /^(?:deploy|deployment|promote|submit|submission)/.test(normalized)
+    || /^(?:deploy|deployment|promote|submit|submission)/.test(compact)
+    || (/^(?:publish|publication)/.test(compact) && hasPublicationTarget(normalized))
+    || /^(?:official\s+)?pages\s+(?:deploy|deployment|publication|submission)(?:\s|$)/.test(normalized)
+    || normalized.includes("official submission boundary");
+}
+
+function hasPublicationTarget(value: string): boolean {
+  return /(?:^|\s)(?:pages|site|release|artifact)(?:\s|$)/.test(value);
+}
+
+function normalizeRoleName(value: string): string {
+  return value.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
 function assertUniqueRecords(values: unknown[], property: string, label: string): void {

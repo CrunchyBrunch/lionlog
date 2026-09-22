@@ -234,7 +234,8 @@ export function verifyFinalState(options: {
     if (
       prior.runId === summary.workflow.runId || !positive(prior.runId) || prior.workflowId !== PROMOTION_WORKFLOW_ID
       || prior.workflowPath !== WORKFLOW_PATH || !GIT_SHA.test(prior.workflowSha) || prior.event !== "workflow_dispatch"
-      || prior.headBranch !== "main" || !positive(prior.runAttempt) || prior.jobsComplete !== true
+      || prior.headBranch !== "main" || !positive(prior.runAttempt) || prior.status !== "completed"
+      || !terminalConclusion(prior.conclusion) || prior.jobsComplete !== true
       || !isLegacyEvidenceContainer(prior.legacyEvidence)
       || (prior.incidentEvidence !== null && !isIncidentCollectionEvidence(prior.incidentEvidence))
     ) {
@@ -247,6 +248,7 @@ export function verifyFinalState(options: {
     }
     if (
       !incident || incident.runAttempt !== prior.runAttempt || incident.workflowSha !== prior.workflowSha
+      || prior.status !== incident.collectorEvidence.status || prior.conclusion !== incident.collectorEvidence.conclusion
       || !exactIncidentEvidence(prior.incidentEvidence, incident.collectorEvidence)
       || (incident.outcome === "resolved-legacy-pre-submission-failure" && !matchesLegacyPreSubmissionFailure(prior, incident))
     ) {

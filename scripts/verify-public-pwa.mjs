@@ -57,6 +57,8 @@ export async function verifyBrowserSession({
   const exited = new Promise((resolve) => chrome.once("exit", resolve));
   let pageClient;
   let browserClient;
+  let verificationFailure;
+  let result;
   try {
     const endpoint = await waitForEndpoint(port);
     pageClient = await connectCdp(endpoint.page.webSocketDebuggerUrl);
@@ -84,6 +86,7 @@ export async function verifyBrowserSession({
     online.publicReleaseId = await evaluate(pageClient, `fetch("./release.json", {cache:"no-store"}).then((response) => { if (!response.ok) throw new Error("release marker unavailable"); return response.json(); }).then((marker) => marker.releaseId)`, true);
     assertPageState(online, expected, { expectedUrl });
     assertNoBrowserDiagnostics(diagnostics);
+    networkGate.assertHealthy();
 
     const isolation = await enforceOfflineIsolation(browserClient, pageClient);
     if (!isolation.targetTypes.includes("service_worker")) throw new Error("No service-worker target was isolated for the offline check.");
@@ -109,7 +112,7 @@ export async function verifyBrowserSession({
     assertNoBrowserDiagnostics(diagnostics);
     const offlineServerRequestCount = await getOfflineServerRequestCount?.();
     if (offlineServerRequestCount !== undefined && offlineServerRequestCount !== 0) throw new Error(`The origin recorded ${offlineServerRequestCount} request(s) during the offline phase.`);
-    return {
+    result = {
       online,
       offline,
       diagnostics: diagnostics.length,
@@ -119,14 +122,25 @@ export async function verifyBrowserSession({
       isolatedTargetTypes: isolation.targetTypes,
       approvedReleaseId: expected.releaseId,
     };
-  } finally {
-    pageClient?.close();
-    browserClient?.close();
-    if (chrome.exitCode === null && chrome.signalCode === null) chrome.kill("SIGKILL");
-    await exited;
-    await networkGate.close();
-    await rm(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  } catch (error) {
+    verificationFailure = error;
   }
+  const cleanupFailures = [];
+  try { pageClient?.close(); } catch (error) { cleanupFailures.push(error); }
+  try { browserClient?.close(); } catch (error) { cleanupFailures.push(error); }
+  try {
+    if (chrome.exitCode === null && chrome.signalCode === null) chrome.kill("SIGKILL");
+    if (!await settleWithin(exited, 5_000)) chrome.unref();
+  } catch (error) { cleanupFailures.push(error); }
+  try { await networkGate.close(); } catch (error) { cleanupFailures.push(error); }
+  try { await rm(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch (error) { cleanupFailures.push(error); }
+  return finalizeBrowserVerification(result, verificationFailure, cleanupFailures);
+}
+
+export function finalizeBrowserVerification(result, verificationFailure, cleanupFailures) {
+  if (verificationFailure !== undefined) throw verificationFailure;
+  if (cleanupFailures.length > 0) throw cleanupFailures[0];
+  return result;
 }
 
 async function verify() {
@@ -237,19 +251,48 @@ async function availablePort() {
   return port;
 }
 
-async function createBrowserNetworkGate() {
+export async function createBrowserNetworkGate({ closeTimeoutMs = 2_000 } = {}) {
+  if (!Number.isSafeInteger(closeTimeoutMs) || closeTimeoutMs < 1 || closeTimeoutMs > 10_000) {
+    throw new Error("Browser network gate close timeout is invalid.");
+  }
   let disconnected = false;
-  const sockets = new Set();
+  let closePromise;
+  let serverFailure;
+  const clientSockets = new Set();
+  const upstreamSockets = new Set();
+  const forwards = new Set();
+  const ignoreExpectedSocketError = () => undefined;
+  const trackSocket = (socket, collection) => {
+    if (collection.has(socket)) return socket;
+    collection.add(socket);
+    socket.on("error", ignoreExpectedSocketError);
+    socket.once("close", () => collection.delete(socket));
+    return socket;
+  };
+  const destroy = (stream) => {
+    if (stream && !stream.destroyed) stream.destroy();
+  };
+  const disconnectAll = () => {
+    disconnected = true;
+    for (const forward of forwards) destroy(forward);
+    for (const socket of upstreamSockets) destroy(socket);
+    for (const socket of clientSockets) destroy(socket);
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
+  };
   const server = createHttpServer((request, response) => {
+    response.on("error", ignoreExpectedSocketError);
     if (disconnected) {
-      request.socket.destroy();
+      destroy(request.socket);
       return;
     }
     let target;
     try {
       target = new URL(request.url ?? "");
+      if (!new Set(["http:", "https:"]).has(target.protocol) || target.username || target.password) throw new Error("unsupported proxy target");
     } catch {
-      response.destroy(new Error("Proxy request URL is invalid."));
+      response.writeHead(400);
+      response.end();
       return;
     }
     const headers = { ...request.headers, host: target.host };
@@ -258,43 +301,101 @@ async function createBrowserNetworkGate() {
       method: request.method,
       headers,
     }, (upstream) => {
+      if (upstream.socket) trackSocket(upstream.socket, upstreamSockets);
+      upstream.on("error", () => destroy(response));
+      upstream.on("aborted", () => destroy(response));
       response.writeHead(upstream.statusCode ?? 502, upstream.headers);
       upstream.pipe(response);
     });
-    forward.on("error", () => response.destroy());
+    forwards.add(forward);
+    forward.on("socket", (socket) => trackSocket(socket, upstreamSockets));
+    forward.on("error", () => destroy(response));
+    forward.once("close", () => forwards.delete(forward));
+    request.on("aborted", () => destroy(forward));
+    request.on("error", () => destroy(forward));
+    response.on("close", () => { if (!response.writableEnded) destroy(forward); });
     request.pipe(forward);
   });
   server.on("connect", (request, clientSocket, head) => {
+    trackSocket(clientSocket, clientSockets);
     if (disconnected) {
-      clientSocket.destroy();
+      destroy(clientSocket);
       return;
     }
-    const authority = new URL(`http://${request.url}`);
-    const upstream = connectTcp(Number(authority.port || 443), authority.hostname, () => {
+    let authority;
+    try {
+      authority = new URL(`http://${request.url}`);
+      if (!authority.hostname || authority.username || authority.password) throw new Error("invalid tunnel authority");
+    } catch {
+      clientSocket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+      return;
+    }
+    const upstream = trackSocket(connectTcp(Number(authority.port || 443), authority.hostname, () => {
+      if (disconnected || clientSocket.destroyed) {
+        destroy(upstream);
+        destroy(clientSocket);
+        return;
+      }
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head.length > 0) upstream.write(head);
       upstream.pipe(clientSocket);
       clientSocket.pipe(upstream);
-    });
-    upstream.on("error", () => clientSocket.destroy());
+    }), upstreamSockets);
+    upstream.on("error", () => destroy(clientSocket));
+    upstream.on("close", () => destroy(clientSocket));
+    clientSocket.on("error", () => destroy(upstream));
+    clientSocket.on("close", () => destroy(upstream));
   });
   server.on("connection", (socket) => {
-    sockets.add(socket);
-    socket.once("close", () => sockets.delete(socket));
+    trackSocket(socket, clientSockets);
   });
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  await new Promise((resolve, reject) => {
+    const onError = (error) => reject(error);
+    server.once("error", onError);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", onError);
+      resolve();
+    });
+  });
+  server.on("error", (error) => { serverFailure ??= error; });
   const address = server.address();
   if (!address || typeof address !== "object") throw new Error("Browser network gate did not start.");
   return {
     port: address.port,
+    assertHealthy() {
+      if (serverFailure) throw new Error("Browser network gate failed.", { cause: serverFailure });
+    },
     disconnect() {
-      disconnected = true;
-      for (const socket of sockets) socket.destroy();
+      disconnectAll();
     },
     close() {
-      return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      if (closePromise) return closePromise;
+      disconnectAll();
+      closePromise = new Promise((resolve) => {
+        let settled = false;
+        let timer;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          disconnectAll();
+          resolve();
+        };
+        timer = setTimeout(finish, closeTimeoutMs);
+        server.close(finish);
+      });
+      return closePromise;
     },
   };
+}
+
+async function settleWithin(promise, timeoutMs) {
+  let timer;
+  const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); });
+  const settled = Promise.resolve(promise).then(() => true, () => true);
+  const result = await Promise.race([settled, timedOut]);
+  clearTimeout(timer);
+  return result;
 }
 
 async function waitForEndpoint(port) {
