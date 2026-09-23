@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -55,14 +55,28 @@ export async function verifyBrowserSession({
     "about:blank",
   ], { stdio: "ignore" });
   const exited = new Promise((resolve) => chrome.once("exit", resolve));
+  const processOwner = createBrowserProcessOwner({
+    launcher: chrome,
+    launcherExited: exited,
+    profile,
+    debuggingPort: port,
+  });
   let pageClient;
   let browserClient;
+  const cleanup = createBrowserCleanup({
+    getPageClient: () => pageClient,
+    getBrowserClient: () => browserClient,
+    processOwner,
+    networkGate,
+    profile,
+  });
   let verificationFailure;
   let result;
   try {
     const endpoint = await waitForEndpoint(port);
     pageClient = await connectCdp(endpoint.page.webSocketDebuggerUrl);
     browserClient = await connectCdp(endpoint.browser.webSocketDebuggerUrl);
+    processOwner.recordCdpProcessInfo((await browserClient.command("SystemInfo.getProcessInfo")).processInfo);
     const diagnostics = [];
     const recordDiagnostic = (event) => {
       if (event.method === "Runtime.exceptionThrown") diagnostics.push({ kind: "exception", text: event.params?.exceptionDetails?.text ?? "exception" });
@@ -125,17 +139,166 @@ export async function verifyBrowserSession({
   } catch (error) {
     verificationFailure = error;
   }
-  const cleanupFailures = [];
-  try { pageClient?.close(); } catch (error) { cleanupFailures.push(error); }
-  try { browserClient?.close(); } catch (error) { cleanupFailures.push(error); }
-  try {
-    if (chrome.exitCode === null && chrome.signalCode === null) chrome.kill("SIGKILL");
-    if (!await settleWithin(exited, 5_000)) chrome.unref();
-  } catch (error) { cleanupFailures.push(error); }
-  try { await networkGate.close(); } catch (error) { cleanupFailures.push(error); }
-  try { await rm(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch (error) { cleanupFailures.push(error); }
+  const cleanupFailures = await cleanup();
   return finalizeBrowserVerification(result, verificationFailure, cleanupFailures);
 }
+
+export function createBrowserProcessOwner({
+  launcher,
+  launcherExited,
+  profile,
+  debuggingPort,
+  platform = process.platform,
+  findPortProcessIds = platform === "win32" ? findWindowsPortProcessIds : undefined,
+  terminateProcessTrees = platform === "win32" ? terminateWindowsProcessTrees : undefined,
+  isProcessAlive = processIsAlive,
+  pause = delay,
+}) {
+  if (!launcher || !Number.isSafeInteger(launcher.pid) || launcher.pid < 1) throw new Error("Browser launcher process identity is unavailable.");
+  if (typeof profile !== "string" || profile.length < 1 || !Number.isSafeInteger(debuggingPort) || debuggingPort < 1) {
+    throw new Error("Browser process ownership boundary is invalid.");
+  }
+  const cdpProcessIds = new Set();
+  let termination;
+  return {
+    recordCdpProcessInfo(processInfo) {
+      if (!Array.isArray(processInfo)) throw new Error("Browser process inventory is unavailable.");
+      for (const value of processInfo) {
+        if (Number.isSafeInteger(value?.id) && value.id > 0) cdpProcessIds.add(value.id);
+      }
+      if (cdpProcessIds.size === 0) throw new Error("Browser process inventory is empty.");
+    },
+    terminate() {
+      if (termination) return termination;
+      termination = platform === "win32"
+        ? terminateOwnedWindowsProcesses({
+            launcher,
+            debuggingPort,
+            cdpProcessIds,
+            findPortProcessIds,
+            terminateProcessTrees,
+            isProcessAlive,
+            pause,
+          })
+        : terminatePortableBrowserProcesses({ launcher, launcherExited, cdpProcessIds });
+      return termination;
+    },
+  };
+}
+
+export function createBrowserCleanup({
+  getPageClient,
+  getBrowserClient,
+  processOwner,
+  networkGate,
+  profile,
+  removeProfile = removeBrowserProfile,
+}) {
+  let cleanup;
+  return () => {
+    if (cleanup) return cleanup;
+    cleanup = (async () => {
+      const failures = [];
+      try { getPageClient()?.close(); } catch (error) { failures.push(error); }
+      try { getBrowserClient()?.close(); } catch (error) { failures.push(error); }
+      try { await processOwner.terminate(); } catch (error) { failures.push(error); }
+      try { await networkGate.close(); } catch (error) { failures.push(error); }
+      try { await removeProfile(profile); } catch (error) { failures.push(error); }
+      return failures;
+    })();
+    return cleanup;
+  };
+}
+
+async function terminateOwnedWindowsProcesses({
+  launcher,
+  debuggingPort,
+  cdpProcessIds,
+  findPortProcessIds,
+  terminateProcessTrees,
+  isProcessAlive,
+  pause,
+}) {
+  if (typeof findPortProcessIds !== "function" || typeof terminateProcessTrees !== "function" || typeof isProcessAlive !== "function") {
+    throw new Error("Windows browser process cleanup is unavailable.");
+  }
+  const trustedProcessIds = new Set(cdpProcessIds);
+  if (launcher.exitCode === null && launcher.signalCode === null) trustedProcessIds.add(launcher.pid);
+  if (trustedProcessIds.size === 0) {
+    for (const pid of await findPortProcessIds(debuggingPort)) trustedProcessIds.add(pid);
+  }
+  for (let pass = 0; pass < 4; pass += 1) {
+    const owned = [...trustedProcessIds].filter((pid) => isProcessAlive(pid));
+    if (owned.length === 0) return;
+    await terminateProcessTrees(owned);
+    await pause(100);
+  }
+  const remaining = new Set([...trustedProcessIds].filter((pid) => isProcessAlive(pid)));
+  if (remaining.size > 0) throw new Error(`Verifier-owned browser processes did not terminate: ${[...remaining].sort((left, right) => left - right).join(", ")}`);
+}
+
+async function terminatePortableBrowserProcesses({ launcher, launcherExited, cdpProcessIds }) {
+  for (const pid of cdpProcessIds) {
+    try { process.kill(pid, "SIGKILL"); } catch (error) { if (error?.code !== "ESRCH") throw error; }
+  }
+  if (launcher.exitCode === null && launcher.signalCode === null) launcher.kill("SIGKILL");
+  if (!await settleWithin(launcherExited, 5_000)) throw new Error("Browser launcher did not terminate within the cleanup bound.");
+}
+
+async function findWindowsPortProcessIds(port) {
+  const output = await executeFile("netstat.exe", ["-ano", "-p", "tcp"], 4_000);
+  const processIds = new Set();
+  for (const line of output.split(/\r?\n/)) {
+    const match = /^\s*TCP\s+(\S+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i.exec(line);
+    if (!match || !match[1].endsWith(`:${port}`)) continue;
+    const pid = Number(match[2]);
+    if (Number.isSafeInteger(pid) && pid > 0) processIds.add(pid);
+  }
+  return [...processIds];
+}
+
+async function terminateWindowsProcessTrees(processIds) {
+  for (const pid of processIds) {
+    try {
+      await executeFile("taskkill.exe", ["/PID", String(pid), "/T", "/F"], 4_000);
+    } catch {
+      // A process may leave between inventory and termination; the bounded final inventory is authoritative.
+    }
+  }
+}
+
+function processIsAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (error) { return error?.code !== "ESRCH"; }
+}
+
+function executeFile(file, argumentsValue, timeout) {
+  return new Promise((resolve, reject) => {
+    execFile(file, argumentsValue, { encoding: "utf8", timeout, windowsHide: true }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(`Browser process cleanup command failed: ${stderr.trim() || error.message}`, { cause: error }));
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+
+async function removeBrowserProfile(profile, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  do {
+    try {
+      await rm(profile, { recursive: true, force: true, maxRetries: 0 });
+      return;
+    } catch (error) {
+      lastError = error;
+      await delay(100);
+    }
+  } while (Date.now() < deadline);
+  throw new Error(`Verifier browser profile could not be removed within ${timeoutMs} ms.`, { cause: lastError });
+}
+
+function delay(milliseconds) { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
 
 export function finalizeBrowserVerification(result, verificationFailure, cleanupFailures) {
   if (verificationFailure !== undefined) throw verificationFailure;

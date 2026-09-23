@@ -3,7 +3,12 @@ import { once } from "node:events";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { connect, createServer as createTcpServer } from "node:net";
 import test from "node:test";
-import { createBrowserNetworkGate, finalizeBrowserVerification } from "../scripts/verify-public-pwa.mjs";
+import {
+  createBrowserCleanup,
+  createBrowserNetworkGate,
+  createBrowserProcessOwner,
+  finalizeBrowserVerification,
+} from "../scripts/verify-public-pwa.mjs";
 
 test("browser network gate cleanup before offline mode tears down an active CONNECT tunnel and closes idempotently", { timeout: 5_000 }, async () => {
   const targetSockets = new Set();
@@ -156,6 +161,55 @@ test("browser cleanup preserves the original verification failure", () => {
   const original = new Error("original browser verification failure");
   const teardown = new Error("secondary teardown failure");
   assert.throws(() => finalizeBrowserVerification(undefined, original, [teardown]), (error) => error === original);
+  assert.throws(() => finalizeBrowserVerification({ verified: true }, undefined, [teardown]), (error) => error === teardown);
+});
+
+test("browser process cleanup terminates a surviving child after the launcher exits and is idempotent", async () => {
+  const profile = "C:\\Temp\\lionlog-pages-chrome-survivor";
+  const alive = new Set([501, 502, 900]);
+  const terminated = [];
+  const launcher = { pid: 500, exitCode: 0, signalCode: null };
+  const owner = createBrowserProcessOwner({
+    launcher,
+    launcherExited: Promise.resolve(0),
+    profile,
+    debuggingPort: 9222,
+    platform: "win32",
+    findPortProcessIds: async () => alive.has(501) ? [501] : [],
+    terminateProcessTrees: async (ids) => {
+      terminated.push([...ids].sort((left, right) => left - right));
+      if (ids.includes(501)) { alive.delete(501); alive.delete(502); }
+    },
+    isProcessAlive: (pid) => alive.has(pid),
+    pause: async () => undefined,
+  });
+  const first = owner.terminate();
+  const second = owner.terminate();
+  assert.equal(first, second);
+  await bounded(first, 1_000, "surviving-child cleanup");
+  assert.deepEqual(terminated, [[501]]);
+  assert.deepEqual([...alive], [900]);
+});
+
+test("failure-before-offline cleanup is bounded, idempotent, and preserves the verification error", async () => {
+  const original = new Error("verification failed before offline mode");
+  const cleanupError = new Error("owned browser cleanup failed");
+  const calls = { page: 0, browser: 0, process: 0, gate: 0, profile: 0 };
+  const cleanup = createBrowserCleanup({
+    getPageClient: () => ({ close() { calls.page += 1; } }),
+    getBrowserClient: () => ({ close() { calls.browser += 1; } }),
+    processOwner: { async terminate() { calls.process += 1; throw cleanupError; } },
+    networkGate: { async close() { calls.gate += 1; } },
+    profile: "fixture-profile",
+    removeProfile: async () => { calls.profile += 1; },
+  });
+  const first = cleanup();
+  const second = cleanup();
+  assert.equal(first, second);
+  const failures = await bounded(first, 1_000, "failure-before-offline cleanup");
+  assert.deepEqual(calls, { page: 1, browser: 1, process: 1, gate: 1, profile: 1 });
+  assert.deepEqual(failures, [cleanupError]);
+  assert.throws(() => finalizeBrowserVerification(undefined, original, failures), (error) => error === original);
 });
 
 function listen(server) {
