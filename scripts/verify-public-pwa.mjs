@@ -54,7 +54,9 @@ export async function verifyBrowserSession({
     `--proxy-server=http://127.0.0.1:${networkGate.port}`,
     "--proxy-bypass-list=<-loopback>",
     "about:blank",
-  ], { stdio: "ignore" });
+  ], { stdio: ["ignore", "ignore", "pipe"] });
+  let launchDiagnostics = "";
+  chrome.stderr.on("data", (chunk) => { launchDiagnostics = (launchDiagnostics + chunk.toString("utf8")).slice(-2_000); });
   const exited = new Promise((resolve) => chrome.once("exit", resolve));
   const processOwner = createBrowserProcessOwner({
     launcher: chrome,
@@ -75,7 +77,7 @@ export async function verifyBrowserSession({
   let verificationFailure;
   let result;
   try {
-    const endpoint = await waitForEndpoint(port);
+    const endpoint = await waitForEndpoint(port, chrome, () => launchDiagnostics);
     pageClient = await connectCdp(endpoint.page.webSocketDebuggerUrl);
     browserClient = await connectCdp(endpoint.browser.webSocketDebuggerUrl);
     processOwner.recordCdpProcessInfo((await browserClient.command("SystemInfo.getProcessInfo")).processInfo);
@@ -652,7 +654,7 @@ async function settleWithin(promise, timeoutMs) {
   return result;
 }
 
-async function waitForEndpoint(port) {
+async function waitForEndpoint(port, chrome, launchDiagnostics) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
       const [pagesResponse, browserResponse] = await Promise.all([fetch(`http://127.0.0.1:${port}/json/list`), fetch(`http://127.0.0.1:${port}/json/version`)]);
@@ -662,9 +664,12 @@ async function waitForEndpoint(port) {
         ?? pages.find((target) => target.type === "page");
       if (page?.webSocketDebuggerUrl && browser?.webSocketDebuggerUrl) return { page, browser };
     } catch { /* Chrome is still starting. */ }
+    if (chrome.exitCode !== null || chrome.signalCode !== null) {
+      throw new Error(`Chrome DevTools endpoint did not start (browser exited: ${chrome.exitCode ?? chrome.signalCode}). ${launchDiagnostics()}`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error("Chrome DevTools endpoint did not start.");
+  throw new Error(`Chrome DevTools endpoint did not start. ${launchDiagnostics()}`);
 }
 
 async function connectCdp(url) {
