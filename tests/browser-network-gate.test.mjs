@@ -8,6 +8,8 @@ import {
   createBrowserNetworkGate,
   createBrowserProcessOwner,
   finalizeBrowserVerification,
+  matchesWindowsBrowserOwnership,
+  sameWindowsProcessIdentity,
 } from "../scripts/verify-public-pwa.mjs";
 
 test("browser network gate cleanup before offline mode tears down an active CONNECT tunnel and closes idempotently", { timeout: 5_000 }, async () => {
@@ -166,7 +168,8 @@ test("browser cleanup preserves the original verification failure", () => {
 
 test("browser process cleanup terminates a surviving child after the launcher exits and is idempotent", async () => {
   const profile = "C:\\Temp\\lionlog-pages-chrome-survivor";
-  const alive = new Set([501, 502, 900]);
+  const identity = browserIdentity(501, profile, 9222, "2026-09-24T12:00:00.000Z");
+  let currentIdentity = identity;
   const terminated = [];
   const launcher = { pid: 500, exitCode: 0, signalCode: null };
   const owner = createBrowserProcessOwner({
@@ -174,21 +177,75 @@ test("browser process cleanup terminates a surviving child after the launcher ex
     launcherExited: Promise.resolve(0),
     profile,
     debuggingPort: 9222,
+    browserExecutable: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
     platform: "win32",
-    findPortProcessIds: async () => alive.has(501) ? [501] : [],
-    terminateProcessTrees: async (ids) => {
-      terminated.push([...ids].sort((left, right) => left - right));
-      if (ids.includes(501)) { alive.delete(501); alive.delete(502); }
+    findPortProcessIds: async () => currentIdentity ? [currentIdentity.pid] : [],
+    inspectProcessIdentity: async () => currentIdentity ? { ...currentIdentity } : null,
+    terminateProcessTree: async (pid) => {
+      terminated.push(pid);
+      currentIdentity = null;
     },
-    isProcessAlive: (pid) => alive.has(pid),
     pause: async () => undefined,
   });
   const first = owner.terminate();
   const second = owner.terminate();
   assert.equal(first, second);
   await bounded(first, 1_000, "surviving-child cleanup");
-  assert.deepEqual(terminated, [[501]]);
-  assert.deepEqual([...alive], [900]);
+  assert.deepEqual(terminated, [501]);
+});
+
+test("port reuse by a different profile fails closed without terminating the unknown browser", async () => {
+  const originalProfile = "C:\\Temp\\lionlog-pages-chrome-original";
+  const replacement = browserIdentity(601, "C:\\Temp\\lionlog-pages-chrome-replacement", 9333, "2026-09-24T12:01:00.000Z");
+  const terminated = [];
+  const owner = createBrowserProcessOwner({
+    launcher: { pid: 600, exitCode: 0, signalCode: null },
+    launcherExited: Promise.resolve(0),
+    profile: originalProfile,
+    debuggingPort: 9333,
+    browserExecutable: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    platform: "win32",
+    findPortProcessIds: async () => [replacement.pid],
+    inspectProcessIdentity: async () => ({ ...replacement }),
+    terminateProcessTree: async (pid) => { terminated.push(pid); },
+    pause: async () => undefined,
+  });
+  await assert.rejects(owner.terminate(), /ownership could not be established/);
+  assert.deepEqual(terminated, []);
+});
+
+test("process replacement between ownership checks fails closed without terminating the replacement", async () => {
+  const profile = "C:\\Temp\\lionlog-pages-chrome-original";
+  const original = browserIdentity(701, profile, 9444, "2026-09-24T12:02:00.000Z");
+  const replacement = browserIdentity(701, "C:\\Temp\\lionlog-pages-chrome-replacement", 9444, "2026-09-24T12:03:00.000Z");
+  const identities = [original, replacement];
+  const terminated = [];
+  const owner = createBrowserProcessOwner({
+    launcher: { pid: 700, exitCode: 0, signalCode: null },
+    launcherExited: Promise.resolve(0),
+    profile,
+    debuggingPort: 9444,
+    browserExecutable: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    platform: "win32",
+    findPortProcessIds: async () => [701],
+    inspectProcessIdentity: async () => ({ ...identities.shift() }),
+    terminateProcessTree: async (pid) => { terminated.push(pid); },
+    pause: async () => undefined,
+  });
+  await assert.rejects(owner.terminate(), /identity changed before termination/);
+  assert.deepEqual(terminated, []);
+});
+
+test("Windows browser ownership requires exact profile, port, executable, and stable creation identity", () => {
+  const profile = "C:\\Temp\\LionLog Profile";
+  const identity = browserIdentity(801, profile, 9555, "2026-09-24T12:04:00.000Z");
+  const expected = { profile, debuggingPort: 9555, expectedExecutableName: "msedge.exe" };
+  assert.equal(matchesWindowsBrowserOwnership(identity, expected), true);
+  assert.equal(matchesWindowsBrowserOwnership({ ...identity, commandLine: identity.commandLine.replace(profile, `${profile}-other`) }, expected), false);
+  assert.equal(matchesWindowsBrowserOwnership({ ...identity, commandLine: identity.commandLine.replace("9555", "9556") }, expected), false);
+  assert.equal(matchesWindowsBrowserOwnership({ ...identity, executablePath: "C:\\Elsewhere\\chrome.exe" }, expected), false);
+  assert.equal(sameWindowsProcessIdentity(identity, { ...identity }), true);
+  assert.equal(sameWindowsProcessIdentity(identity, { ...identity, creationDate: "2026-09-24T12:05:00.000Z" }), false);
 });
 
 test("failure-before-offline cleanup is bounded, idempotent, and preserves the verification error", async () => {
@@ -241,4 +298,15 @@ async function bounded(promise, timeoutMs, label) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function browserIdentity(pid, profile, port, creationDate) {
+  const executablePath = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
+  return {
+    pid,
+    parentPid: 1,
+    creationDate,
+    executablePath,
+    commandLine: `"${executablePath}" --headless=new "--user-data-dir=${profile}" --remote-debugging-port=${port}`,
+  };
 }

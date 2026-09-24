@@ -60,6 +60,7 @@ export async function verifyBrowserSession({
     launcherExited: exited,
     profile,
     debuggingPort: port,
+    browserExecutable: chromeBin,
   });
   let pageClient;
   let browserClient;
@@ -148,39 +149,45 @@ export function createBrowserProcessOwner({
   launcherExited,
   profile,
   debuggingPort,
+  browserExecutable,
   platform = process.platform,
   findPortProcessIds = platform === "win32" ? findWindowsPortProcessIds : undefined,
-  terminateProcessTrees = platform === "win32" ? terminateWindowsProcessTrees : undefined,
-  isProcessAlive = processIsAlive,
+  inspectProcessIdentity = platform === "win32" ? inspectWindowsProcessIdentity : undefined,
+  terminateProcessTree = platform === "win32" ? terminateWindowsProcessTree : undefined,
   pause = delay,
 }) {
   if (!launcher || !Number.isSafeInteger(launcher.pid) || launcher.pid < 1) throw new Error("Browser launcher process identity is unavailable.");
-  if (typeof profile !== "string" || profile.length < 1 || !Number.isSafeInteger(debuggingPort) || debuggingPort < 1) {
+  if (
+    typeof profile !== "string" || profile.length < 1 || !Number.isSafeInteger(debuggingPort) || debuggingPort < 1
+    || typeof browserExecutable !== "string" || browserExecutable.length < 1
+  ) {
     throw new Error("Browser process ownership boundary is invalid.");
   }
-  const cdpProcessIds = new Set();
+  const cdpBrowserProcessIds = new Set();
   let termination;
   return {
     recordCdpProcessInfo(processInfo) {
       if (!Array.isArray(processInfo)) throw new Error("Browser process inventory is unavailable.");
       for (const value of processInfo) {
-        if (Number.isSafeInteger(value?.id) && value.id > 0) cdpProcessIds.add(value.id);
+        if (value?.type === "browser" && Number.isSafeInteger(value.id) && value.id > 0) cdpBrowserProcessIds.add(value.id);
       }
-      if (cdpProcessIds.size === 0) throw new Error("Browser process inventory is empty.");
+      if (cdpBrowserProcessIds.size !== 1) throw new Error("Browser root process identity is missing or ambiguous.");
     },
     terminate() {
       if (termination) return termination;
       termination = platform === "win32"
         ? terminateOwnedWindowsProcesses({
             launcher,
+            profile,
             debuggingPort,
-            cdpProcessIds,
+            browserExecutable,
+            cdpBrowserProcessIds,
             findPortProcessIds,
-            terminateProcessTrees,
-            isProcessAlive,
+            inspectProcessIdentity,
+            terminateProcessTree,
             pause,
           })
-        : terminatePortableBrowserProcesses({ launcher, launcherExited, cdpProcessIds });
+        : terminatePortableBrowserProcesses({ launcher, launcherExited, cdpProcessIds: cdpBrowserProcessIds });
       return termination;
     },
   };
@@ -212,29 +219,47 @@ export function createBrowserCleanup({
 
 async function terminateOwnedWindowsProcesses({
   launcher,
+  profile,
   debuggingPort,
-  cdpProcessIds,
+  browserExecutable,
+  cdpBrowserProcessIds,
   findPortProcessIds,
-  terminateProcessTrees,
-  isProcessAlive,
+  inspectProcessIdentity,
+  terminateProcessTree,
   pause,
 }) {
-  if (typeof findPortProcessIds !== "function" || typeof terminateProcessTrees !== "function" || typeof isProcessAlive !== "function") {
+  if (typeof findPortProcessIds !== "function" || typeof inspectProcessIdentity !== "function" || typeof terminateProcessTree !== "function") {
     throw new Error("Windows browser process cleanup is unavailable.");
   }
-  const trustedProcessIds = new Set(cdpProcessIds);
-  if (launcher.exitCode === null && launcher.signalCode === null) trustedProcessIds.add(launcher.pid);
-  if (trustedProcessIds.size === 0) {
-    for (const pid of await findPortProcessIds(debuggingPort)) trustedProcessIds.add(pid);
+  let candidates = [...cdpBrowserProcessIds];
+  if (candidates.length === 0 && launcher.exitCode === null && launcher.signalCode === null) candidates = [launcher.pid];
+  if (candidates.length === 0) candidates = await findPortProcessIds(debuggingPort);
+  if (candidates.length === 0) return;
+  if (candidates.length !== 1) throw new Error("Verifier-owned browser process identity is ambiguous.");
+  const pid = candidates[0];
+  const expectedExecutableName = path.win32.basename(browserExecutable).toLowerCase();
+  const initialIdentity = await inspectProcessIdentity(pid);
+  if (!matchesWindowsBrowserOwnership(initialIdentity, { profile, debuggingPort, expectedExecutableName })) {
+    throw new Error("Browser process ownership could not be established from the isolated profile boundary.");
+  }
+  const preTerminationIdentity = await inspectProcessIdentity(pid);
+  if (
+    !sameWindowsProcessIdentity(initialIdentity, preTerminationIdentity)
+    || !matchesWindowsBrowserOwnership(preTerminationIdentity, { profile, debuggingPort, expectedExecutableName })
+  ) {
+    throw new Error("Browser process identity changed before termination.");
   }
   for (let pass = 0; pass < 4; pass += 1) {
-    const owned = [...trustedProcessIds].filter((pid) => isProcessAlive(pid));
-    if (owned.length === 0) return;
-    await terminateProcessTrees(owned);
+    const currentIdentity = await inspectProcessIdentity(pid);
+    if (currentIdentity === null || !sameWindowsProcessIdentity(initialIdentity, currentIdentity)) return;
+    if (!matchesWindowsBrowserOwnership(currentIdentity, { profile, debuggingPort, expectedExecutableName })) {
+      throw new Error("Browser process ownership changed during termination.");
+    }
+    await terminateProcessTree(pid);
     await pause(100);
   }
-  const remaining = new Set([...trustedProcessIds].filter((pid) => isProcessAlive(pid)));
-  if (remaining.size > 0) throw new Error(`Verifier-owned browser processes did not terminate: ${[...remaining].sort((left, right) => left - right).join(", ")}`);
+  const remaining = await inspectProcessIdentity(pid);
+  if (sameWindowsProcessIdentity(initialIdentity, remaining)) throw new Error(`Verifier-owned browser process did not terminate: ${pid}`);
 }
 
 async function terminatePortableBrowserProcesses({ launcher, launcherExited, cdpProcessIds }) {
@@ -257,18 +282,63 @@ async function findWindowsPortProcessIds(port) {
   return [...processIds];
 }
 
-async function terminateWindowsProcessTrees(processIds) {
-  for (const pid of processIds) {
-    try {
-      await executeFile("taskkill.exe", ["/PID", String(pid), "/T", "/F"], 4_000);
-    } catch {
-      // A process may leave between inventory and termination; the bounded final inventory is authoritative.
-    }
+async function inspectWindowsProcessIdentity(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) throw new Error("Browser process ID is invalid.");
+  const script = `$ErrorActionPreference='Stop'; $value=Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'; if ($null -ne $value) { [pscustomobject]@{ pid=[int]$value.ProcessId; parentPid=[int]$value.ParentProcessId; creationDate=[string]$value.CreationDate; executablePath=[string]$value.ExecutablePath; commandLine=[string]$value.CommandLine } | ConvertTo-Json -Compress }`;
+  const output = await executeFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], 4_000);
+  if (output.trim() === "") return null;
+  const value = JSON.parse(output);
+  if (
+    !Number.isSafeInteger(value?.pid) || value.pid !== pid || !Number.isSafeInteger(value?.parentPid) || value.parentPid < 0
+    || typeof value?.creationDate !== "string" || value.creationDate.length < 1
+    || typeof value?.executablePath !== "string" || value.executablePath.length < 1
+    || typeof value?.commandLine !== "string" || value.commandLine.length < 1
+  ) throw new Error("Browser process identity is incomplete.");
+  return value;
+}
+
+async function terminateWindowsProcessTree(pid) {
+  try {
+    await executeFile("taskkill.exe", ["/PID", String(pid), "/T", "/F"], 4_000);
+  } catch {
+    // The identity is checked again before any retry and after the bounded termination loop.
   }
 }
 
-function processIsAlive(pid) {
-  try { process.kill(pid, 0); return true; } catch (error) { return error?.code !== "ESRCH"; }
+export function matchesWindowsBrowserOwnership(identity, { profile, debuggingPort, expectedExecutableName }) {
+  if (identity === null || typeof identity !== "object") return false;
+  const userDataDirectory = windowsCommandLineArgument(identity.commandLine, "--user-data-dir");
+  const remoteDebuggingPort = windowsCommandLineArgument(identity.commandLine, "--remote-debugging-port");
+  if (userDataDirectory === null || remoteDebuggingPort === null) return false;
+  const actualProfile = path.win32.resolve(userDataDirectory).toLowerCase();
+  const expectedProfile = path.win32.resolve(profile).toLowerCase();
+  return actualProfile === expectedProfile
+    && remoteDebuggingPort === String(debuggingPort)
+    && path.win32.basename(identity.executablePath).toLowerCase() === expectedExecutableName;
+}
+
+export function sameWindowsProcessIdentity(left, right) {
+  return left !== null && right !== null
+    && left.pid === right.pid
+    && left.parentPid === right.parentPid
+    && left.creationDate === right.creationDate
+    && left.executablePath.toLowerCase() === right.executablePath.toLowerCase()
+    && left.commandLine === right.commandLine;
+}
+
+function windowsCommandLineArgument(commandLine, name) {
+  if (typeof commandLine !== "string") return null;
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const patterns = [
+    new RegExp(`(?:^|\\s)"${escapedName}=([^"]*)"(?=\\s|$)`, "i"),
+    new RegExp(`(?:^|\\s)${escapedName}="([^"]*)"(?=\\s|$)`, "i"),
+    new RegExp(`(?:^|\\s)${escapedName}=([^\\s"]+)(?=\\s|$)`, "i"),
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(commandLine);
+    if (match) return match[1];
+  }
+  return null;
 }
 
 function executeFile(file, argumentsValue, timeout) {
