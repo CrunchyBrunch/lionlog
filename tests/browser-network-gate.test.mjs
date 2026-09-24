@@ -1,14 +1,19 @@
 import assert from "node:assert/strict";
+import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { connect, createServer as createTcpServer } from "node:net";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import {
   createBrowserCleanup,
   createBrowserNetworkGate,
   createBrowserProcessOwner,
   finalizeBrowserVerification,
   matchesWindowsBrowserOwnership,
+  parseWindowsCommandLine,
   sameWindowsProcessIdentity,
 } from "../scripts/verify-public-pwa.mjs";
 
@@ -181,11 +186,10 @@ test("browser process cleanup terminates a surviving child after the launcher ex
     platform: "win32",
     findPortProcessIds: async () => currentIdentity ? [currentIdentity.pid] : [],
     inspectProcessIdentity: async () => currentIdentity ? { ...currentIdentity } : null,
-    terminateProcessTree: async (pid) => {
-      terminated.push(pid);
+    terminateOwnedProcess: async (validated) => {
+      terminated.push(validated.pid);
       currentIdentity = null;
     },
-    pause: async () => undefined,
   });
   const first = owner.terminate();
   const second = owner.terminate();
@@ -207,18 +211,16 @@ test("port reuse by a different profile fails closed without terminating the unk
     platform: "win32",
     findPortProcessIds: async () => [replacement.pid],
     inspectProcessIdentity: async () => ({ ...replacement }),
-    terminateProcessTree: async (pid) => { terminated.push(pid); },
-    pause: async () => undefined,
+    terminateOwnedProcess: async (validated) => { terminated.push(validated.pid); },
   });
   await assert.rejects(owner.terminate(), /ownership could not be established/);
   assert.deepEqual(terminated, []);
 });
 
-test("process replacement between ownership checks fails closed without terminating the replacement", async () => {
+test("process replacement after initial ownership inspection fails closed at handle acquisition", async () => {
   const profile = "C:\\Temp\\lionlog-pages-chrome-original";
   const original = browserIdentity(701, profile, 9444, "2026-09-24T12:02:00.000Z");
   const replacement = browserIdentity(701, "C:\\Temp\\lionlog-pages-chrome-replacement", 9444, "2026-09-24T12:03:00.000Z");
-  const identities = [original, replacement];
   const terminated = [];
   const owner = createBrowserProcessOwner({
     launcher: { pid: 700, exitCode: 0, signalCode: null },
@@ -228,24 +230,69 @@ test("process replacement between ownership checks fails closed without terminat
     browserExecutable: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
     platform: "win32",
     findPortProcessIds: async () => [701],
-    inspectProcessIdentity: async () => ({ ...identities.shift() }),
-    terminateProcessTree: async (pid) => { terminated.push(pid); },
-    pause: async () => undefined,
+    inspectProcessIdentity: async () => ({ ...original }),
+    terminateOwnedProcess: async (validated) => {
+      // Model the helper opening the PID after it was recycled. It compares
+      // the retained instance to the validated identity before termination.
+      if (!sameWindowsProcessIdentity(validated, replacement)) throw new Error("identity changed before handle-bound termination");
+      terminated.push(replacement.pid);
+    },
   });
-  await assert.rejects(owner.terminate(), /identity changed before termination/);
+  await assert.rejects(owner.terminate(), /identity changed before handle-bound termination/);
   assert.deepEqual(terminated, []);
 });
 
 test("Windows browser ownership requires exact profile, port, executable, and stable creation identity", () => {
   const profile = "C:\\Temp\\LionLog Profile";
   const identity = browserIdentity(801, profile, 9555, "2026-09-24T12:04:00.000Z");
-  const expected = { profile, debuggingPort: 9555, expectedExecutableName: "msedge.exe" };
+  const expected = { profile, debuggingPort: 9555, expectedExecutablePath: identity.executablePath };
   assert.equal(matchesWindowsBrowserOwnership(identity, expected), true);
   assert.equal(matchesWindowsBrowserOwnership({ ...identity, commandLine: identity.commandLine.replace(profile, `${profile}-other`) }, expected), false);
   assert.equal(matchesWindowsBrowserOwnership({ ...identity, commandLine: identity.commandLine.replace("9555", "9556") }, expected), false);
   assert.equal(matchesWindowsBrowserOwnership({ ...identity, executablePath: "C:\\Elsewhere\\chrome.exe" }, expected), false);
+  assert.equal(matchesWindowsBrowserOwnership({ ...identity, executablePath: "C:\\Elsewhere\\msedge.exe" }, expected), false);
   assert.equal(sameWindowsProcessIdentity(identity, { ...identity }), true);
   assert.equal(sameWindowsProcessIdentity(identity, { ...identity, creationDate: "2026-09-24T12:05:00.000Z" }), false);
+  assert.equal(sameWindowsProcessIdentity(identity, { ...identity, creationTicks: "639258591000000001" }), false);
+});
+
+test("Windows ownership rejects duplicate, split, and ambiguous switches in every quoted order", () => {
+  const profile = "C:\\Temp\\LionLog Profile";
+  const identity = browserIdentity(802, profile, 9555, "2026-09-24T12:04:00.000Z");
+  const expected = { profile, debuggingPort: 9555, expectedExecutablePath: identity.executablePath };
+  const other = "C:\\Temp\\Foreign Profile";
+  const original = identity.commandLine;
+  for (const commandLine of [
+    `${original} --user-data-dir=${other}`,
+    `${original} "--user-data-dir=${other}"`,
+    original.replace(`"--user-data-dir=${profile}"`, `--user-data-dir=${other} "--user-data-dir=${profile}"`),
+    original.replace(`"--user-data-dir=${profile}"`, `"--user-data-dir=${profile}" --user-data-dir=${other}`),
+    `${original} --remote-debugging-port=9556`,
+    original.replace(`"--user-data-dir=${profile}"`, `-- "--user-data-dir=${profile}"`),
+    original.replace(`"--user-data-dir=${profile}"`, `--user-data-dir "${profile}"`),
+    original.replace(`"--user-data-dir=${profile}"`, `--user-data-directory=${profile}`),
+    `${original} "--user-data-dir=${other}`,
+  ]) assert.equal(matchesWindowsBrowserOwnership({ ...identity, commandLine }, expected), false, commandLine);
+  assert.deepEqual(parseWindowsCommandLine(original).slice(1, 4), ["--headless=new", `--user-data-dir=${profile}`, "--remote-debugging-port=9555"]);
+});
+
+test("Windows handle-bound termination rejects a replaced identity after validation and retains the original handle through termination", { skip: process.platform !== "win32", timeout: 20_000 }, async () => {
+  const run = promisify(execFile);
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
+  const exited = once(child, "exit");
+  try {
+    const inspect = `$v=Get-CimInstance Win32_Process -Filter 'ProcessId = ${child.pid}'; [pscustomobject]@{ pid=[int]$v.ProcessId; parentPid=[int]$v.ParentProcessId; creationDate=[string]$v.CreationDate; creationTicks=[string]([Diagnostics.Process]::GetProcessById(${child.pid}).StartTime.ToUniversalTime().Ticks); executablePath=[string]$v.ExecutablePath; commandLine=[string]$v.CommandLine } | ConvertTo-Json -Compress`;
+    const identity = JSON.parse((await run("powershell.exe", ["-NoProfile", "-Command", inspect])).stdout);
+    assert.equal(identity.pid, child.pid);
+    const helper = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "terminate-owned-browser.ps1");
+    const terminate = (value) => run("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper, "-IdentityBase64", Buffer.from(JSON.stringify(value)).toString("base64")], { timeout: 15_000 });
+    await assert.rejects(terminate({ ...identity, creationDate: "injected replacement" }), /identity changed before handle-bound termination/);
+    assert.equal(child.exitCode, null, "fault injection must leave the foreign instance alive");
+    await terminate(identity);
+    await bounded(exited, 2_000, "handle-bound process exit");
+  } finally {
+    if (child.exitCode === null) child.kill();
+  }
 });
 
 test("failure-before-offline cleanup is bounded, idempotent, and preserves the verification error", async () => {
@@ -306,6 +353,7 @@ function browserIdentity(pid, profile, port, creationDate) {
     pid,
     parentPid: 1,
     creationDate,
+    creationTicks: String(BigInt(Date.parse(creationDate)) * 10000n + 621355968000000000n),
     executablePath,
     commandLine: `"${executablePath}" --headless=new "--user-data-dir=${profile}" --remote-debugging-port=${port}`,
   };

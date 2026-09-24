@@ -1,11 +1,11 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, realpath } from "node:fs/promises";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { connect as connectTcp, createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const EXPECTED_URL = "https://crunchybrunch.github.io/lionlog/";
 const OFFLINE_TARGET_TYPES = new Set(["page", "service_worker", "shared_worker", "worker"]);
@@ -41,6 +41,7 @@ export async function verifyBrowserSession({
 }) {
   const expected = validateExpectedContext(expectedValue);
   const expectedUrl = new URL(targetUrl).href;
+  const browserExecutable = process.platform === "win32" ? await resolveWindowsBrowserExecutable(chromeBin) : chromeBin;
   const profile = await mkdtemp(path.join(tmpdir(), "lionlog-pages-chrome-"));
   const port = await availablePort();
   const networkGate = await createBrowserNetworkGate();
@@ -60,7 +61,7 @@ export async function verifyBrowserSession({
     launcherExited: exited,
     profile,
     debuggingPort: port,
-    browserExecutable: chromeBin,
+    browserExecutable,
   });
   let pageClient;
   let browserClient;
@@ -153,8 +154,7 @@ export function createBrowserProcessOwner({
   platform = process.platform,
   findPortProcessIds = platform === "win32" ? findWindowsPortProcessIds : undefined,
   inspectProcessIdentity = platform === "win32" ? inspectWindowsProcessIdentity : undefined,
-  terminateProcessTree = platform === "win32" ? terminateWindowsProcessTree : undefined,
-  pause = delay,
+  terminateOwnedProcess = platform === "win32" ? terminateWindowsOwnedProcess : undefined,
 }) {
   if (!launcher || !Number.isSafeInteger(launcher.pid) || launcher.pid < 1) throw new Error("Browser launcher process identity is unavailable.");
   if (
@@ -184,8 +184,7 @@ export function createBrowserProcessOwner({
             cdpBrowserProcessIds,
             findPortProcessIds,
             inspectProcessIdentity,
-            terminateProcessTree,
-            pause,
+            terminateOwnedProcess,
           })
         : terminatePortableBrowserProcesses({ launcher, launcherExited, cdpProcessIds: cdpBrowserProcessIds });
       return termination;
@@ -225,10 +224,9 @@ async function terminateOwnedWindowsProcesses({
   cdpBrowserProcessIds,
   findPortProcessIds,
   inspectProcessIdentity,
-  terminateProcessTree,
-  pause,
+  terminateOwnedProcess,
 }) {
-  if (typeof findPortProcessIds !== "function" || typeof inspectProcessIdentity !== "function" || typeof terminateProcessTree !== "function") {
+  if (typeof findPortProcessIds !== "function" || typeof inspectProcessIdentity !== "function" || typeof terminateOwnedProcess !== "function") {
     throw new Error("Windows browser process cleanup is unavailable.");
   }
   let candidates = [...cdpBrowserProcessIds];
@@ -237,29 +235,12 @@ async function terminateOwnedWindowsProcesses({
   if (candidates.length === 0) return;
   if (candidates.length !== 1) throw new Error("Verifier-owned browser process identity is ambiguous.");
   const pid = candidates[0];
-  const expectedExecutableName = path.win32.basename(browserExecutable).toLowerCase();
+  const expectedExecutablePath = path.win32.resolve(browserExecutable);
   const initialIdentity = await inspectProcessIdentity(pid);
-  if (!matchesWindowsBrowserOwnership(initialIdentity, { profile, debuggingPort, expectedExecutableName })) {
+  if (!matchesWindowsBrowserOwnership(initialIdentity, { profile, debuggingPort, expectedExecutablePath })) {
     throw new Error("Browser process ownership could not be established from the isolated profile boundary.");
   }
-  const preTerminationIdentity = await inspectProcessIdentity(pid);
-  if (
-    !sameWindowsProcessIdentity(initialIdentity, preTerminationIdentity)
-    || !matchesWindowsBrowserOwnership(preTerminationIdentity, { profile, debuggingPort, expectedExecutableName })
-  ) {
-    throw new Error("Browser process identity changed before termination.");
-  }
-  for (let pass = 0; pass < 4; pass += 1) {
-    const currentIdentity = await inspectProcessIdentity(pid);
-    if (currentIdentity === null || !sameWindowsProcessIdentity(initialIdentity, currentIdentity)) return;
-    if (!matchesWindowsBrowserOwnership(currentIdentity, { profile, debuggingPort, expectedExecutableName })) {
-      throw new Error("Browser process ownership changed during termination.");
-    }
-    await terminateProcessTree(pid);
-    await pause(100);
-  }
-  const remaining = await inspectProcessIdentity(pid);
-  if (sameWindowsProcessIdentity(initialIdentity, remaining)) throw new Error(`Verifier-owned browser process did not terminate: ${pid}`);
+  await terminateOwnedProcess(initialIdentity);
 }
 
 async function terminatePortableBrowserProcesses({ launcher, launcherExited, cdpProcessIds }) {
@@ -284,37 +265,46 @@ async function findWindowsPortProcessIds(port) {
 
 async function inspectWindowsProcessIdentity(pid) {
   if (!Number.isSafeInteger(pid) || pid < 1) throw new Error("Browser process ID is invalid.");
-  const script = `$ErrorActionPreference='Stop'; $value=Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'; if ($null -ne $value) { [pscustomobject]@{ pid=[int]$value.ProcessId; parentPid=[int]$value.ParentProcessId; creationDate=[string]$value.CreationDate; executablePath=[string]$value.ExecutablePath; commandLine=[string]$value.CommandLine } | ConvertTo-Json -Compress }`;
+  const script = `$ErrorActionPreference='Stop'; $value=Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'; if ($null -ne $value) { $created=[Diagnostics.Process]::GetProcessById(${pid}).StartTime.ToUniversalTime().Ticks; [pscustomobject]@{ pid=[int]$value.ProcessId; parentPid=[int]$value.ParentProcessId; creationDate=[string]$value.CreationDate; creationTicks=[string]$created; executablePath=[string]$value.ExecutablePath; commandLine=[string]$value.CommandLine } | ConvertTo-Json -Compress }`;
   const output = await executeFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], 4_000);
   if (output.trim() === "") return null;
   const value = JSON.parse(output);
   if (
     !Number.isSafeInteger(value?.pid) || value.pid !== pid || !Number.isSafeInteger(value?.parentPid) || value.parentPid < 0
     || typeof value?.creationDate !== "string" || value.creationDate.length < 1
+    || typeof value?.creationTicks !== "string" || !/^\d{18}$/.test(value.creationTicks)
     || typeof value?.executablePath !== "string" || value.executablePath.length < 1
     || typeof value?.commandLine !== "string" || value.commandLine.length < 1
   ) throw new Error("Browser process identity is incomplete.");
   return value;
 }
 
-async function terminateWindowsProcessTree(pid) {
-  try {
-    await executeFile("taskkill.exe", ["/PID", String(pid), "/T", "/F"], 4_000);
-  } catch {
-    // The identity is checked again before any retry and after the bounded termination loop.
-  }
+async function terminateWindowsOwnedProcess(identity) {
+  const helper = path.join(path.dirname(fileURLToPath(import.meta.url)), "terminate-owned-browser.ps1");
+  const encoded = Buffer.from(JSON.stringify(identity), "utf8").toString("base64");
+  await executeFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper, "-IdentityBase64", encoded], 20_000);
 }
 
-export function matchesWindowsBrowserOwnership(identity, { profile, debuggingPort, expectedExecutableName }) {
+async function resolveWindowsBrowserExecutable(browserExecutable) {
+  if (path.win32.isAbsolute(browserExecutable)) return realpath(browserExecutable);
+  const output = await executeFile("where.exe", [browserExecutable], 4_000);
+  const first = output.split(/\r?\n/).find(Boolean);
+  if (!first || !path.win32.isAbsolute(first)) throw new Error("Browser executable path could not be resolved.");
+  return realpath(first);
+}
+
+export function matchesWindowsBrowserOwnership(identity, { profile, debuggingPort, expectedExecutablePath }) {
   if (identity === null || typeof identity !== "object") return false;
-  const userDataDirectory = windowsCommandLineArgument(identity.commandLine, "--user-data-dir");
-  const remoteDebuggingPort = windowsCommandLineArgument(identity.commandLine, "--remote-debugging-port");
+  const argumentsValue = parseWindowsCommandLine(identity.commandLine);
+  if (argumentsValue === null || argumentsValue.includes("--")) return false;
+  const userDataDirectory = uniqueWindowsSwitch(argumentsValue, "--user-data-dir");
+  const remoteDebuggingPort = uniqueWindowsSwitch(argumentsValue, "--remote-debugging-port");
   if (userDataDirectory === null || remoteDebuggingPort === null) return false;
   const actualProfile = path.win32.resolve(userDataDirectory).toLowerCase();
   const expectedProfile = path.win32.resolve(profile).toLowerCase();
   return actualProfile === expectedProfile
     && remoteDebuggingPort === String(debuggingPort)
-    && path.win32.basename(identity.executablePath).toLowerCase() === expectedExecutableName;
+    && path.win32.resolve(identity.executablePath).toLowerCase() === path.win32.resolve(expectedExecutablePath).toLowerCase();
 }
 
 export function sameWindowsProcessIdentity(left, right) {
@@ -322,23 +312,54 @@ export function sameWindowsProcessIdentity(left, right) {
     && left.pid === right.pid
     && left.parentPid === right.parentPid
     && left.creationDate === right.creationDate
+    && left.creationTicks === right.creationTicks
     && left.executablePath.toLowerCase() === right.executablePath.toLowerCase()
     && left.commandLine === right.commandLine;
 }
 
-function windowsCommandLineArgument(commandLine, name) {
-  if (typeof commandLine !== "string") return null;
-  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const patterns = [
-    new RegExp(`(?:^|\\s)"${escapedName}=([^"]*)"(?=\\s|$)`, "i"),
-    new RegExp(`(?:^|\\s)${escapedName}="([^"]*)"(?=\\s|$)`, "i"),
-    new RegExp(`(?:^|\\s)${escapedName}=([^\\s"]+)(?=\\s|$)`, "i"),
-  ];
-  for (const pattern of patterns) {
-    const match = pattern.exec(commandLine);
-    if (match) return match[1];
+export function parseWindowsCommandLine(commandLine) {
+  if (typeof commandLine !== "string" || !commandLine.trim()) return null;
+  const result = [];
+  let index = 0;
+  while (index < commandLine.length) {
+    while (index < commandLine.length && /\s/.test(commandLine[index])) index += 1;
+    if (index === commandLine.length) break;
+    let argument = "";
+    let quoted = false;
+    while (index < commandLine.length) {
+      const character = commandLine[index];
+      if (!quoted && /\s/.test(character)) break;
+      if (character === "\\") {
+        const start = index;
+        while (commandLine[index] === "\\") index += 1;
+        const count = index - start;
+        if (commandLine[index] === '"') {
+          argument += "\\".repeat(Math.floor(count / 2));
+          if (count % 2) { argument += '"'; index += 1; }
+          else if (quoted && commandLine[index + 1] === '"') { argument += '"'; index += 2; }
+          else { quoted = !quoted; index += 1; }
+        } else argument += "\\".repeat(count);
+        continue;
+      }
+      if (character === '"') {
+        if (quoted && commandLine[index + 1] === '"') { argument += '"'; index += 2; }
+        else { quoted = !quoted; index += 1; }
+        continue;
+      }
+      argument += character;
+      index += 1;
+    }
+    if (quoted) return null;
+    result.push(argument);
   }
-  return null;
+  return result.length > 0 ? result : null;
+}
+
+function uniqueWindowsSwitch(argumentsValue, name) {
+  const matches = argumentsValue.slice(1).filter((value) => value.toLowerCase().startsWith(name));
+  if (matches.length !== 1 || !matches[0].toLowerCase().startsWith(`${name}=`)) return null;
+  const value = matches[0].slice(name.length + 1);
+  return value.length > 0 ? value : null;
 }
 
 function executeFile(file, argumentsValue, timeout) {
