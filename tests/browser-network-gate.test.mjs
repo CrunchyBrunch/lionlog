@@ -286,7 +286,9 @@ test("Windows handle-bound termination rejects a replaced identity after validat
     assert.equal(identity.pid, child.pid);
     const helper = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "terminate-owned-browser.ps1");
     const terminate = (value) => run("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper, "-IdentityBase64", Buffer.from(JSON.stringify(value)).toString("base64")], { timeout: 15_000 });
-    await assert.rejects(terminate({ ...identity, creationDate: "injected replacement" }), /identity changed before handle-bound termination/);
+    // Keep CIM's rounded timestamp and all other fields unchanged. A one-tick
+    // replacement must still be rejected by the retained handle's exact time.
+    await assert.rejects(terminate({ ...identity, creationTicks: String(BigInt(identity.creationTicks) + 1n) }), /identity changed before handle-bound termination/);
     assert.equal(child.exitCode, null, "fault injection must leave the foreign instance alive");
     await terminate(identity);
     await bounded(exited, 2_000, "handle-bound process exit");
