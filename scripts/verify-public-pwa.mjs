@@ -157,6 +157,8 @@ export function createBrowserProcessOwner({
   findPortProcessIds = platform === "win32" ? findWindowsPortProcessIds : undefined,
   inspectProcessIdentity = platform === "win32" ? inspectWindowsProcessIdentity : undefined,
   terminateOwnedProcess = platform === "win32" ? terminateWindowsOwnedProcess : undefined,
+  pause = delay,
+  now = () => performance.now(),
 }) {
   if (!launcher || !Number.isSafeInteger(launcher.pid) || launcher.pid < 1) throw new Error("Browser launcher process identity is unavailable.");
   if (
@@ -187,6 +189,8 @@ export function createBrowserProcessOwner({
             findPortProcessIds,
             inspectProcessIdentity,
             terminateOwnedProcess,
+            pause,
+            now,
           })
         : terminatePortableBrowserProcesses({ launcher, launcherExited, cdpProcessIds: cdpBrowserProcessIds });
       return termination;
@@ -227,13 +231,23 @@ async function terminateOwnedWindowsProcesses({
   findPortProcessIds,
   inspectProcessIdentity,
   terminateOwnedProcess,
+  pause,
+  now,
 }) {
   if (typeof findPortProcessIds !== "function" || typeof inspectProcessIdentity !== "function" || typeof terminateOwnedProcess !== "function") {
     throw new Error("Windows browser process cleanup is unavailable.");
   }
   let candidates = [...cdpBrowserProcessIds];
   if (candidates.length === 0 && launcher.exitCode === null && launcher.signalCode === null) candidates = [launcher.pid];
-  if (candidates.length === 0) candidates = await findPortProcessIds(debuggingPort);
+  if (candidates.length === 0) {
+    // Edge can exit its launcher successfully before the browser child binds
+    // DevTools. Keep the cleanup window bounded while that child starts.
+    const deadline = now() + 10_000;
+    for (let attempt = 0; attempt < 100 && candidates.length === 0 && now() < deadline; attempt += 1) {
+      candidates = await findPortProcessIds(debuggingPort);
+      if (candidates.length === 0 && now() < deadline) await pause(100);
+    }
+  }
   if (candidates.length === 0) return;
   if (candidates.length !== 1) throw new Error("Verifier-owned browser process identity is ambiguous.");
   const pid = candidates[0];
@@ -267,8 +281,8 @@ async function findWindowsPortProcessIds(port) {
 
 async function inspectWindowsProcessIdentity(pid) {
   if (!Number.isSafeInteger(pid) || pid < 1) throw new Error("Browser process ID is invalid.");
-  const script = `$ErrorActionPreference='Stop'; $value=Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'; if ($null -ne $value) { $created=[Diagnostics.Process]::GetProcessById(${pid}).StartTime.ToUniversalTime().Ticks; [pscustomobject]@{ pid=[int]$value.ProcessId; parentPid=[int]$value.ParentProcessId; creationDate=[string]$value.CreationDate; creationTicks=[string]$created; executablePath=[string]$value.ExecutablePath; commandLine=[string]$value.CommandLine } | ConvertTo-Json -Compress }`;
-  const output = await executeFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], 4_000);
+  const helper = path.join(path.dirname(fileURLToPath(import.meta.url)), "inspect-browser-process.ps1");
+  const output = await executeFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper, "-ProcessIdValue", String(pid)], 4_000);
   if (output.trim() === "") return null;
   const value = JSON.parse(output);
   if (
@@ -277,6 +291,7 @@ async function inspectWindowsProcessIdentity(pid) {
     || typeof value?.creationTicks !== "string" || !/^\d{18}$/.test(value.creationTicks)
     || typeof value?.executablePath !== "string" || value.executablePath.length < 1
     || typeof value?.commandLine !== "string" || value.commandLine.length < 1
+    || !Array.isArray(value?.arguments) || value.arguments.length < 1 || value.arguments.some((argument) => typeof argument !== "string")
   ) throw new Error("Browser process identity is incomplete.");
   return value;
 }
@@ -297,7 +312,10 @@ async function resolveWindowsBrowserExecutable(browserExecutable) {
 
 export function matchesWindowsBrowserOwnership(identity, { profile, debuggingPort, expectedExecutablePath }) {
   if (identity === null || typeof identity !== "object") return false;
-  const argumentsValue = parseWindowsCommandLine(identity.commandLine);
+  if (typeof identity.commandLine !== "string" || identity.commandLine.includes("\uFFFD")) return false;
+  const parsed = parseWindowsCommandLine(identity.commandLine);
+  const argumentsValue = identity.arguments ?? parsed;
+  if (identity.arguments && (parsed === null || parsed.length !== identity.arguments.length || parsed.some((value, index) => value !== identity.arguments[index]))) return false;
   if (argumentsValue === null || argumentsValue.includes("--")) return false;
   const userDataDirectory = uniqueWindowsSwitch(argumentsValue, "--user-data-dir");
   const remoteDebuggingPort = uniqueWindowsSwitch(argumentsValue, "--remote-debugging-port");
@@ -324,13 +342,13 @@ export function parseWindowsCommandLine(commandLine) {
   const result = [];
   let index = 0;
   while (index < commandLine.length) {
-    while (index < commandLine.length && /\s/.test(commandLine[index])) index += 1;
+    while (index < commandLine.length && isWindowsArgumentSeparator(commandLine[index])) index += 1;
     if (index === commandLine.length) break;
     let argument = "";
     let quoted = false;
     while (index < commandLine.length) {
       const character = commandLine[index];
-      if (!quoted && /\s/.test(character)) break;
+      if (!quoted && isWindowsArgumentSeparator(character)) break;
       if (character === "\\") {
         const start = index;
         while (commandLine[index] === "\\") index += 1;
@@ -356,6 +374,8 @@ export function parseWindowsCommandLine(commandLine) {
   }
   return result.length > 0 ? result : null;
 }
+
+function isWindowsArgumentSeparator(character) { return character === " " || character === "\t"; }
 
 function uniqueWindowsSwitch(argumentsValue, name) {
   const matches = argumentsValue.slice(1).filter((value) => value.toLowerCase().startsWith(name));
@@ -654,7 +674,7 @@ async function settleWithin(promise, timeoutMs) {
   return result;
 }
 
-async function waitForEndpoint(port, chrome, launchDiagnostics) {
+export async function waitForEndpoint(port, chrome, launchDiagnostics) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
       const [pagesResponse, browserResponse] = await Promise.all([fetch(`http://127.0.0.1:${port}/json/list`), fetch(`http://127.0.0.1:${port}/json/version`)]);
@@ -664,7 +684,7 @@ async function waitForEndpoint(port, chrome, launchDiagnostics) {
         ?? pages.find((target) => target.type === "page");
       if (page?.webSocketDebuggerUrl && browser?.webSocketDebuggerUrl) return { page, browser };
     } catch { /* Chrome is still starting. */ }
-    if (chrome.exitCode !== null || chrome.signalCode !== null) {
+    if ((chrome.exitCode !== null && chrome.exitCode !== 0) || chrome.signalCode !== null) {
       throw new Error(`Chrome DevTools endpoint did not start (browser exited: ${chrome.exitCode ?? chrome.signalCode}). ${launchDiagnostics()}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 100));

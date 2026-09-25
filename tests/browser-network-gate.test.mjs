@@ -15,7 +15,29 @@ import {
   matchesWindowsBrowserOwnership,
   parseWindowsCommandLine,
   sameWindowsProcessIdentity,
+  waitForEndpoint,
 } from "../scripts/verify-public-pwa.mjs";
+
+test("DevTools startup continues after a successful launcher exit until the child endpoint appears", { timeout: 3_000 }, async () => {
+  let listRequests = 0;
+  const server = createHttpServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/json/list") {
+      listRequests += 1;
+      response.end(JSON.stringify(listRequests > 1 ? [{ type: "page", url: "about:blank", webSocketDebuggerUrl: "ws://127.0.0.1/page" }] : []));
+    } else response.end(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1/browser" }));
+  });
+  await listen(server);
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const endpoint = await bounded(waitForEndpoint(address.port, { exitCode: 0, signalCode: null }, () => ""), 1_000, "late browser endpoint");
+    assert.equal(endpoint.page.url, "about:blank");
+    assert.ok(listRequests > 1);
+  } finally {
+    await closeServer(server);
+  }
+});
 
 test("browser network gate cleanup before offline mode tears down an active CONNECT tunnel and closes idempotently", { timeout: 5_000 }, async () => {
   const targetSockets = new Set();
@@ -242,6 +264,84 @@ test("process replacement after initial ownership inspection fails closed at han
   assert.deepEqual(terminated, []);
 });
 
+test("cleanup waits for a late-owned port after successful launcher exit", async () => {
+  const profile = "C:\\Temp\\lionlog-pages-chrome-late";
+  const identity = browserIdentity(511, profile, 9223, "2026-09-24T12:00:00.000Z");
+  let queries = 0;
+  let clock = 0;
+  const terminated = [];
+  const owner = createBrowserProcessOwner({
+    launcher: { pid: 510, exitCode: 0, signalCode: null },
+    launcherExited: Promise.resolve(0),
+    profile,
+    debuggingPort: 9223,
+    browserExecutable: identity.executablePath,
+    platform: "win32",
+    findPortProcessIds: async () => ++queries < 4 ? [] : [identity.pid],
+    inspectProcessIdentity: async () => identity,
+    terminateOwnedProcess: async (validated) => { terminated.push(validated.pid); },
+    pause: async () => { clock += 100; },
+    now: () => clock,
+  });
+  await owner.terminate();
+  assert.equal(queries, 4);
+  assert.deepEqual(terminated, [identity.pid]);
+});
+
+test("cleanup discovery remains finite when no child binds the port", async () => {
+  let queries = 0;
+  let clock = 0;
+  const owner = createBrowserProcessOwner({
+    launcher: { pid: 512, exitCode: 0, signalCode: null },
+    launcherExited: Promise.resolve(0),
+    profile: "C:\\Temp\\lionlog-pages-chrome-none",
+    debuggingPort: 9224,
+    browserExecutable: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    platform: "win32",
+    findPortProcessIds: async () => { queries += 1; return []; },
+    inspectProcessIdentity: async () => { throw new Error("unexpected identity inspection"); },
+    terminateOwnedProcess: async () => { throw new Error("unexpected termination"); },
+    pause: async () => { clock += 100; },
+    now: () => clock,
+  });
+  await owner.terminate();
+  assert.equal(queries, 100);
+});
+
+test("verification failure cleanup captures a late child and preserves the original error", async () => {
+  const profile = "C:\\Temp\\lionlog-pages-chrome-timeout";
+  const identity = browserIdentity(514, profile, 9225, "2026-09-24T12:00:00.000Z");
+  let queries = 0;
+  let clock = 0;
+  const terminated = [];
+  const owner = createBrowserProcessOwner({
+    launcher: { pid: 513, exitCode: 0, signalCode: null },
+    launcherExited: Promise.resolve(0),
+    profile,
+    debuggingPort: 9225,
+    browserExecutable: identity.executablePath,
+    platform: "win32",
+    findPortProcessIds: async () => ++queries < 3 ? [] : [identity.pid],
+    inspectProcessIdentity: async () => identity,
+    terminateOwnedProcess: async (validated) => { terminated.push(validated.pid); },
+    pause: async () => { clock += 100; },
+    now: () => clock,
+  });
+  const cleanup = createBrowserCleanup({
+    getPageClient: () => undefined,
+    getBrowserClient: () => undefined,
+    processOwner: owner,
+    networkGate: { async close() {} },
+    profile,
+    removeProfile: async () => undefined,
+  });
+  const failures = await cleanup();
+  assert.deepEqual(failures, []);
+  assert.deepEqual(terminated, [identity.pid]);
+  const original = new Error("DevTools endpoint timed out");
+  assert.throws(() => finalizeBrowserVerification(undefined, original, failures), (error) => error === original);
+});
+
 test("Windows browser ownership requires exact profile, port, executable, and stable creation identity", () => {
   const profile = "C:\\Temp\\LionLog Profile";
   const identity = browserIdentity(801, profile, 9555, "2026-09-24T12:04:00.000Z");
@@ -274,6 +374,49 @@ test("Windows ownership rejects duplicate, split, and ambiguous switches in ever
     `${original} "--user-data-dir=${other}`,
   ]) assert.equal(matchesWindowsBrowserOwnership({ ...identity, commandLine }, expected), false, commandLine);
   assert.deepEqual(parseWindowsCommandLine(original).slice(1, 4), ["--headless=new", `--user-data-dir=${profile}`, "--remote-debugging-port=9555"]);
+});
+
+test("Windows ownership preserves Unicode spaces inside native arguments and rejects decoding loss", () => {
+  const profile = "C:\\Temp\\owned";
+  const identity = browserIdentity(803, profile, 9555, "2026-09-24T12:04:00.000Z");
+  const expected = { profile, debuggingPort: 9555, expectedExecutablePath: identity.executablePath };
+  const commandLine = identity.commandLine.replace(`"--user-data-dir=${profile}"`, `--user-data-dir=${profile}\u00a0foreign`);
+  assert.deepEqual(parseWindowsCommandLine(commandLine).slice(1, 4), ["--headless=new", `--user-data-dir=${profile}\u00a0foreign`, "--remote-debugging-port=9555"]);
+  assert.equal(matchesWindowsBrowserOwnership({ ...identity, commandLine }, expected), false);
+  assert.equal(matchesWindowsBrowserOwnership({ ...identity, commandLine: commandLine.replace("\u00a0", "\ufffd") }, expected), false);
+});
+
+test("Windows command-line parser agrees with CommandLineToArgvW on separators and quoting", { skip: process.platform !== "win32", timeout: 15_000 }, async () => {
+  const cases = [
+    '"C:\\Browser\\msedge.exe" --user-data-dir=C:\\Temp\\owned\u00a0foreign --remote-debugging-port=9333',
+    '"C:\\Browser\\msedge.exe"\t--user-data-dir=C:\\Temp\\owned\u2003foreign\t--remote-debugging-port=9333',
+    '"C:\\Browser\\msedge.exe" "--user-data-dir=C:\\Temp\\two words" --remote-debugging-port=9333',
+    '"C:\\Browser\\msedge.exe" "--user-data-dir=C:\\Temp\\tail\\\\" --remote-debugging-port=9333',
+    '"C:\\Browser\\msedge.exe" "--user-data-dir=C:\\Temp\\a\\"b" --remote-debugging-port=9333',
+    '"C:\\Browser\\msedge.exe" "--user-data-dir=C:\\Temp\\a""b" --remote-debugging-port=9333',
+    '"C:\\Browser\\msedge.exe" --user-data-dir="C:\\Temp\\mixed words" --remote-debugging-port=9333',
+    '"C:\\Browser\\msedge.exe" "--user-data-dir=" --remote-debugging-port=9333',
+  ];
+  const encoded = Buffer.from(JSON.stringify(cases), "utf8").toString("base64");
+  const script = `[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public static class NativeArgvFixture {
+ [DllImport("shell32.dll", CharSet=CharSet.Unicode)] static extern IntPtr CommandLineToArgvW(string commandLine, out int count);
+ [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr pointer);
+ public static string[] Parse(string value) { int count; var block=CommandLineToArgvW(value,out count); try { var result=new string[count]; for(int i=0;i<count;i++) result[i]=Marshal.PtrToStringUni(Marshal.ReadIntPtr(block,i*IntPtr.Size)); return result; } finally { LocalFree(block); } }
+}
+'@; $cases=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json; $result=@(foreach($case in $cases){ ,([NativeArgvFixture]::Parse([string]$case)) }); ConvertTo-Json -InputObject $result -Compress -Depth 4`;
+  const native = JSON.parse((await promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { encoding: "utf8", timeout: 12_000 })).stdout);
+  assert.equal(native.length, cases.length);
+  for (let index = 0; index < cases.length; index += 1) {
+    if (index === 5) {
+      // Doubled quotes have a surprising native result. A disagreement with
+      // the conservative parser must reject ownership rather than guess.
+      assert.notDeepEqual(parseWindowsCommandLine(cases[index]), native[index]);
+      const identity = browserIdentity(804, "C:\\Temp\\a", 9333, "2026-09-24T12:04:00.000Z");
+      assert.equal(matchesWindowsBrowserOwnership({ ...identity, commandLine: cases[index], arguments: native[index] }, { profile: "C:\\Temp\\a", debuggingPort: 9333, expectedExecutablePath: identity.executablePath }), false);
+    } else assert.deepEqual(parseWindowsCommandLine(cases[index]), native[index], cases[index]);
+  }
 });
 
 test("Windows handle-bound termination rejects a replaced identity after validation and retains the original handle through termination", { skip: process.platform !== "win32", timeout: 20_000 }, async () => {
