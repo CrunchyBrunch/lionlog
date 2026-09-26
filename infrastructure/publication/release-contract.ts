@@ -3,7 +3,6 @@ import { z } from "zod";
 export const PUBLICATION_MANIFEST_VERSION = "lionlog.pages-release.v2";
 export const PUBLICATION_RECEIPT_VERSION = "lionlog.pages-candidate-receipt.v2";
 export const PUBLICATION_MARKER_VERSION = "lionlog.pages-release-marker.v1";
-export const PUBLICATION_DEPLOYMENT_RECEIPT_VERSION = "lionlog.pages-deployment-receipt.v3";
 export const LIONLOG_REPOSITORY = "CrunchyBrunch/lionlog";
 export const LIONLOG_REPOSITORY_ID = 1_346_360_244;
 export const LIVE_CANDIDATE_WORKFLOW = ".github/workflows/build-live-menu-artifact.yml";
@@ -140,106 +139,9 @@ export const publicationCandidateReceiptSchema = z.object({
   }).strict(),
 }).strict();
 
-export const publicationDeploymentReceiptSchema = z.object({
-  receiptVersion: z.literal(PUBLICATION_DEPLOYMENT_RECEIPT_VERSION),
-  recordedAt: z.string().datetime({ offset: true }),
-  operation: z.enum(["promote", "rollback", "first-release-recovery"]),
-  releaseId: sha256Schema,
-  releaseKind: z.enum(["live", "first-release-recovery"]),
-  deploymentId: z.string().regex(/^[A-Za-z0-9._-]{1,200}$/).nullable(),
-  pageUrl: z.literal("https://crunchybrunch.github.io/lionlog/").nullable(),
-  previous: z.object({
-    knownGoodReleaseId: z.union([sha256Schema, z.literal("NONE_FIRST_DEPLOYMENT")]),
-    knownGoodRepositoryDeploymentId: z.union([positiveIdentifierSchema, z.literal("NONE_FIRST_DEPLOYMENT")]),
-    knownGoodPagesDeploymentId: z.union([z.string().regex(/^[A-Za-z0-9._-]{1,200}$/), z.literal("NONE_FIRST_DEPLOYMENT")]),
-  }).strict(),
-  promotion: z.object({
-    workflowId: z.literal(PROMOTION_WORKFLOW_ID),
-    workflowSha: gitShaSchema,
-    runId: positiveIdentifierSchema,
-    runAttempt: z.literal(1),
-    approvalExpiresAt: z.string().datetime({ offset: true }),
-  }).strict(),
-  source: z.object({
-    artifactId: positiveIdentifierSchema,
-    artifactDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
-    manifestSha256: sha256Schema,
-    siteTarSha256: sha256Schema,
-    recoveryArtifactId: positiveIdentifierSchema.nullable(),
-    recoveryArtifactDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/).nullable(),
-    recoveryManifestSha256: sha256Schema.nullable(),
-  }).strict(),
-  recovery: z.object({
-    releaseId: sha256Schema,
-    manifestSha256: sha256Schema,
-    artifactId: positiveIdentifierSchema,
-    artifactDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
-  }).strict().nullable(),
-  staged: z.object({
-    artifactId: positiveIdentifierSchema,
-    artifactDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
-    artifactExpiresAt: z.string().datetime({ offset: true }),
-  }).strict(),
-  attemptPhase: z.enum(["pre-submission", "submitting", "submission-uncertain", "submission-rejected", "accepted", "status-uncertain", "terminal"]),
-  repositoryDeployment: z.object({
-    id: positiveIdentifierSchema.nullable(),
-    state: z.enum(["pending", "in_progress", "success", "failure", "error", "unknown"]),
-    statusRecorded: z.boolean(),
-  }).strict(),
-  pagesAccepted: z.boolean(),
-  pagesStatus: z.string().min(1).max(100).nullable(),
-  markerVerified: z.boolean(),
-  publicProductVerified: z.boolean(),
-  reconciliation: z.object({
-    outcome: z.enum(["known-good", "served-unverified", "submission-uncertain", "terminal-failure", "not-submitted", "evidence-incomplete"]),
-    publicReleaseId: z.union([sha256Schema, z.literal("NONE_404"), z.literal("UNKNOWN")]),
-  }).strict(),
-  knownGood: z.boolean(),
-  uncertain: z.boolean(),
-}).strict().superRefine((receipt, context) => {
-  if (receipt.pagesAccepted !== (receipt.deploymentId !== null)) {
-    context.addIssue({ code: "custom", message: "Deployment acceptance identity is inconsistent." });
-  }
-  if ((receipt.releaseKind === "live") !== (receipt.recovery !== null)) {
-    context.addIssue({ code: "custom", message: "Only a live deployment receipt may bind recovery bytes." });
-  }
-  const sourceRecovery = [receipt.source.recoveryArtifactId, receipt.source.recoveryArtifactDigest, receipt.source.recoveryManifestSha256];
-  if (
-    (receipt.recovery === null && sourceRecovery.some((value) => value !== null))
-    || (receipt.recovery !== null && (
-      receipt.source.recoveryArtifactId !== receipt.recovery.artifactId
-      || receipt.source.recoveryArtifactDigest !== receipt.recovery.artifactDigest
-      || receipt.source.recoveryManifestSha256 !== receipt.recovery.manifestSha256
-    ))
-  ) context.addIssue({ code: "custom", message: "Receipt source and recovery identities disagree." });
-  const previousValues = Object.values(receipt.previous);
-  if (previousValues.some((value) => value === "NONE_FIRST_DEPLOYMENT") && !previousValues.every((value) => value === "NONE_FIRST_DEPLOYMENT")) {
-    context.addIssue({ code: "custom", message: "Previous known-good identity must be complete or explicitly absent." });
-  }
-  if (receipt.repositoryDeployment.statusRecorded && (receipt.repositoryDeployment.id === null || receipt.repositoryDeployment.state === "unknown")) {
-    context.addIssue({ code: "custom", message: "Recorded repository deployment status lacks an exact identity." });
-  }
-  if (receipt.knownGood && !(
-    receipt.attemptPhase === "terminal"
-    && receipt.repositoryDeployment.id !== null
-    && receipt.repositoryDeployment.state === "success"
-    && receipt.repositoryDeployment.statusRecorded
-    && receipt.pagesAccepted
-    && receipt.pagesStatus === "succeed"
-    && receipt.markerVerified
-    && receipt.publicProductVerified
-    && receipt.reconciliation.outcome === "known-good"
-    && receipt.reconciliation.publicReleaseId === receipt.releaseId
-    && !receipt.uncertain
-  )) {
-    context.addIssue({ code: "custom", message: "Known-good requires terminal Pages success and full public verification." });
-  }
-});
-
 export type PublicationReleaseManifest = z.infer<typeof publicationReleaseManifestSchema>;
 export type PublicationReleaseMarker = z.infer<typeof publicationReleaseMarkerSchema>;
 export type PublicationCandidateReceipt = z.infer<typeof publicationCandidateReceiptSchema>;
-export type PublicationDeploymentReceipt = z.infer<typeof publicationDeploymentReceiptSchema>;
 
 export function validatePublicationReleaseManifest(value: unknown): PublicationReleaseManifest {
   return publicationReleaseManifestSchema.parse(value);

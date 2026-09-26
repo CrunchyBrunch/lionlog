@@ -214,6 +214,7 @@ test("service-worker lifecycle scopes caches and preserves the active shell acro
     let activation;
     handlers.activate({ waitUntil(value) { activation = value; } });
     await activation;
+    handlers.setFetch = (fetchImpl) => { context.fetch = fetchImpl; };
     return handlers;
   }
 
@@ -231,6 +232,13 @@ test("service-worker lifecycle scopes caches and preserves the active shell acro
     });
     assert.equal(responded, false, `service worker must ignore ${requestUrl}`);
   }
+  handlersA.setFetch(async () => { throw new TypeError("offline"); });
+  let offlineMiss;
+  handlersA.fetch({
+    request: { method: "GET", mode: "cors", url: "https://lionlog.example/lionlog/favicon.ico" },
+    respondWith(value) { offlineMiss = value; },
+  });
+  assert.equal((await offlineMiss).type, "error", "an uncached offline auxiliary request resolves without an unhandled rejection");
 
   await assert.rejects(runLifecycle(revisionB, { failAsset: true }), /asset was unavailable/);
   assert.ok(cacheNames.has(cacheName("/lionlog/", revisionA)), "the old active shell survives interrupted installation");
@@ -324,13 +332,11 @@ test("browser bundle contains static delivery but no PSU retrieval or Node-only 
 });
 
 test("live and Pages workflows are explicit, bounded, and ordinary CI cannot invoke ingestion or deployment", async () => {
-  const [manualWorkflow, pagesWorkflow, deploymentWorkflow, ciWorkflow, pagesAdapter, finalGate] = await Promise.all([
+  const [manualWorkflow, pagesWorkflow, deploymentWorkflow, ciWorkflow] = await Promise.all([
     readFile(path.join(projectRoot, ".github/workflows/build-live-menu-artifact.yml"), "utf8"),
     readFile(path.join(projectRoot, ".github/workflows/build-pages-artifact.yml"), "utf8"),
     readFile(path.join(projectRoot, ".github/workflows/deploy-github-pages.yml"), "utf8"),
     readFile(path.join(projectRoot, ".github/workflows/ci.yml"), "utf8"),
-    readFile(path.join(projectRoot, "scripts/deploy-exact-pages-artifact.mjs"), "utf8"),
-    readFile(path.join(projectRoot, "scripts/final-promotion-gate.mjs"), "utf8"),
   ]);
   assert.match(manualWorkflow, /workflow_dispatch:/);
   assert.match(manualWorkflow, /PREPARE_LIVE_PAGES_FIELD_RELEASE/);
@@ -363,28 +369,36 @@ test("live and Pages workflows are explicit, bounded, and ordinary CI cannot inv
   assert.match(deploymentWorkflow, /workflow_dispatch:/);
   assert.match(deploymentWorkflow, /^permissions: \{\}$/m);
   assert.match(deploymentWorkflow, /github\.ref == 'refs\/heads\/main'/);
-  assert.match(deploymentWorkflow, /permissions:\r?\n\s+contents: read/);
+  assert.match(deploymentWorkflow, /permissions:\r?\n(?:\s+[a-z-]+: read\r?\n)*\s+contents: read/);
   assert.match(deploymentWorkflow, /pages: write/);
   assert.match(deploymentWorkflow, /id-token: write/);
   assert.match(deploymentWorkflow, /environment:\r?\n\s+name: github-pages/);
-  assert.match(deploymentWorkflow, /actions\/upload-artifact@[0-9a-f]{40}/);
-  assert.match(deploymentWorkflow, /source_artifact_id/);
-  assert.match(deploymentWorkflow, /source_artifact_digest/);
-  assert.match(deploymentWorkflow, /source_manifest_digest/);
-  assert.match(deploymentWorkflow, /expected_current_attempt_release_id/);
-  assert.match(deploymentWorkflow, /rollback_target_receipt_artifact_id/);
-  assert.match(deploymentWorkflow, /deployments: write/);
-  assert.match(deploymentWorkflow, /final-promotion-gate\.mjs/);
-  assert.match(deploymentWorkflow, /site:\$manifest\[0\]\.site/);
-  assert.match(deploymentWorkflow, /ci:\{runId:\$ciRunId\}/);
-  assert.match(deploymentWorkflow, /PREAPPROVAL_SUMMARY_PATH: work\/pages-deployment\/preapproval\/pre-approval-summary\.json/);
-  assert.match(deploymentWorkflow, /verify-publication-bundle\.ts/);
-  assert.match(deploymentWorkflow, /deploy-exact-pages-artifact\.mjs/);
+  assert.match(deploymentWorkflow, /actions\/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9/);
+  assert.match(deploymentWorkflow, /actions\/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346/);
+  assert.match(deploymentWorkflow, /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/);
+  assert.match(deploymentWorkflow, /candidate_artifact_id/);
+  assert.match(deploymentWorkflow, /candidate_artifact_digest/);
+  assert.match(deploymentWorkflow, /candidate_manifest_sha256/);
+  assert.match(deploymentWorkflow, /expected_predecessor_release_id/);
+  assert.match(deploymentWorkflow, /approval_expires_at/);
+  assert.match(deploymentWorkflow, /rollback_receipt_artifact_id/);
+  assert.match(deploymentWorkflow, /supported-pages-release\.ts/);
+  assert.match(deploymentWorkflow, /supported-pages-control\.ts/);
+  assert.match(deploymentWorkflow, /collect-pages-attempt-history\.ts/);
+  assert.match(deploymentWorkflow, /select-browser-verification-context\.ts/);
+  assert.match(deploymentWorkflow, /verify-public-pwa\.mjs/);
+  assert.match(deploymentWorkflow, /lionlog-pages-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(deploymentWorkflow, /overwrite: false/);
   assert.match(deploymentWorkflow, /cancel-in-progress: false/);
-  assert.match(pagesAdapter, /executeFinalPromotionGate/);
-  assert.match(pagesAdapter, /readFinalPromotionState/);
-  assert.match(pagesAdapter, /verifyCurrentPublication/);
-  assert.match(finalGate, /await checkpoint\(\);[\s\S]*requestOidc\(\)[\s\S]*approvedBundle = await checkpoint\(\);[\s\S]*submit\(oidcToken, approvedBundle\)/);
+  assert.match(deploymentWorkflow, /group: github-pages-production/);
+  assert.doesNotMatch(deploymentWorkflow, /group: lionlog-pages-production/);
+  assert.match(deploymentWorkflow, /summary_artifact_digest: \$\{\{ steps\.summary-digest\.outputs\.digest \}\}/);
+  assert.equal((deploymentWorkflow.match(/artifact-digest\.ts --expected="\$SUMMARY_DIGEST" --file=/g) ?? []).length, 2);
+  assert.match(deploymentWorkflow, /RAW_DIGEST: \$\{\{ steps\.summary-upload\.outputs\.artifact-digest \}\}/);
+  assert.equal((deploymentWorkflow.match(/pages: write/g) ?? []).length, 1);
+  assert.equal((deploymentWorkflow.match(/id-token: write/g) ?? []).length, 1);
+  assert.doesNotMatch(deploymentWorkflow, /deployments: write|api\.github\.com\/repos\/.*\/pages\/deployments/);
+  assert.doesNotMatch(deploymentWorkflow, /partial_approval|pre_submission_failure_approval|first-release-recovery/);
   assert.doesNotMatch(deploymentWorkflow, /npm run build|vinext build|prepare:psu-field-release/);
   assert.doesNotMatch(deploymentWorkflow, /ingest:psu|LIONLOG_ALLOW_PSU_NETWORK|LIVE_PSU_INGESTION/);
   assert.doesNotMatch(deploymentWorkflow, /^\s*(?:schedule|push|pull_request):/m);

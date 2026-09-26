@@ -1,2331 +1,1049 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { access, cp, link, mkdir, mkdtemp, readFile, realpath, rename, symlink, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { promisify } from "node:util";
-import { publicationDeploymentReceiptSchema, publicationReleaseManifestSchema, type PublicationDeploymentReceipt, type PublicationReleaseManifest } from "../infrastructure/publication/release-contract.ts";
-import { PSU_CATALOG_VERSION, catalogEntryForSnapshot, validatePsuPublicationCatalog, type PsuPublicationCatalog } from "../infrastructure/psu/publication-catalog.ts";
-import { getPsuHall, getPsuMealPeriod, PSU_PARSER_VERSION, PSU_SNAPSHOT_VERSION, sourceDateFromIso } from "../infrastructure/psu/constants.ts";
-import { PSU_RELEASE_HALL_IDS } from "../infrastructure/psu/release-plan.ts";
-import { buildPsuSnapshot, validatePsuSnapshot, type PsuMenuSnapshot } from "../infrastructure/psu/snapshot-schema.ts";
-import { assertArtifactDigest, normalizeArtifactDigest } from "../scripts/artifact-digest.ts";
 import { parseArtifactZip } from "../scripts/artifact-zip.ts";
-import { computePublicationReleaseId, createPublicationBundle, sha256 } from "../scripts/create-publication-bundle.ts";
-import { deployExactPagesArtifact, executeProtectedAdapterGate, main as runProtectedAdapterMain } from "../scripts/deploy-exact-pages-artifact.mjs";
-import { createDeploymentReceipt } from "../scripts/create-deployment-receipt.mjs";
-import { executeFinalPromotionGate, readFinalPromotionState } from "../scripts/final-promotion-gate.mjs";
+import { createPublicationTar, readPublicationFiles } from "../scripts/publication-tar.ts";
+import { createPublicationBundle, sha256 } from "../scripts/create-publication-bundle.ts";
+import { getPsuHall, getPsuMealPeriod, PSU_PARSER_VERSION, PSU_SNAPSHOT_VERSION, sourceDateFromIso } from "../infrastructure/psu/constants.ts";
+import { catalogEntryForSnapshot, PSU_CATALOG_VERSION, validatePsuPublicationCatalog } from "../infrastructure/psu/publication-catalog.ts";
+import { PSU_RELEASE_HALL_IDS } from "../infrastructure/psu/release-plan.ts";
+import { buildPsuSnapshot } from "../infrastructure/psu/snapshot-schema.ts";
+import { preparePagesArtifact, validatePagesArtifact } from "../scripts/prepare-pages-artifact.ts";
 import {
-  createRepositoryDeploymentLedger,
-  publicationLedgerPayload,
-  readRepositoryDeploymentHistory,
-  recoverRepositoryDeploymentAttempt,
-} from "../scripts/publication-deployment-ledger.mjs";
-import { createPublicationTar, parsePublicationTar } from "../scripts/publication-tar.ts";
-import { verifyCurrentPublication, verifyCurrentPublicationFromEnvironment } from "../scripts/verify-current-publication.mjs";
-import { verifyPublicSite } from "../scripts/verify-public-site.mjs";
-import { validateApprovalAndProvenance, verifyPublicationBundle } from "../scripts/verify-publication-bundle.ts";
+  createPreapprovalSummary,
+  inspectPagesActionTar,
+  verifySupportedCandidate,
+  type GithubArtifact,
+  type ValidatedRelease,
+} from "../scripts/supported-pages-release.ts";
+import { createFlatReceipt, verifyFinalState, type PreapprovalSummary, type PriorAttemptEvidence } from "../scripts/supported-pages-control.ts";
+import { assertNoBrowserDiagnostics, assertPageState } from "../scripts/verify-public-pwa.mjs";
+import { assertExpectedPredecessor, FIRST_PUBLICATION, observePublicRelease } from "../scripts/public-release-state.ts";
+import { collectLegacyEvidence, collectPagesAttemptHistory } from "../scripts/collect-pages-attempt-history.ts";
+import { selectBrowserVerificationContext } from "../scripts/select-browser-verification-context.ts";
+import { assertArtifactDigest, normalizeArtifactDigest } from "../scripts/artifact-digest.ts";
 
-const sourceSha = "a".repeat(40);
-const artifactDigest = `sha256:${"b".repeat(64)}`;
-const now = new Date("2026-09-07T12:00:00.000Z");
-const executeFile = promisify(execFile);
+const workflowSha = "a".repeat(40);
+const sourceSha = "b".repeat(40);
+const hash = "c".repeat(64);
+const digest = `sha256:${"d".repeat(64)}`;
+const now = new Date("2026-09-17T12:00:00.000Z");
+const historicalIncidentHistory = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
 
-test("artifact digest comparison normalizes upload-action and API representations and fails closed", () => {
-  const bare = "b".repeat(64);
+test("artifact ZIP parser rejects traversal, symlinks, extras, and header disagreement", () => {
+  const valid = createStoredZip([{ path: "artifact.tar", data: Buffer.from("tar") }]);
+  assert.equal(parseArtifactZip(valid, ["artifact.tar"])[0].data.toString(), "tar");
+  assert.throws(() => parseArtifactZip(createStoredZip([{ path: "../artifact.tar", data: Buffer.from("tar") }]), ["artifact.tar"]), /Unsafe artifact ZIP/);
+  assert.throws(() => parseArtifactZip(createStoredZip([{ path: "artifact.tar", data: Buffer.from("tar"), mode: 0o120777 }]), ["artifact.tar"]), /regular files/);
+  assert.throws(() => parseArtifactZip(createStoredZip([
+    { path: "artifact.tar", data: Buffer.from("tar") },
+    { path: "extra", data: Buffer.from("no") },
+  ]), ["artifact.tar"]), /file set/);
+  const tampered = Buffer.from(valid);
+  tampered.writeUInt32LE(99, 18);
+  assert.throws(() => parseArtifactZip(tampered, ["artifact.tar"]), /disagree|bounds|overlap/);
+});
+
+test("artifact digest normalization accepts GitHub bare hex output without weakening equality", () => {
+  const bare = "d".repeat(64);
   assert.equal(normalizeArtifactDigest(bare), `sha256:${bare}`);
   assert.equal(assertArtifactDigest(bare, `sha256:${bare}`), `sha256:${bare}`);
-  assert.equal(assertArtifactDigest(`sha256:${bare}`, bare), `sha256:${bare}`);
-  assert.throws(() => assertArtifactDigest(bare, `sha256:${"c".repeat(64)}`), /mismatch/);
+  assert.throws(() => assertArtifactDigest(bare, `sha256:${"e".repeat(64)}`), /mismatch/);
 });
 
-test("artifact ZIP wrappers reject aliases, non-files, header disagreement, and extras before extraction", () => {
-  const valid = createStoredZip([
-    { path: "release-manifest.json", data: Buffer.from("{}") },
-    { path: "site.tar", data: Buffer.from("tar") },
+test("official Pages tar inspection preserves exact paths, sizes, hashes, and hidden marker", () => {
+  const tar = createPublicationTar([
+    { path: ".nojekyll", data: Buffer.alloc(0) },
+    { path: "index.html", data: Buffer.from("index") },
+    { path: "menu-data/v2/catalog.json", data: Buffer.from("{}") },
   ]);
-  assert.deepEqual(parseArtifactZip(valid, ["release-manifest.json", "site.tar"]).map((entry) => entry.path).sort(), ["release-manifest.json", "site.tar"]);
-  assert.throws(() => parseArtifactZip(createStoredZip([
-    { path: "A.json", data: Buffer.from("a") },
-    { path: "a.json", data: Buffer.from("b") },
-  ]), ["A.json", "a.json"]), /case-colliding/);
-  assert.throws(() => parseArtifactZip(createStoredZip([{ path: "site.tar", data: Buffer.from("tar"), mode: 0o120777 }]), ["site.tar"]), /regular files/);
-  assert.throws(() => parseArtifactZip(createStoredZip([
-    { path: "release-manifest.json", data: Buffer.from("{}") },
-    { path: "site.tar", data: Buffer.from("tar") },
-    { path: "extra.txt", data: Buffer.from("x") },
-  ]), ["release-manifest.json", "site.tar"]), /file set/);
-  const disagreement = Buffer.from(valid);
-  disagreement.write("X", 30, 1, "ascii");
-  assert.throws(() => parseArtifactZip(disagreement, ["release-manifest.json", "site.tar"]), /headers disagree/);
-});
-
-test("the deployed post-approval shell policy accepts only the exact partial approval", { skip: process.platform === "win32" }, async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "lionlog-partial-shell-"));
-  const manifestPath = path.join(root, "release-manifest.json");
-  const digest = "d".repeat(64);
-  await writeFile(manifestPath, JSON.stringify({
-    releaseKind: "live",
-    menu: {
-      coverage: "partial",
-      earliestFreshUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
-      earliestRetainUntil: new Date(Date.now() + 48 * 60 * 60_000).toISOString(),
-      omissions: { "invalid-name": 2 },
-    },
-  }));
-  const baseEnvironment = {
-    ...process.env,
-    RELEASE_MANIFEST_PATH: manifestPath,
-    OPERATION: "promote",
-    SOURCE_MANIFEST_DIGEST: digest,
-    PARTIAL_APPROVAL: `APPROVE_PARTIAL:${digest}:2`,
-    EXPIRED_ROLLBACK_APPROVAL: "NONE",
-  };
-  await executeFile("bash", ["scripts/verify-post-approval-policy.sh"], { cwd: path.resolve(import.meta.dirname, ".."), env: baseEnvironment });
-  await assert.rejects(executeFile("bash", ["scripts/verify-post-approval-policy.sh"], {
-    cwd: path.resolve(import.meta.dirname, ".."),
-    env: { ...baseEnvironment, PARTIAL_APPROVAL: `APPROVE_PARTIAL:${"e".repeat(64)}:2` },
-  }));
-  await writeFile(manifestPath, JSON.stringify({ releaseKind: "first-release-recovery", menu: null }));
-  await executeFile("bash", ["scripts/verify-post-approval-policy.sh"], {
-    cwd: path.resolve(import.meta.dirname, ".."),
-    env: { ...baseEnvironment, OPERATION: "rollback", PARTIAL_APPROVAL: "COMPLETE_ONLY", EXPIRED_ROLLBACK_APPROVAL: "NONE" },
-  });
-  await assert.rejects(executeFile("bash", ["scripts/verify-post-approval-policy.sh"], {
-    cwd: path.resolve(import.meta.dirname, ".."),
-    env: { ...baseEnvironment, PARTIAL_APPROVAL: `APPROVE_PARTIAL:${digest}:1` },
-  }));
-});
-
-test("the current-publication CLI requires the canonical manifest environment before any network boundary", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "lionlog-manifest-contract-"));
-  const manifestPath = path.join(root, "release-manifest.json");
-  await writeFile(manifestPath, JSON.stringify({ releaseId: "e".repeat(64) }));
-  const script = path.resolve(import.meta.dirname, "../scripts/verify-current-publication.mjs");
-  const baseEnvironment = { ...process.env, OPERATION: "invalid-offline-test" };
-
-  await assert.rejects(executeFile(process.execPath, [script], {
-    env: { ...baseEnvironment, RELEASE_MANIFEST_PATH: "" },
-  }), /RELEASE_MANIFEST_PATH is required/);
-  await assert.rejects(executeFile(process.execPath, [script], {
-    env: { ...baseEnvironment, MANIFEST_PATH: manifestPath, RELEASE_MANIFEST_PATH: undefined },
-  }), /MANIFEST_PATH is not supported/);
-  await assert.rejects(executeFile(process.execPath, [script], {
-    env: { ...baseEnvironment, RELEASE_MANIFEST_PATH: manifestPath },
-  }), /Publication operation is invalid/);
-
-  let fetches = 0;
-  await assert.rejects(verifyCurrentPublicationFromEnvironment({
-    ...baseEnvironment,
-    RELEASE_MANIFEST_PATH: path.join(root, "missing.json"),
-  }, {
-    fetchImpl: async () => { fetches += 1; return new Response(null, { status: 500 }); },
-  }), /readable JSON manifest/);
-  const wrongManifestPath = path.join(root, "wrong-manifest.json");
-  await writeFile(wrongManifestPath, "[]");
-  await assert.rejects(verifyCurrentPublicationFromEnvironment({
-    ...baseEnvironment,
-    RELEASE_MANIFEST_PATH: wrongManifestPath,
-  }, {
-    fetchImpl: async () => { fetches += 1; return new Response(null, { status: 500 }); },
-  }), /manifest object/);
-  assert.equal(fetches, 0);
-});
-
-test("the protected workflow passes the canonical manifest into verification before OIDC-capable submission", async () => {
-  const workflow = await readFile(path.resolve(import.meta.dirname, "../.github/workflows/deploy-github-pages.yml"), "utf8");
-  assert.doesNotMatch(workflow, /^\s+MANIFEST_PATH:/m);
-  const finalStep = workflow.indexOf("- name: Perform final provenance, state, deadline, and freshness checks");
-  const deployJob = workflow.indexOf("\n  deploy:");
-  const canonicalEnvironment = workflow.indexOf("RELEASE_MANIFEST_PATH: work/pages-deployment/source-bundle/release-manifest.json", finalStep);
-  const verifier = workflow.indexOf("node scripts/verify-current-publication.mjs", finalStep);
-  const deployment = workflow.indexOf("- name: Deploy exact staged artifact", finalStep);
-  const lockedInstall = workflow.indexOf("npm ci --ignore-scripts --omit=dev", deployJob);
-  assert.ok(finalStep >= 0 && canonicalEnvironment > finalStep && verifier > canonicalEnvironment && deployment > verifier);
-  assert.ok(deployJob >= 0 && lockedInstall > deployJob && lockedInstall < deployment);
-  assert.match(workflow, /PRE_SUBMISSION_FAILURE_APPROVAL: \$\{\{ inputs\.pre_submission_failure_approval \}\}/);
-  assert.match(workflow, /authorization:\{partialApproval:\$partialApproval,expiredRollbackApproval:\$expiredRollbackApproval,preSubmissionFailureApproval:\$preSubmissionFailureApproval\}/);
-  assert.match(workflow, /MINIMUM_FRESH_UNTIL=\$\(jq -er '\.minimumFreshUntil \| strings' work\/pages-deployment\/preapproval\/pre-approval-summary\.json\)/);
-  assert.doesNotMatch(workflow, /echo "MINIMUM_FRESH_UNTIL="/);
-
-  const preApprovalStart = workflow.indexOf("- name: Verify current attempt separately from the known-good rollback target");
-  const preApprovalEnd = workflow.indexOf("\n      - name:", preApprovalStart + 1);
-  assert.ok(preApprovalStart >= 0 && preApprovalEnd > preApprovalStart);
-  const preApprovalStep = workflow.slice(preApprovalStart, preApprovalEnd);
-  assert.match(preApprovalStep, /CURRENT_RECEIPT_ARTIFACT_ID: \$\{\{ inputs\.current_attempt_receipt_artifact_id \}\}/);
-  assert.match(preApprovalStep, /CURRENT_RECEIPT_ARTIFACT_DIGEST: \$\{\{ inputs\.current_attempt_receipt_artifact_digest \}\}/);
-  assert.ok(preApprovalStep.indexOf("CURRENT_RECEIPT_ARTIFACT_ID:") < preApprovalStep.indexOf("node scripts/verify-current-publication.mjs"));
-});
-
-test("the actual protected adapter command loads on a clean production-only install", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "lionlog-clean-adapter-"));
-  const repository = path.resolve(import.meta.dirname, "..");
-  await Promise.all([
-    cp(path.join(repository, "scripts"), path.join(root, "scripts"), { recursive: true }),
-    cp(path.join(repository, "infrastructure"), path.join(root, "infrastructure"), { recursive: true }),
-    cp(path.join(repository, "package.json"), path.join(root, "package.json")),
-    cp(path.join(repository, "package-lock.json"), path.join(root, "package-lock.json")),
+  assert.deepEqual(inspectPagesActionTar(tar).map(({ path: entryPath, bytes }) => ({ path: entryPath, bytes })), [
+    { path: ".nojekyll", bytes: 0 },
+    { path: "index.html", bytes: 5 },
+    { path: "menu-data/v2/catalog.json", bytes: 2 },
   ]);
-  const adapter = path.join(root, "scripts", "deploy-exact-pages-artifact.mjs");
-  await assert.rejects(executeFile(process.execPath, ["--experimental-strip-types", adapter], {
-    cwd: root,
-    env: { ...process.env, GITHUB_REPOSITORY: "invalid/offline-test" },
-  }), /ERR_MODULE_NOT_FOUND|Cannot find package 'zod'/);
-  const npmCandidates = [
-    process.env.npm_execpath,
-    path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
-    path.resolve(path.dirname(process.execPath), "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
-  ].filter((value): value is string => Boolean(value));
-  let npmCli: string | undefined;
-  for (const candidate of npmCandidates) {
-    try { await access(candidate); npmCli = candidate; break; } catch { /* try the next standard Node layout */ }
-  }
-  assert.ok(npmCli, "npm_execpath must identify the locked installer used by the test runner");
-  await executeFile(process.execPath, [npmCli, "ci", "--ignore-scripts", "--omit=dev", "--offline"], { cwd: root, env: process.env });
-  await assert.rejects(executeFile(process.execPath, ["--experimental-strip-types", adapter], {
-    cwd: root,
-    env: { ...process.env, GITHUB_REPOSITORY: "invalid/offline-test" },
-  }), /restricted to a first-attempt manual run/);
+  const linked = Buffer.from(tar);
+  linked[156] = "2".charCodeAt(0);
+  rewriteTarChecksum(linked);
+  assert.throws(() => inspectPagesActionTar(linked), /prohibited entry type/);
+  const trailing = Buffer.concat([tar, Buffer.alloc(512)]);
+  trailing[trailing.length - 1] = 1;
+  assert.throws(() => inspectPagesActionTar(trailing), /data after its terminator/);
 });
 
-test("publication verification rejects a symlinked canonical manifest", { skip: process.platform === "win32" }, async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "lionlog-manifest-symlink-"));
-  const source = path.join(root, "source.json");
-  const bundle = path.join(root, "bundle");
-  await mkdir(bundle);
-  await writeFile(source, "{}\n");
-  const manifestPath = path.join(bundle, "release-manifest.json");
-  await symlink(source, manifestPath, "file");
-  await assert.rejects(verifyPublicationBundle({
-    bundleDirectory: bundle,
-    manifestPath,
-  } as never), /non-symlink/);
-});
-
-test("publication verification rejects hardlinks and parent-directory aliases", async (context) => {
-  const root = await mkdtemp(path.join(tmpdir(), "lionlog-manifest-alias-"));
-  const source = path.join(root, "source.json");
-  const bundle = path.join(root, "bundle");
-  await mkdir(bundle);
-  await writeFile(source, "{}\n");
-  const manifestPath = path.join(bundle, "release-manifest.json");
-  await link(source, manifestPath);
-  await assert.rejects(verifyPublicationBundle({
-    bundleDirectory: bundle,
-    manifestPath,
-  } as never), /non-hardlinked/);
-
-  await rename(manifestPath, path.join(bundle, "hardlink.json"));
-  await writeFile(manifestPath, "{}\n");
-  const alias = path.join(root, "bundle-alias");
-  try {
-    await symlink(bundle, alias, process.platform === "win32" ? "junction" : "dir");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EPERM") {
-      context.diagnostic("Parent-directory alias creation is unavailable on this runner.");
-      return;
-    }
-    throw error;
-  }
-  await assert.rejects(verifyPublicationBundle({
-    bundleDirectory: alias,
-    manifestPath: path.join(alias, "release-manifest.json"),
-  } as never), /canonical non-aliased bundle directory/);
-});
-
-test("publication verification rejects a detectable Windows parent-case alias", { skip: process.platform !== "win32" }, async (context) => {
-  const root = await mkdtemp(path.join(tmpdir(), "lionlog-manifest-case-"));
-  const bundle = path.join(root, "bundle");
-  await mkdir(bundle);
-  await writeFile(path.join(bundle, "release-manifest.json"), "{}\n");
-  const index = [...bundle].findIndex((character, characterIndex) => characterIndex > 2 && /[a-z]/i.test(character));
-  assert.ok(index >= 0);
-  const character = bundle[index];
-  const aliasedBundle = `${bundle.slice(0, index)}${character === character.toLowerCase() ? character.toUpperCase() : character.toLowerCase()}${bundle.slice(index + 1)}`;
-  if (await realpath(aliasedBundle) === path.resolve(aliasedBundle)) {
-    context.skip("The filesystem did not expose canonical case for this path.");
-    return;
-  }
-  await assert.rejects(verifyPublicationBundle({
-    bundleDirectory: aliasedBundle,
-    manifestPath: path.join(aliasedBundle, "release-manifest.json"),
-  } as never), /canonical non-aliased bundle directory/);
-});
-
-test("recovery release bundle round-trips and rejects identity tampering", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "lionlog-publication-"));
-  const site = path.join(root, "site");
-  const bundle = path.join(root, "bundle");
-  await writeRecoverySite(site);
-  const manifest = await createPublicationBundle({
-    site,
-    output: bundle,
-    releaseKind: "first-release-recovery",
-    commitSha: sourceSha,
-    runId: 123,
-    runAttempt: 1,
-    createdAt: now.toISOString(),
-  });
-  const manifestBytes = await readFile(path.join(bundle, "release-manifest.json"));
-  const metadata = githubMetadata(manifest, now);
-  const verified = await verifyPublicationBundle({
-    bundleDirectory: bundle,
-    extractionDirectory: path.join(root, "extracted"),
-    metadata,
-    operation: "first-release-recovery",
-    expectedSourceSha: sourceSha,
-    expectedRunId: 123,
-    expectedRunAttempt: 1,
-    expectedArtifactId: 456,
-    expectedArtifactDigest: artifactDigest,
-    expectedManifestSha256: sha256(manifestBytes),
-    expectedServiceDate: "NONE",
-    approvalExpiresAt: "2026-09-07T13:00:00.000Z",
-    partialApproval: "COMPLETE_ONLY",
-    expiredRollbackApproval: "NONE",
-    workflowSha: sourceSha,
-    expectedPromotionWorkflowSha: sourceSha,
-    expectedRecoveryArtifactId: 456,
-    expectedRecoveryArtifactDigest: artifactDigest,
-    expectedRecoveryManifestSha256: sha256(manifestBytes),
-    expectedRecoveryReleaseId: manifest.releaseId,
+test("staged Pages artifact must have unique run identity and exact candidate inventory", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "lionlog-stage-"));
+  const tarPath = path.join(root, "artifact.tar");
+  const tar = createPublicationTar([
+    { path: ".nojekyll", data: Buffer.alloc(0) },
+    { path: "index.html", data: Buffer.from("index") },
+  ]);
+  await writeFile(tarPath, tar);
+  const validated = validatedFixture(inspectPagesActionTar(tar));
+  const artifact = stagedArtifact();
+  const result = await createPreapprovalSummary({ validated, stagedArtifact: artifact, stagedArtifactName: artifact.name, stagedTarPath: tarPath, now });
+  assert.equal(result.summaryVersion, "lionlog.pages-preapproval.v1");
+  await assert.rejects(createPreapprovalSummary({
+    validated,
+    stagedArtifact: { ...artifact, name: "github-pages" },
+    stagedArtifactName: "github-pages",
+    stagedTarPath: tarPath,
     now,
-  });
-  assert.equal(verified.releaseId, manifest.releaseId);
-  await assert.doesNotReject(verifyPublicationBundle({
-    bundleDirectory: bundle,
-    metadata,
-    operation: "rollback",
-    expectedSourceSha: sourceSha,
-    expectedRunId: 123,
-    expectedRunAttempt: 1,
-    expectedArtifactId: 456,
-    expectedArtifactDigest: artifactDigest,
-    expectedManifestSha256: sha256(manifestBytes),
-    expectedServiceDate: "NONE",
-    approvalExpiresAt: "2026-09-07T13:00:00.000Z",
-    partialApproval: "COMPLETE_ONLY",
-    expiredRollbackApproval: "NONE",
-    workflowSha: sourceSha,
-    expectedPromotionWorkflowSha: sourceSha,
-    expectedRecoveryArtifactId: 456,
-    expectedRecoveryArtifactDigest: artifactDigest,
-    expectedRecoveryManifestSha256: sha256(manifestBytes),
-    expectedRecoveryReleaseId: manifest.releaseId,
+  }), /not unique/);
+  await assert.rejects(createPreapprovalSummary({
+    validated,
+    stagedArtifact: { ...artifact, expires_at: "2026-09-17T12:29:59.999Z" },
+    stagedArtifactName: artifact.name,
+    stagedTarPath: tarPath,
     now,
-  }));
-  assert.equal(publicationReleaseManifestSchema.safeParse({ ...manifest, manifestVersion: "lionlog.pages-release.v1" }).success, false);
-  const manifestPath = path.join(bundle, "release-manifest.json");
-  const changedIdentity = JSON.parse(manifestBytes.toString("utf8"));
-  changedIdentity.releaseId = "0".repeat(64);
-  const changedManifestBytes = Buffer.from(`${JSON.stringify(changedIdentity, null, 2)}\n`);
-  await writeFile(manifestPath, changedManifestBytes);
-  await assert.rejects(verifyPublicationBundle({
-    bundleDirectory: bundle,
-    metadata,
-    operation: "first-release-recovery",
-    expectedSourceSha: sourceSha,
-    expectedRunId: 123,
-    expectedRunAttempt: 1,
-    expectedArtifactId: 456,
-    expectedArtifactDigest: artifactDigest,
-    expectedManifestSha256: sha256(changedManifestBytes),
-    expectedServiceDate: "NONE",
-    approvalExpiresAt: "2026-09-07T13:00:00.000Z",
-    partialApproval: "COMPLETE_ONLY",
-    expiredRollbackApproval: "NONE",
-    workflowSha: sourceSha,
-    expectedPromotionWorkflowSha: sourceSha,
-    expectedRecoveryArtifactId: 456,
-    expectedRecoveryArtifactDigest: artifactDigest,
-    expectedRecoveryManifestSha256: sha256(changedManifestBytes),
-    expectedRecoveryReleaseId: manifest.releaseId,
-    now,
-  }), /Release identity/);
-  await writeFile(manifestPath, manifestBytes);
-  const tarPath = path.join(bundle, "site.tar");
-  const tampered = Buffer.from(await readFile(tarPath));
-  tampered[600] ^= 1;
-  await writeFile(tarPath, tampered);
-  await assert.rejects(verifyPublicationBundle({
-    bundleDirectory: bundle,
-    metadata,
-    operation: "first-release-recovery",
-    expectedSourceSha: sourceSha,
-    expectedRunId: 123,
-    expectedRunAttempt: 1,
-    expectedArtifactId: 456,
-    expectedArtifactDigest: artifactDigest,
-    expectedManifestSha256: sha256(manifestBytes),
-    expectedServiceDate: "NONE",
-    approvalExpiresAt: "2026-09-07T13:00:00.000Z",
-    partialApproval: "COMPLETE_ONLY",
-    expiredRollbackApproval: "NONE",
-    workflowSha: sourceSha,
-    expectedPromotionWorkflowSha: sourceSha,
-    expectedRecoveryArtifactId: 456,
-    expectedRecoveryArtifactDigest: artifactDigest,
-    expectedRecoveryManifestSha256: sha256(manifestBytes),
-    expectedRecoveryReleaseId: manifest.releaseId,
-    now,
-  }), /tar identity/);
+  }), /availability headroom/);
+  const changed = createPublicationTar([{ path: "index.html", data: Buffer.from("changed") }]);
+  await writeFile(tarPath, changed);
+  await assert.rejects(createPreapprovalSummary({ validated, stagedArtifact: artifact, stagedArtifactName: artifact.name, stagedTarPath: tarPath, now }), /inventory differs/);
 });
 
-test("the real protected adapter gate fully validates manifest semantics before OIDC or submission", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "lionlog-adapter-boundary-"));
-  const site = path.join(root, "site");
-  const bundle = path.join(root, "bundle");
-  await writeRecoverySite(site);
-  const manifest = await createPublicationBundle({
-    site,
-    output: bundle,
-    releaseKind: "first-release-recovery",
-    commitSha: sourceSha,
-    runId: 123,
-    runAttempt: 1,
-    createdAt: now.toISOString(),
-  });
-  const manifestPath = path.join(bundle, "release-manifest.json");
-  const originalBytes = await readFile(manifestPath);
-  const metadata = githubMetadata(manifest, now);
-  const stagedDigest = `sha256:${"e".repeat(64)}`;
-  const expectedBase = {
-    operation: "rollback",
-    promotionWorkflowSha: sourceSha,
-    approvalExpiresAt: "2026-09-07T13:00:00.000Z",
-    minimumFreshUntil: "NONE",
-    releaseId: manifest.releaseId,
-    source: { runId: 123, sourceSha, artifactId: 456, artifactDigest, manifestSha256: sha256(originalBytes) },
-    ci: { runId: 999 },
-    recovery: { artifactId: 456, artifactDigest, manifestSha256: sha256(originalBytes), releaseId: manifest.releaseId },
-    staged: { artifactId: 789, digest: stagedDigest, artifactExpiresAt: "2026-12-01T00:00:00.000Z" },
-    currentAttempt: { releaseId: "NONE_FIRST_DEPLOYMENT" },
-    rollbackTarget: { releaseId: "NONE_FIRST_DEPLOYMENT" },
-    authorization: { partialApproval: "COMPLETE_ONLY", expiredRollbackApproval: "NONE", preSubmissionFailureApproval: "NONE" },
-    menu: null,
-    site: manifest.site,
-    artifacts: [
-      { id: 456, digest: artifactDigest, runId: 123, headSha: sourceSha, role: "source" },
-      { id: 456, digest: artifactDigest, runId: 123, headSha: sourceSha, role: "recovery" },
-      { id: 789, digest: stagedDigest, runId: 321, headSha: sourceSha, role: "staged" },
-    ],
-  };
-  const actual = {
-    checkoutSha: sourceSha,
-    mainSha: sourceSha,
-    sourceRun: metadata.run,
-    ciRun: metadata.ciRun,
-    ciJobs: metadata.ciJobs,
-    artifacts: [
-      { ...metadata.artifact, expires_at: "2026-09-07T14:00:00.000Z" },
-      { ...metadata.artifact, expires_at: "2026-09-07T14:00:00.000Z" },
-      { id: 789, digest: stagedDigest, expired: false, workflow_run: { id: 321, head_sha: sourceSha, head_branch: "main", head_repository_id: 1_346_360_244 } },
-    ],
-  };
-  const environmentFor = (expected: typeof expectedBase) => ({
-    OPERATION: expected.operation,
-    EXPECTED_PROMOTION_WORKFLOW_SHA: expected.promotionWorkflowSha,
-    RELEASE_ID: expected.releaseId,
-    SOURCE_ARTIFACT_ID: String(expected.source.artifactId),
-    SOURCE_ARTIFACT_DIGEST: expected.source.artifactDigest,
-    SOURCE_MANIFEST_DIGEST: expected.source.manifestSha256,
-    RECOVERY_ARTIFACT_ID: String(expected.recovery.artifactId),
-    RECOVERY_ARTIFACT_DIGEST: expected.recovery.artifactDigest,
-    RECOVERY_MANIFEST_DIGEST: expected.recovery.manifestSha256,
-    RECOVERY_RELEASE_ID: expected.recovery.releaseId,
-    STAGED_ARTIFACT_ID: String(expected.staged.artifactId),
-    SERVICE_DATE: "NONE",
-    PARTIAL_APPROVAL: "COMPLETE_ONLY",
-    EXPIRED_ROLLBACK_APPROVAL: "NONE",
-    PRE_SUBMISSION_FAILURE_APPROVAL: "NONE",
-    CURRENT_RELEASE_ID: "NONE_FIRST_DEPLOYMENT",
-    TARGET_RELEASE_ID: "NONE_FIRST_DEPLOYMENT",
-    APPROVAL_EXPIRES_AT: expected.approvalExpiresAt,
-    MINIMUM_FRESH_UNTIL: expected.minimumFreshUntil,
-  });
-  const validCalls = { oidc: 0, submissions: 0 };
-  assert.equal(await executeProtectedAdapterGate({
-    expected: expectedBase,
-    bundleDirectory: bundle,
-    manifestPath,
-    stagedTarPath: path.join(bundle, "site.tar"),
-    environment: environmentFor(expectedBase),
-    readActual: async () => actual,
-    verifyCurrentState: async () => {},
-    clock: () => now.getTime(),
-    requestOidc: async () => { validCalls.oidc += 1; return "oidc"; },
-    submit: async () => { validCalls.submissions += 1; return "submitted"; },
-  }), "submitted");
-  assert.deepEqual(validCalls, { oidc: 1, submissions: 1 });
-
-  const summaryPath = path.join(root, "pre-approval-summary.json");
-  const attemptPath = path.join(root, "deployment-attempt.json");
-  const outputPath = path.join(root, "github-output.txt");
-  await writeFile(summaryPath, `${JSON.stringify(expectedBase)}\n`);
-  const mainEnvironment = {
-    ...environmentFor(expectedBase),
-    NODE_ENV: "test" as const,
-    GITHUB_REPOSITORY: "CrunchyBrunch/lionlog",
-    GITHUB_EVENT_NAME: "workflow_dispatch",
-    GITHUB_REF: "refs/heads/main",
-    GITHUB_RUN_ID: "321",
-    GITHUB_RUN_ATTEMPT: "1",
-    GITHUB_JOB: "deploy",
-    GITHUB_SHA: sourceSha,
-    GITHUB_TOKEN: "token",
-    RELEASE_MANIFEST_PATH: manifestPath,
-    PREAPPROVAL_SUMMARY_PATH: summaryPath,
-    DEPLOYMENT_ATTEMPT_PATH: attemptPath,
-    GITHUB_OUTPUT: outputPath,
-    CURRENT_RECEIPT_ARTIFACT_ID: "NONE_FIRST_DEPLOYMENT",
-    CURRENT_RECEIPT_ARTIFACT_DIGEST: "NONE_FIRST_DEPLOYMENT",
-    TARGET_RECEIPT_ARTIFACT_ID: "NONE_FIRST_DEPLOYMENT",
-    TARGET_RECEIPT_ARTIFACT_DIGEST: "NONE_FIRST_DEPLOYMENT",
-  };
-  const mainCalls = { oidc: 0, pagesPosts: 0 };
-  const pagesFetch = async (_input: URL | RequestInfo, init?: RequestInit) => {
-    if (init?.method === "POST") {
-      mainCalls.pagesPosts += 1;
-      return Response.json({
-        id: "deployment-main",
-        status_url: "https://api.github.com/repos/CrunchyBrunch/lionlog/pages/deployments/deployment-main/status",
-        page_url: "https://crunchybrunch.github.io/lionlog/",
-      });
-    }
-    return Response.json({ status: "succeed" });
-  };
-  await runProtectedAdapterMain({
-    environment: mainEnvironment,
-    fetchImpl: pagesFetch,
-    clock: () => now.getTime(),
-    wait: async () => {},
-    readActualImpl: async () => actual,
-    verifyCurrentStateImpl: async () => {},
-    requestOidcImpl: async () => { mainCalls.oidc += 1; return "oidc"; },
-    createLedgerImpl: async () => 77,
-    recordStatusImpl: async () => ({}),
-    stagedTarPath: path.join(bundle, "site.tar"),
-  } as never);
-  assert.deepEqual(mainCalls, { oidc: 1, pagesPosts: 1 });
-  assert.match(await readFile(outputPath, "utf8"), /deployment_id=deployment-main/);
-
-  let mainDeadlineClock = Date.parse("2026-09-07T12:59:58.000Z");
-  const mainDeadlineCalls = { oidc: 0, pagesPosts: 0 };
-  await assert.rejects(runProtectedAdapterMain({
-    environment: { ...mainEnvironment, GITHUB_OUTPUT: path.join(root, "deadline-output.txt") },
-    fetchImpl: async () => { mainDeadlineCalls.pagesPosts += 1; return Response.json({}); },
-    clock: () => mainDeadlineClock,
-    wait: async () => {},
-    readActualImpl: async () => actual,
-    verifyCurrentStateImpl: async () => {},
-    requestOidcImpl: async () => { mainDeadlineCalls.oidc += 1; return "oidc"; },
-    createLedgerImpl: async () => { mainDeadlineClock = Date.parse("2026-09-07T13:00:01.000Z"); return 78; },
-    recordStatusImpl: async () => ({}),
-    stagedTarPath: path.join(bundle, "site.tar"),
-  } as never), /expired before submission/);
-  assert.deepEqual(mainDeadlineCalls, { oidc: 1, pagesPosts: 0 });
-
-  const ledgerIdentityPath = path.join(bundle, "release-manifest.before-ledger.json");
-  const ledgerIdentityCalls = { oidc: 0, pagesPosts: 0 };
-  await assert.rejects(runProtectedAdapterMain({
-    environment: { ...mainEnvironment, GITHUB_OUTPUT: path.join(root, "identity-output.txt") },
-    fetchImpl: async () => { ledgerIdentityCalls.pagesPosts += 1; return Response.json({}); },
-    clock: () => now.getTime(),
-    wait: async () => {},
-    readActualImpl: async () => actual,
-    verifyCurrentStateImpl: async () => {},
-    requestOidcImpl: async () => { ledgerIdentityCalls.oidc += 1; return "oidc"; },
-    createLedgerImpl: async () => {
-      await rename(manifestPath, ledgerIdentityPath);
-      await writeFile(manifestPath, originalBytes);
-      return 79;
+test("candidate verification fails closed before touching untrusted bytes when GitHub authority differs", async () => {
+  await assert.rejects(verifySupportedCandidate({
+    operation: "promote",
+    bundleDirectory: "missing",
+    extractionDirectory: "missing-output",
+    metadata: {
+      repository: { id: 1, full_name: "fork/lionlog" },
+      main: { sha: workflowSha },
+      workflowRun: currentWorkflowRun(),
+      candidateRun: candidateRun(),
+      candidateArtifact: candidateArtifact(),
+      ciRun: ciRun(),
+      ciJobs: [{ name: "verify", head_sha: sourceSha, status: "completed", conclusion: "success" }],
     },
-    recordStatusImpl: async () => ({}),
-    stagedTarPath: path.join(bundle, "site.tar"),
-  } as never), /identity changed/);
-  assert.deepEqual(ledgerIdentityCalls, { oidc: 1, pagesPosts: 0 });
-  await unlink(manifestPath);
-  await rename(ledgerIdentityPath, manifestPath);
-
-  const wrongPath = path.join(bundle, "wrong.json");
-  await writeFile(wrongPath, "{}\n");
-  const wrongPathCalls = { oidc: 0, submissions: 0 };
-  await assert.rejects(executeProtectedAdapterGate({
-    expected: expectedBase,
-    bundleDirectory: bundle,
-    manifestPath: wrongPath,
-    stagedTarPath: path.join(bundle, "site.tar"),
-    environment: environmentFor(expectedBase),
-    readActual: async () => actual,
-    verifyCurrentState: async () => {},
-    clock: () => now.getTime(),
-    requestOidc: async () => { wrongPathCalls.oidc += 1; return "oidc"; },
-    submit: async () => { wrongPathCalls.submissions += 1; return "submitted"; },
-  }), /exact canonical bundle manifest/);
-  assert.deepEqual(wrongPathCalls, { oidc: 0, submissions: 0 });
-
-  const wrongDigestExpected = structuredClone(expectedBase);
-  wrongDigestExpected.source.manifestSha256 = "0".repeat(64);
-  wrongDigestExpected.recovery.manifestSha256 = "0".repeat(64);
-  const wrongDigestCalls = { oidc: 0, submissions: 0 };
-  await assert.rejects(executeProtectedAdapterGate({
-    expected: wrongDigestExpected,
-    bundleDirectory: bundle,
-    manifestPath,
-    stagedTarPath: path.join(bundle, "site.tar"),
-    environment: environmentFor(wrongDigestExpected),
-    readActual: async () => actual,
-    verifyCurrentState: async () => {},
-    clock: () => now.getTime(),
-    requestOidc: async () => { wrongDigestCalls.oidc += 1; return "oidc"; },
-    submit: async () => { wrongDigestCalls.submissions += 1; return "submitted"; },
-  }), /manifest digest mismatch/i);
-  assert.deepEqual(wrongDigestCalls, { oidc: 0, submissions: 0 });
-
-  const mismatchedDeadline = { ...environmentFor(expectedBase), APPROVAL_EXPIRES_AT: "2099-01-01T00:00:00.000Z" };
-  const deadlineCalls = { oidc: 0, submissions: 0 };
-  await assert.rejects(executeProtectedAdapterGate({
-    expected: expectedBase,
-    bundleDirectory: bundle,
-    manifestPath,
-    stagedTarPath: path.join(bundle, "site.tar"),
-    environment: mismatchedDeadline,
-    readActual: async () => actual,
-    verifyCurrentState: async () => {},
-    clock: () => now.getTime(),
-    requestOidc: async () => { deadlineCalls.oidc += 1; return "oidc"; },
-    submit: async () => { deadlineCalls.submissions += 1; return "submitted"; },
-  }), /Approval expiry differs/);
-  assert.deepEqual(deadlineCalls, { oidc: 0, submissions: 0 });
-
-  let gateClock = Date.parse("2026-09-07T12:59:58.000Z");
-  let pagesPosts = 0;
-  let deadlineOidc = 0;
-  await assert.rejects(executeProtectedAdapterGate({
-    expected: expectedBase,
-    bundleDirectory: bundle,
-    manifestPath,
-    stagedTarPath: path.join(bundle, "site.tar"),
-    environment: environmentFor(expectedBase),
-    readActual: async () => actual,
-    verifyCurrentState: async () => {},
-    clock: () => gateClock,
-    requestOidc: async () => { deadlineOidc += 1; return "oidc"; },
-    submit: async () => {
-      gateClock = Date.parse("2026-09-07T13:00:01.000Z");
-      return deployExactPagesArtifact({
-        artifactId: 789,
-        buildVersion: sourceSha,
-        repositoryDeploymentId: 77,
-        githubToken: "token",
-        oidcToken: "oidc",
-        approvalExpiresAt: expectedBase.approvalExpiresAt,
-        now: () => gateClock,
-        fetchImpl: async () => { pagesPosts += 1; return Response.json({}); },
-      });
-    },
-  }), /expired before submission/);
-  assert.equal(deadlineOidc, 1);
-  assert.equal(pagesPosts, 0);
-
-  const changedAfterOidcCalls = { oidc: 0, submissions: 0 };
-  await assert.rejects(executeProtectedAdapterGate({
-    expected: expectedBase,
-    bundleDirectory: bundle,
-    manifestPath,
-    stagedTarPath: path.join(bundle, "site.tar"),
-    environment: environmentFor(expectedBase),
-    readActual: async () => actual,
-    verifyCurrentState: async () => {},
-    clock: () => now.getTime(),
-    requestOidc: async () => {
-      changedAfterOidcCalls.oidc += 1;
-      await writeFile(manifestPath, "{}\n");
-      return "oidc";
-    },
-    submit: async () => { changedAfterOidcCalls.submissions += 1; return "submitted"; },
-  }));
-  assert.deepEqual(changedAfterOidcCalls, { oidc: 1, submissions: 0 });
-  await writeFile(manifestPath, originalBytes);
-
-  const originalIdentityPath = path.join(bundle, "release-manifest.original.json");
-  const replacedIdenticallyCalls = { oidc: 0, submissions: 0 };
-  await assert.rejects(executeProtectedAdapterGate({
-    expected: expectedBase,
-    bundleDirectory: bundle,
-    manifestPath,
-    stagedTarPath: path.join(bundle, "site.tar"),
-    environment: environmentFor(expectedBase),
-    readActual: async () => actual,
-    verifyCurrentState: async () => {},
-    clock: () => now.getTime(),
-    requestOidc: async () => {
-      replacedIdenticallyCalls.oidc += 1;
-      await rename(manifestPath, originalIdentityPath);
-      await writeFile(manifestPath, originalBytes);
-      return "oidc";
-    },
-    submit: async () => { replacedIdenticallyCalls.submissions += 1; return "submitted"; },
-  }), /identity changed/);
-  assert.deepEqual(replacedIdenticallyCalls, { oidc: 1, submissions: 0 });
-  await unlink(manifestPath);
-  await rename(originalIdentityPath, manifestPath);
-
-  const invalidManifests = [
-    {},
-    { ...manifest, releaseId: "0".repeat(64) },
-    { ...manifest, releaseKind: "live", menu: null },
-    { ...manifest, menu: { serviceDate: "2026-09-07" } },
-  ];
-  for (const invalid of invalidManifests) {
-    const bytes = Buffer.from(`${JSON.stringify(invalid, null, 2)}\n`);
-    await writeFile(manifestPath, bytes);
-    const expected = structuredClone(expectedBase);
-    expected.source.manifestSha256 = sha256(bytes);
-    expected.recovery.manifestSha256 = sha256(bytes);
-    const calls = { oidc: 0, submissions: 0 };
-    await assert.rejects(executeProtectedAdapterGate({
-      expected,
-      bundleDirectory: bundle,
-      manifestPath,
-      stagedTarPath: path.join(bundle, "site.tar"),
-      environment: environmentFor(expected),
-      readActual: async () => actual,
-      verifyCurrentState: async () => {},
-      clock: () => now.getTime(),
-      requestOidc: async () => { calls.oidc += 1; return "oidc"; },
-      submit: async () => { calls.submissions += 1; return "submitted"; },
-    }));
-    assert.deepEqual(calls, { oidc: 0, submissions: 0 });
-  }
-  await writeFile(manifestPath, originalBytes);
+    workflowSha,
+    workflowRunId: 100,
+    candidateRunId: 200,
+    candidateArtifactId: 300,
+    candidateArtifactDigest: digest,
+    candidateManifestSha256: hash,
+    expectedReleaseId: hash,
+    expectedSourceSha: sourceSha,
+    expectedServiceDate: "2026-09-17",
+    approvalExpiresAt: "2026-09-17T13:00:00.000Z",
+    expectedPredecessorReleaseId: FIRST_PUBLICATION,
+    publicPredecessor: { state: "absent", releaseId: null },
+    now,
+  }), /Repository identity mismatch/);
 });
 
-test("the actual protected adapter CLI enforces operation-specific live and app-only authority", async (context) => {
-  const root = await mkdtemp(path.join(tmpdir(), "lionlog-adapter-cli-"));
+test("candidate verification enforces canonical approval expiry with preapproval headroom", async () => {
+  const options = {
+    operation: "promote" as const,
+    bundleDirectory: "missing",
+    extractionDirectory: "missing-output",
+    metadata: {
+      repository: { id: 1_346_360_244, full_name: "CrunchyBrunch/lionlog" },
+      main: { sha: workflowSha },
+      workflowRun: currentWorkflowRun(),
+      candidateRun: candidateRun(),
+      candidateArtifact: candidateArtifact(),
+      ciRun: ciRun(),
+      ciJobs: [{ name: "verify", head_sha: sourceSha, status: "completed", conclusion: "success" }],
+    },
+    workflowSha,
+    workflowRunId: 100,
+    candidateRunId: 200,
+    candidateArtifactId: 300,
+    candidateArtifactDigest: digest,
+    candidateManifestSha256: hash,
+    expectedReleaseId: hash,
+    expectedSourceSha: sourceSha,
+    expectedServiceDate: "2026-09-17",
+    expectedPredecessorReleaseId: FIRST_PUBLICATION,
+    publicPredecessor: { state: "absent" as const, releaseId: null },
+    now,
+  };
+  await assert.rejects(verifySupportedCandidate({ ...options, approvalExpiresAt: "2026-09-17T12:29:59.999Z" }), /headroom/);
+  await assert.rejects(verifySupportedCandidate({ ...options, approvalExpiresAt: "2026-09-17T13:00:00Z" }), /invalid/);
+});
+
+test("supported candidate verifier accepts a complete frozen live bundle and exact provenance", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "lionlog-supported-candidate-"));
   const recoverySite = path.join(root, "recovery-site");
   const recoveryBundle = path.join(root, "recovery-bundle");
-  await writeRecoverySite(recoverySite);
-  const recovery = await createPublicationBundle({
-    site: recoverySite,
-    output: recoveryBundle,
-    releaseKind: "first-release-recovery",
-    commitSha: sourceSha,
-    runId: 123,
-    runAttempt: 1,
-    createdAt: now.toISOString(),
+  await writeShellSite(recoverySite);
+  await createPublicationBundle({
+    site: recoverySite, output: recoveryBundle, releaseKind: "first-release-recovery",
+    commitSha: sourceSha, runId: 200, runAttempt: 1, createdAt: "2026-09-17T11:50:00.000Z",
   });
-  const recoveryManifestPath = path.join(recoveryBundle, "release-manifest.json");
-  const recoveryBytes = await readFile(recoveryManifestPath);
-  const recoveryDigest = `sha256:${"7".repeat(64)}`;
   const liveSite = path.join(root, "live-site");
   const liveBundle = path.join(root, "live-bundle");
-  await writeFieldReleaseSite(liveSite, { freshForMs: 18 * 60 * 60_000, retainForMs: 48 * 60 * 60_000 });
-  const live = await createPublicationBundle({
-    site: liveSite,
-    output: liveBundle,
-    releaseKind: "live",
-    commitSha: sourceSha,
-    runId: 123,
-    runAttempt: 1,
-    createdAt: now.toISOString(),
-    recoveryManifest: recoveryManifestPath,
-    recoveryArtifactId: 789,
-    recoveryArtifactDigest: recoveryDigest,
-  });
-  const liveManifestPath = path.join(liveBundle, "release-manifest.json");
-  const liveBytes = await readFile(liveManifestPath);
-  const stagedDigest = `sha256:${"e".repeat(64)}`;
-
-  const fixture = (
-    manifest: PublicationReleaseManifest,
-    manifestBytes: Buffer,
-    operation: "promote" | "rollback" | "first-release-recovery",
-    verificationTime: Date,
-    expiredRollbackApproval = "NONE",
-    approvalExpiresAt = new Date(verificationTime.getTime() + 60 * 60_000).toISOString(),
-  ) => {
-    const manifestDigest = sha256(manifestBytes);
-    const sourceMetadata = githubMetadata(manifest, verificationTime);
-    sourceMetadata.artifact.expires_at = new Date(verificationTime.getTime() + 24 * 60 * 60_000).toISOString();
-    const recoveryIdentity = manifest.recovery ?? {
-      artifactId: 456,
-      artifactDigest,
-      manifestSha256: manifestDigest,
-      releaseId: manifest.releaseId,
-    };
-    const expected = {
-      operation,
-      promotionWorkflowSha: sourceSha,
-      approvalExpiresAt,
-      minimumFreshUntil: manifest.menu?.earliestFreshUntil ?? "NONE",
-      releaseId: manifest.releaseId,
-      source: { runId: 123, sourceSha, artifactId: 456, artifactDigest, manifestSha256: manifestDigest },
-      ci: { runId: 999 },
-      recovery: recoveryIdentity,
-      staged: { artifactId: 790, digest: stagedDigest, artifactExpiresAt: new Date(verificationTime.getTime() + 24 * 60 * 60_000).toISOString() },
-      currentAttempt: { releaseId: "NONE_FIRST_DEPLOYMENT" },
-      rollbackTarget: { releaseId: "NONE_FIRST_DEPLOYMENT" },
-      authorization: { partialApproval: "COMPLETE_ONLY", expiredRollbackApproval, preSubmissionFailureApproval: "NONE" },
-      menu: manifest.menu,
-      site: manifest.site,
-      artifacts: [
-        { id: 456, digest: artifactDigest, runId: 123, headSha: sourceSha, role: "source" },
-        { id: recoveryIdentity.artifactId, digest: recoveryIdentity.artifactDigest, runId: 123, headSha: sourceSha, role: "recovery" },
-        { id: 790, digest: stagedDigest, runId: 321, headSha: sourceSha, role: "staged" },
-      ],
-    };
-    const actual = {
-      checkoutSha: sourceSha,
-      mainSha: sourceSha,
-      sourceRun: sourceMetadata.run,
-      ciRun: sourceMetadata.ciRun,
-      ciJobs: sourceMetadata.ciJobs,
-      artifacts: [
-        sourceMetadata.artifact,
-        {
-          ...sourceMetadata.artifact,
-          id: recoveryIdentity.artifactId,
-          digest: recoveryIdentity.artifactDigest,
-        },
-        {
-          ...sourceMetadata.artifact,
-          id: 790,
-          digest: stagedDigest,
-          workflow_run: { id: 321, head_sha: sourceSha, head_branch: "main", head_repository_id: 1_346_360_244 },
-        },
-      ],
-    };
-    return { expected, actual };
-  };
-
-  let sequence = 0;
-  const runCli = async ({
-    name,
-    manifest,
-    manifestPath,
-    manifestBytes,
-    operation,
-    verificationTime,
-    expiredRollbackApproval = "NONE",
-    approvalExpiresAt,
-    transitions = {},
-    succeeds,
-  }: {
-    name: string;
-    manifest: PublicationReleaseManifest;
-    manifestPath: string;
-    manifestBytes: Buffer;
-    operation: "promote" | "rollback" | "first-release-recovery";
-    verificationTime: Date;
-    expiredRollbackApproval?: string;
-    approvalExpiresAt?: string;
-    transitions?: Record<string, { time?: string; replaceManifest?: "identical" | "different" }>;
-    succeeds: boolean;
-  }) => {
-    const caseRoot = path.join(root, `case-${sequence++}-${name}`);
-    await mkdir(caseRoot, { recursive: true });
-    const { expected, actual } = fixture(manifest, manifestBytes, operation, verificationTime, expiredRollbackApproval, approvalExpiresAt);
-    const summaryPath = path.join(caseRoot, "pre-approval-summary.json");
-    const configPath = path.join(caseRoot, "config.json");
-    const resultPath = path.join(caseRoot, "result.json");
-    await writeFile(summaryPath, `${JSON.stringify(expected)}\n`);
-    await writeFile(configPath, `${JSON.stringify({ actual, initialTime: verificationTime.toISOString(), transitions })}\n`);
-    const environment = {
-      ...process.env,
-      GITHUB_REPOSITORY: "CrunchyBrunch/lionlog",
-      GITHUB_EVENT_NAME: "workflow_dispatch",
-      GITHUB_REF: "refs/heads/main",
-      GITHUB_RUN_ID: "321",
-      GITHUB_RUN_ATTEMPT: "1",
-      GITHUB_JOB: "deploy",
-      GITHUB_SHA: sourceSha,
-      GITHUB_TOKEN: "token",
-      EXPECTED_PROMOTION_WORKFLOW_SHA: sourceSha,
-      OPERATION: operation,
-      RELEASE_ID: expected.releaseId,
-      SOURCE_ARTIFACT_ID: String(expected.source.artifactId),
-      SOURCE_ARTIFACT_DIGEST: expected.source.artifactDigest,
-      SOURCE_MANIFEST_DIGEST: expected.source.manifestSha256,
-      RECOVERY_ARTIFACT_ID: String(expected.recovery.artifactId),
-      RECOVERY_ARTIFACT_DIGEST: expected.recovery.artifactDigest,
-      RECOVERY_MANIFEST_DIGEST: expected.recovery.manifestSha256,
-      RECOVERY_RELEASE_ID: expected.recovery.releaseId,
-      STAGED_ARTIFACT_ID: String(expected.staged.artifactId),
-      SERVICE_DATE: expected.menu?.serviceDate ?? "NONE",
-      APPROVAL_EXPIRES_AT: expected.approvalExpiresAt,
-      MINIMUM_FRESH_UNTIL: expected.minimumFreshUntil,
-      PARTIAL_APPROVAL: expected.authorization.partialApproval,
-      EXPIRED_ROLLBACK_APPROVAL: expected.authorization.expiredRollbackApproval,
-      PRE_SUBMISSION_FAILURE_APPROVAL: "NONE",
-      CURRENT_RELEASE_ID: "NONE_FIRST_DEPLOYMENT",
-      CURRENT_RECEIPT_ARTIFACT_ID: "NONE_FIRST_DEPLOYMENT",
-      CURRENT_RECEIPT_ARTIFACT_DIGEST: "NONE_FIRST_DEPLOYMENT",
-      TARGET_RELEASE_ID: "NONE_FIRST_DEPLOYMENT",
-      TARGET_RECEIPT_ARTIFACT_ID: "NONE_FIRST_DEPLOYMENT",
-      TARGET_RECEIPT_ARTIFACT_DIGEST: "NONE_FIRST_DEPLOYMENT",
-      RELEASE_MANIFEST_PATH: manifestPath,
-      PREAPPROVAL_SUMMARY_PATH: summaryPath,
-      DEPLOYMENT_ATTEMPT_PATH: path.join(caseRoot, "deployment-attempt.json"),
-      GITHUB_OUTPUT: path.join(caseRoot, "github-output.txt"),
-      STAGED_TAR_PATH: path.join(path.dirname(manifestPath), "site.tar"),
-      LIONLOG_ADAPTER_CLI_CONFIG: configPath,
-      LIONLOG_ADAPTER_CLI_RESULT: resultPath,
-    };
-    const execution = executeFile(process.execPath, [
-      "--experimental-strip-types",
-      path.resolve(import.meta.dirname, "helpers/protected-adapter-cli.mjs"),
-    ], { cwd: caseRoot, env: environment });
-    if (succeeds) await execution;
-    else await assert.rejects(execution);
-    return JSON.parse(await readFile(resultPath, "utf8")) as { calls: { oidc: number; pagesPosts: number }; error: string | null };
-  };
-
-  const promotion = await runCli({
-    name: "promotion",
-    manifest: live,
-    manifestPath: liveManifestPath,
-    manifestBytes: liveBytes,
-    operation: "promote",
-    verificationTime: now,
-    succeeds: true,
-  });
-  assert.deepEqual(promotion.calls, { oidc: 1, pagesPosts: 1 });
-
-  const freshRollback = await runCli({
-    name: "fresh-rollback",
-    manifest: live,
-    manifestPath: liveManifestPath,
-    manifestBytes: liveBytes,
-    operation: "rollback",
-    verificationTime: now,
-    succeeds: true,
-  });
-  assert.deepEqual(freshRollback.calls, { oidc: 1, pagesPosts: 1 });
-
-  const staleRetainedTime = new Date("2026-09-08T12:00:00.000Z");
-  const staleRetainedRollback = await runCli({
-    name: "stale-retained-rollback",
-    manifest: live,
-    manifestPath: liveManifestPath,
-    manifestBytes: liveBytes,
-    operation: "rollback",
-    verificationTime: staleRetainedTime,
-    succeeds: true,
-  });
-  assert.deepEqual(staleRetainedRollback.calls, { oidc: 1, pagesPosts: 1 });
-
-  const expiredTime = new Date("2026-09-10T12:00:00.000Z");
-  const expiredWaiver = `ALLOW_EXPIRED_ROLLBACK:${sha256(liveBytes)}`;
-  const expiredRollback = await runCli({
-    name: "expired-retained-rollback",
-    manifest: live,
-    manifestPath: liveManifestPath,
-    manifestBytes: liveBytes,
-    operation: "rollback",
-    verificationTime: expiredTime,
-    expiredRollbackApproval: expiredWaiver,
-    succeeds: true,
-  });
-  assert.deepEqual(expiredRollback.calls, { oidc: 1, pagesPosts: 1 });
-
-  for (const [name, approval] of [["missing-waiver", "NONE"], ["wrong-waiver", `ALLOW_EXPIRED_ROLLBACK:${"0".repeat(64)}`]] as const) {
-    const invalid = await runCli({
-      name,
-      manifest: live,
-      manifestPath: liveManifestPath,
-      manifestBytes: liveBytes,
-      operation: "rollback",
-      verificationTime: expiredTime,
-      expiredRollbackApproval: approval,
-      succeeds: false,
-    });
-    assert.deepEqual(invalid.calls, { oidc: 0, pagesPosts: 0 });
-  }
-
-  const appOnlyRollback = await runCli({
-    name: "app-only-rollback",
-    manifest: recovery,
-    manifestPath: recoveryManifestPath,
-    manifestBytes: recoveryBytes,
-    operation: "rollback",
-    verificationTime: now,
-    succeeds: true,
-  });
-  assert.deepEqual(appOnlyRollback.calls, { oidc: 1, pagesPosts: 1 });
-
-  const expiresDuringCurrentState = await runCli({
-    name: "expires-before-oidc",
-    manifest: recovery,
-    manifestPath: recoveryManifestPath,
-    manifestBytes: recoveryBytes,
-    operation: "rollback",
-    verificationTime: new Date("2026-09-07T12:59:58.000Z"),
-    approvalExpiresAt: "2026-09-07T13:00:00.000Z",
-    transitions: { afterCurrentState: { time: "2026-09-07T13:00:01.000Z" } },
-    succeeds: false,
-  });
-  assert.deepEqual(expiresDuringCurrentState.calls, { oidc: 0, pagesPosts: 0 });
-
-  for (const [name, stage, expectedOidc] of [
-    ["expires-during-oidc", "duringOidc", 1],
-    ["expires-during-ledger", "duringLedger", 1],
-  ] as const) {
-    const expired = await runCli({
-      name,
-      manifest: recovery,
-      manifestPath: recoveryManifestPath,
-      manifestBytes: recoveryBytes,
-      operation: "rollback",
-      verificationTime: new Date("2026-09-07T12:59:58.000Z"),
-      approvalExpiresAt: "2026-09-07T13:00:00.000Z",
-      transitions: { [stage]: { time: "2026-09-07T13:00:01.000Z" } },
-      succeeds: false,
-    });
-    assert.deepEqual(expired.calls, { oidc: expectedOidc, pagesPosts: 0 });
-  }
-
-  const replacementBundles: string[] = [];
-  for (const kind of ["identical", "different"] as const) {
-    const replacementBundle = path.join(root, `replacement-${kind}`);
-    await cp(liveBundle, replacementBundle, { recursive: true });
-    replacementBundles.push(replacementBundle);
-    const replaced = await runCli({
-      name: `replace-${kind}`,
-      manifest: live,
-      manifestPath: path.join(replacementBundle, "release-manifest.json"),
-      manifestBytes: liveBytes,
-      operation: "promote",
-      verificationTime: now,
-      transitions: { duringOidc: { replaceManifest: kind } },
-      succeeds: false,
-    });
-    assert.deepEqual(replaced.calls, { oidc: 1, pagesPosts: 0 });
-  }
-
-  const hardlinkBundle = path.join(root, "hardlink-bundle");
-  await mkdir(hardlinkBundle);
-  await cp(path.join(liveBundle, "site.tar"), path.join(hardlinkBundle, "site.tar"));
-  const hardlinkSource = path.join(root, "hardlink-source.json");
-  await writeFile(hardlinkSource, liveBytes);
-  await link(hardlinkSource, path.join(hardlinkBundle, "release-manifest.json"));
-  const hardlinked = await runCli({
-    name: "hardlink",
-    manifest: live,
-    manifestPath: path.join(hardlinkBundle, "release-manifest.json"),
-    manifestBytes: liveBytes,
-    operation: "promote",
-    verificationTime: now,
-    succeeds: false,
-  });
-  assert.deepEqual(hardlinked.calls, { oidc: 0, pagesPosts: 0 });
-
-  const parentAlias = path.join(root, "live-bundle-parent-alias");
-  try {
-    await symlink(liveBundle, parentAlias, process.platform === "win32" ? "junction" : "dir");
-    const aliased = await runCli({
-      name: "parent-alias",
-      manifest: live,
-      manifestPath: path.join(parentAlias, "release-manifest.json"),
-      manifestBytes: liveBytes,
-      operation: "promote",
-      verificationTime: now,
-      succeeds: false,
-    });
-    assert.deepEqual(aliased.calls, { oidc: 0, pagesPosts: 0 });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EPERM") context.diagnostic("Parent alias creation is unavailable on this runner.");
-    else throw error;
-  }
-
-  if (process.platform !== "win32") {
-    const symlinkBundle = path.join(root, "symlink-bundle");
-    await mkdir(symlinkBundle);
-    await cp(path.join(liveBundle, "site.tar"), path.join(symlinkBundle, "site.tar"));
-    await symlink(liveManifestPath, path.join(symlinkBundle, "release-manifest.json"), "file");
-    const symlinked = await runCli({
-      name: "manifest-symlink",
-      manifest: live,
-      manifestPath: path.join(symlinkBundle, "release-manifest.json"),
-      manifestBytes: liveBytes,
-      operation: "promote",
-      verificationTime: now,
-      succeeds: false,
-    });
-    assert.deepEqual(symlinked.calls, { oidc: 0, pagesPosts: 0 });
-  }
-
-  const noncanonicalPath = `${liveBundle}${path.sep}..${path.sep}${path.basename(liveBundle)}${path.sep}release-manifest.json`;
-  const noncanonical = await runCli({
-    name: "noncanonical-path",
-    manifest: live,
-    manifestPath: noncanonicalPath,
-    manifestBytes: liveBytes,
-    operation: "promote",
-    verificationTime: now,
-    succeeds: false,
-  });
-  assert.deepEqual(noncanonical.calls, { oidc: 0, pagesPosts: 0 });
-
-  if (process.platform === "win32") {
-    const index = [...liveBundle].findIndex((character, characterIndex) => characterIndex > 2 && /[a-z]/i.test(character));
-    assert.ok(index >= 0);
-    const character = liveBundle[index];
-    const caseAlias = `${liveBundle.slice(0, index)}${character === character.toLowerCase() ? character.toUpperCase() : character.toLowerCase()}${liveBundle.slice(index + 1)}`;
-    if (await realpath(caseAlias) !== path.resolve(caseAlias)) {
-      const caseAliased = await runCli({
-        name: "parent-case-alias",
-        manifest: live,
-        manifestPath: path.join(caseAlias, "release-manifest.json"),
-        manifestBytes: liveBytes,
-        operation: "promote",
-        verificationTime: now,
-        succeeds: false,
-      });
-      assert.deepEqual(caseAliased.calls, { oidc: 0, pagesPosts: 0 });
-    } else {
-      context.diagnostic("The filesystem did not expose canonical case for the CLI alias probe.");
-    }
-  }
-  assert.equal(replacementBundles.length, 2);
-});
-
-test("full live verification derives field-release policy from catalog and snapshot bytes", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "lionlog-live-semantic-"));
-  const recoverySite = path.join(root, "recovery-site");
-  const recoveryBundle = path.join(root, "recovery-bundle");
-  await writeRecoverySite(recoverySite);
-  const recovery = await createPublicationBundle({
-    site: recoverySite,
-    output: recoveryBundle,
-    releaseKind: "first-release-recovery",
-    commitSha: sourceSha,
-    runId: 123,
-    runAttempt: 1,
-    createdAt: now.toISOString(),
-  });
-  const recoveryManifest = path.join(recoveryBundle, "release-manifest.json");
-  const recoveryDigest = `sha256:${"7".repeat(64)}`;
-  const site = path.join(root, "site");
-  await writeFieldReleaseSite(site, { freshForMs: 18 * 60 * 60_000, retainForMs: 48 * 60 * 60_000 });
-  const bundle = path.join(root, "bundle");
+  await writeLiveSite(liveSite);
   const manifest = await createPublicationBundle({
-    site,
-    output: bundle,
-    releaseKind: "live",
-    commitSha: sourceSha,
-    runId: 123,
-    runAttempt: 1,
-    createdAt: now.toISOString(),
-    recoveryManifest,
-    recoveryArtifactId: 789,
-    recoveryArtifactDigest: recoveryDigest,
+    site: liveSite, output: liveBundle, releaseKind: "live", commitSha: sourceSha, runId: 200, runAttempt: 1,
+    createdAt: "2026-09-17T11:55:00.000Z", recoveryManifest: path.join(recoveryBundle, "release-manifest.json"),
+    recoveryArtifactId: 299, recoveryArtifactDigest: `sha256:${"9".repeat(64)}`,
   });
-  const options = {
-    ...liveVerificationOptions(bundle, manifest, recovery, recoveryDigest),
-    expectedManifestSha256: sha256(await readFile(path.join(bundle, "release-manifest.json"))),
-  };
-  await assert.doesNotReject(verifyPublicationBundle(options));
-
-  await rewriteLiveBundle(bundle, (catalog) => ({
-    ...catalog,
-    publication: { ...catalog.publication, mode: "manual-export" },
-  }));
-  const changedManifestBytes = await readFile(path.join(bundle, "release-manifest.json"));
-  await assert.rejects(verifyPublicationBundle({ ...options, expectedManifestSha256: sha256(changedManifestBytes) }), /field-release provenance/);
-
-  const retimedBundle = path.join(root, "retimed-bundle");
-  const retimedSite = path.join(root, "retimed-site");
-  await writeFieldReleaseSite(retimedSite, { freshForMs: 18 * 60 * 60_000, retainForMs: 48 * 60 * 60_000 });
-  const retimedManifest = await createPublicationBundle({
-    site: retimedSite,
-    output: retimedBundle,
-    releaseKind: "live",
-    commitSha: sourceSha,
-    runId: 123,
-    runAttempt: 1,
-    createdAt: now.toISOString(),
-    recoveryManifest,
-    recoveryArtifactId: 789,
-    recoveryArtifactDigest: recoveryDigest,
-  });
-  await rewriteLiveBundle(retimedBundle, (catalog) => catalog, (snapshot) => ({
-    ...snapshot,
-    cachedAt: "2099-01-01T12:00:00.000Z",
-    freshUntil: "2099-01-02T06:00:00.000Z",
-    retainUntil: "2099-01-03T12:00:00.000Z",
-  }));
-  await assert.rejects(verifyPublicationBundle({
-    ...liveVerificationOptions(retimedBundle, retimedManifest, recovery, recoveryDigest),
-    expectedManifestSha256: sha256(await readFile(path.join(retimedBundle, "release-manifest.json"))),
-  }), /retrieval\/cache time/);
-
-  const extendedSite = path.join(root, "extended-site");
-  await writeFieldReleaseSite(extendedSite, { freshForMs: 365 * 24 * 60 * 60_000, retainForMs: 366 * 24 * 60 * 60_000 });
-  await assert.rejects(createPublicationBundle({
-    site: extendedSite,
-    output: path.join(root, "extended-bundle"),
-    releaseKind: "live",
-    commitSha: sourceSha,
-    runId: 123,
-    runAttempt: 1,
-    createdAt: now.toISOString(),
-    recoveryManifest,
-    recoveryArtifactId: 789,
-    recoveryArtifactDigest: recoveryDigest,
-  }), /18-hour\/48-hour/);
-});
-
-test("publication tar rejects traversal, duplicate entries, links, and corrupt headers", () => {
-  assert.throws(() => createPublicationTar([{ path: "../escape", data: Buffer.from("x") }]), /Unsafe publication path/);
-  assert.throws(() => createPublicationTar([
-    { path: "index.html", data: Buffer.from("a") },
-    { path: "index.html", data: Buffer.from("b") },
-  ]), /Duplicate/);
-  assert.throws(() => createPublicationTar([
-    { path: "assets/A.js", data: Buffer.from("a") },
-    { path: "assets/a.js", data: Buffer.from("b") },
-  ]), /Case-colliding/);
-  const archive = createPublicationTar([{ path: "index.html", data: Buffer.from("a") }]);
-  const link = Buffer.from(archive);
-  link[156] = "2".charCodeAt(0);
-  rewriteTarChecksum(link);
-  assert.throws(() => parsePublicationTar(link), /only regular files/);
-  const corrupt = Buffer.from(archive);
-  corrupt[0] ^= 1;
-  assert.throws(() => parsePublicationTar(corrupt), /checksum/);
-  const hiddenPadding = Buffer.from(archive);
-  hiddenPadding[513] = 1;
-  assert.throws(() => parsePublicationTar(hiddenPadding), /non-zero padding/);
-});
-
-test("partial live approval is bound to the exact manifest and omission count", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "lionlog-approval-"));
-  const site = path.join(root, "site");
-  await writeRecoverySite(site);
-  const recovery = await createPublicationBundle({
-    site,
-    output: path.join(root, "bundle"),
-    releaseKind: "first-release-recovery",
-    commitSha: sourceSha,
-    runId: 123,
-    runAttempt: 1,
-    createdAt: now.toISOString(),
-  });
-  const catalogEntry = { path: "menu-data/v2/catalog.json", bytes: 2, sha256: "c".repeat(64) };
-  const live = publicationReleaseManifestSchema.parse({
-    ...recovery,
-    releaseKind: "live",
-    recovery: {
-      releaseId: recovery.releaseId,
-      manifestSha256: "e".repeat(64),
-      artifactId: 789,
-      artifactDigest: `sha256:${"f".repeat(64)}`,
+  const manifestSha256 = sha256(await readFile(path.join(liveBundle, "release-manifest.json")));
+  const validated = await verifySupportedCandidate({
+    operation: "promote", bundleDirectory: liveBundle, extractionDirectory: path.join(root, "site-extracted"),
+    metadata: {
+      repository: { id: 1_346_360_244, full_name: "CrunchyBrunch/lionlog" }, main: { sha: workflowSha },
+      workflowRun: currentWorkflowRun(), candidateRun: candidateRun(), candidateArtifact: candidateArtifact(), ciRun: ciRun(),
+      ciJobs: [{ name: "verify", head_sha: sourceSha, status: "completed", conclusion: "success" }],
     },
-    menu: {
-      serviceDate: "2026-09-07",
-      catalogPath: "menu-data/v2/catalog.json",
-      catalogSha256: "c".repeat(64),
-      catalogVersion: "lionlog.psu-catalog.v3",
-      snapshotSchemaVersion: "lionlog.psu-menu.v2",
-      parserVersion: "psu-html.v2",
-      generatedAt: "2026-09-07T12:00:00.000Z",
-      retrievalStartedAt: "2026-09-07T11:00:00.000Z",
-      retrievalCompletedAt: "2026-09-07T11:30:00.000Z",
-      earliestFreshUntil: "2026-09-07T14:00:00.000Z",
-      earliestRetainUntil: "2026-09-09T12:00:00.000Z",
-      coverage: "partial",
-      sourceObservationCount: 101,
-      publishedObservationCount: 100,
-      omissions: { "invalid-name": 1 },
-      snapshotCount: 5,
-    },
-    site: {
-      ...recovery.site,
-      inventory: [...recovery.site.inventory, catalogEntry].sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0),
-    },
+    workflowSha, workflowRunId: 100, candidateRunId: 200, candidateArtifactId: 300, candidateArtifactDigest: digest,
+    candidateManifestSha256: manifestSha256, expectedReleaseId: manifest.releaseId, expectedSourceSha: sourceSha,
+    expectedServiceDate: "2026-09-17", approvalExpiresAt: "2026-09-17T13:00:00.000Z",
+    expectedPredecessorReleaseId: FIRST_PUBLICATION, publicPredecessor: { state: "absent", releaseId: null }, now,
   });
-  const metadata = githubMetadata(live, now);
-  const base = {
-    metadata,
-    operation: "promote" as const,
-    expectedSourceSha: sourceSha,
-    expectedRunId: 123,
-    expectedRunAttempt: 1,
-    expectedArtifactId: 456,
-    expectedArtifactDigest: artifactDigest,
-    expectedManifestSha256: "d".repeat(64),
-    expectedServiceDate: "2026-09-07",
-    approvalExpiresAt: "2026-09-07T13:00:00.000Z",
-    partialApproval: "COMPLETE_ONLY",
-    expiredRollbackApproval: "NONE",
-    workflowSha: sourceSha,
-    expectedPromotionWorkflowSha: sourceSha,
-    expectedRecoveryArtifactId: 789,
-    expectedRecoveryArtifactDigest: `sha256:${"f".repeat(64)}`,
-    expectedRecoveryManifestSha256: "e".repeat(64),
-    expectedRecoveryReleaseId: recovery.releaseId,
-    now,
-  };
-  assert.throws(() => validateApprovalAndProvenance(live, base), /Partial coverage/);
-  assert.doesNotThrow(() => validateApprovalAndProvenance(live, {
-    ...base,
-    partialApproval: `APPROVE_PARTIAL:${"d".repeat(64)}:1`,
-  }));
-  assert.throws(() => validateApprovalAndProvenance(live, {
-    ...base,
-    partialApproval: `APPROVE_PARTIAL:${"e".repeat(64)}:1`,
-  }), /Partial coverage/);
-  assert.throws(() => validateApprovalAndProvenance(live, {
-    ...base,
-    partialApproval: `APPROVE_PARTIAL:${"d".repeat(64)}:1`,
-    approvalExpiresAt: "2026-09-07T11:59:59.000Z",
-  }), /expired/);
-  assert.throws(() => validateApprovalAndProvenance(live, {
-    ...base,
-    partialApproval: `APPROVE_PARTIAL:${"d".repeat(64)}:1`,
-    approvalExpiresAt: "not-a-date",
-  }), /invalid/);
-
-  const exactPartialApproval = `APPROVE_PARTIAL:${"d".repeat(64)}:1`;
-  assert.throws(() => validateApprovalAndProvenance(live, {
-    ...base,
-    expectedArtifactId: 457,
-    partialApproval: exactPartialApproval,
-  }), /artifact provenance/);
-  assert.throws(() => validateApprovalAndProvenance(live, {
-    ...base,
-    expectedArtifactDigest: `sha256:${"e".repeat(64)}`,
-    partialApproval: exactPartialApproval,
-  }), /artifact provenance/);
-  assert.throws(() => validateApprovalAndProvenance(live, {
-    ...base,
-    expectedSourceSha: "e".repeat(40),
-    partialApproval: exactPartialApproval,
-  }), /producer run provenance/);
-
-  const expiredMetadata = structuredClone(metadata);
-  expiredMetadata.artifact.expired = true;
-  assert.throws(() => validateApprovalAndProvenance(live, {
-    ...base,
-    metadata: expiredMetadata,
-    partialApproval: exactPartialApproval,
-  }), /artifact provenance/);
-
-  const rerunMetadata = structuredClone(metadata);
-  rerunMetadata.run.run_attempt = 2;
-  assert.throws(() => validateApprovalAndProvenance(live, {
-    ...base,
-    metadata: rerunMetadata,
-    partialApproval: exactPartialApproval,
-  }), /producer run provenance/);
-
-  const wrongProducerWorkflow = structuredClone(metadata);
-  wrongProducerWorkflow.run.workflow_id = 123;
-  assert.throws(() => validateApprovalAndProvenance(live, {
-    ...base,
-    metadata: wrongProducerWorkflow,
-    partialApproval: exactPartialApproval,
-  }), /producer run provenance/);
-
-  const wrongCiWorkflow = structuredClone(metadata);
-  wrongCiWorkflow.ciRun.workflow_id = 123;
-  assert.throws(() => validateApprovalAndProvenance(live, {
-    ...base,
-    metadata: wrongCiWorkflow,
-    partialApproval: exactPartialApproval,
-  }), /CI workflow identity/);
-
-  assert.throws(() => validateApprovalAndProvenance(live, {
-    ...base,
-    expectedPromotionWorkflowSha: "f".repeat(40),
-    partialApproval: exactPartialApproval,
-  }), /CI workflow identity/);
-
-  const movedMainMetadata = structuredClone(metadata);
-  movedMainMetadata.main.sha = "e".repeat(40);
-  assert.throws(() => validateApprovalAndProvenance(live, {
-    ...base,
-    metadata: movedMainMetadata,
-    partialApproval: exactPartialApproval,
-  }), /Main moved/);
-
-  const stale = publicationReleaseManifestSchema.parse({
-    ...live,
-    menu: { ...live.menu!, earliestFreshUntil: "2026-09-07T12:14:59.000Z" },
-  });
-  assert.throws(() => validateApprovalAndProvenance(stale, {
-    ...base,
-    partialApproval: exactPartialApproval,
-  }), /freshness margin/);
-  assert.doesNotThrow(() => validateApprovalAndProvenance(stale, {
-    ...base,
-    operation: "rollback",
-    partialApproval: exactPartialApproval,
-  }));
-
-  const expiredRollback = publicationReleaseManifestSchema.parse({
-    ...stale,
-    menu: { ...stale.menu!, earliestRetainUntil: "2026-09-07T11:59:59.000Z" },
-  });
-  assert.throws(() => validateApprovalAndProvenance(expiredRollback, {
-    ...base,
-    operation: "rollback",
-    partialApproval: exactPartialApproval,
-  }), /Expired rollback/);
-  assert.doesNotThrow(() => validateApprovalAndProvenance(expiredRollback, {
-    ...base,
-    operation: "rollback",
-    partialApproval: exactPartialApproval,
-    expiredRollbackApproval: `ALLOW_EXPIRED_ROLLBACK:${"d".repeat(64)}`,
-  }));
-});
-
-test("supported deployment authority covers first publication, successors, rollback, and unresolved attempts", async () => {
-  const requested: string[] = [];
-  const first = await verifyCurrentPublication({
-    operation: "promote",
-    sourceManifest: { releaseId: "e".repeat(64) },
-    sourceIdentity: { artifactId: 999, artifactDigest, manifestSha256: "1".repeat(64) },
-    token: "token",
-    fetchImpl: deploymentApiFixture({ publicReleaseId: "NONE_404", deployments: [] }, requested),
-  });
-  assert.equal(first.state, "first-deployment");
-  assert.equal(requested.some((url) => /\/pages\/deployments(?:\?|$)/.test(url)), false);
-
-  const releaseA = "a".repeat(64);
-  const releaseB = "b".repeat(64);
-  const knownA = deploymentReceipt({ releaseId: releaseA, repositoryDeploymentId: 101, deploymentId: "pages-a", sourceArtifactId: 456 });
-  const successor = await verifyCurrentPublication({
-    operation: "promote",
-    token: "token",
-    currentReceipt: knownA,
-    rollbackTargetReceipt: structuredClone(knownA),
-    sourceManifest: { releaseId: releaseB },
-    sourceIdentity: { artifactId: 999, artifactDigest, manifestSha256: "1".repeat(64) },
-    fetchImpl: deploymentApiFixture({ publicReleaseId: releaseA, receipts: [knownA] }),
-  });
-  assert.equal(successor.state, "known-good-current");
-
-  const failedB = deploymentReceipt({
-    releaseId: releaseB,
-    repositoryDeploymentId: 202,
-    deploymentId: "pages-b",
-    knownGood: false,
-    repositoryState: "failure",
-    publicProductVerified: false,
-    previous: knownA,
-    sourceArtifactId: 999,
-  });
-  const rolledBack = await verifyCurrentPublication({
-    operation: "rollback",
-    token: "token",
-    currentReceipt: failedB,
-    rollbackTargetReceipt: knownA,
-    sourceManifest: { releaseId: releaseA, releaseKind: "live", site: { tarSha256: knownA.source.siteTarSha256 } },
-    sourceIdentity: { artifactId: knownA.source.artifactId, artifactDigest: knownA.source.artifactDigest, manifestSha256: knownA.source.manifestSha256 },
-    fetchImpl: deploymentApiFixture({ publicReleaseId: releaseB, receipts: [failedB, knownA] }),
-  });
-  assert.equal(rolledBack.state, "reconciled-current-attempt");
-
-  const knownA2 = deploymentReceipt({ releaseId: releaseA, repositoryDeploymentId: 404, deploymentId: "pages-a-rollback", sourceArtifactId: 456, previous: knownA });
-  await assert.doesNotReject(verifyCurrentPublication({
-    operation: "promote",
-    token: "token",
-    currentReceipt: knownA2,
-    rollbackTargetReceipt: structuredClone(knownA2),
-    sourceManifest: { releaseId: "e".repeat(64) },
-    sourceIdentity: { artifactId: 999, artifactDigest, manifestSha256: "1".repeat(64) },
-    fetchImpl: deploymentApiFixture({ publicReleaseId: releaseA, receipts: [knownA2, failedB, knownA] }),
-  }));
-  assert.notEqual(knownA.deploymentId, knownA2.deploymentId);
-
-  const unresolvedB = deploymentReceipt({
-    releaseId: releaseB,
-    repositoryDeploymentId: 303,
-    deploymentId: null,
-    knownGood: false,
-    repositoryState: "in_progress",
-    repositoryStatusRecorded: true,
-    attemptPhase: "submission-uncertain",
-    uncertain: true,
-    previous: knownA,
-    sourceArtifactId: 999,
-  });
-  await assert.rejects(verifyCurrentPublication({
-    operation: "rollback",
-    token: "token",
-    currentReceipt: unresolvedB,
-    rollbackTargetReceipt: knownA,
-    sourceManifest: { releaseId: releaseA, releaseKind: "live", site: { tarSha256: knownA.source.siteTarSha256 } },
-    sourceIdentity: { artifactId: knownA.source.artifactId, artifactDigest: knownA.source.artifactDigest, manifestSha256: knownA.source.manifestSha256 },
-    fetchImpl: deploymentApiFixture({ publicReleaseId: releaseA, receipts: [unresolvedB, knownA] }),
-  }), /unresolved|non-submission/);
-
-  const statuslessB = deploymentReceipt({
-    releaseId: releaseB,
-    repositoryDeploymentId: 307,
-    deploymentId: null,
-    knownGood: false,
-    repositoryState: "pending",
-    repositoryStatusRecorded: false,
-    attemptPhase: "submission-uncertain",
-    uncertain: true,
-    previous: knownA,
-    sourceArtifactId: 999,
-  });
-  await assert.rejects(verifyCurrentPublication({
-    operation: "rollback",
-    token: "token",
-    currentReceipt: statuslessB,
-    rollbackTargetReceipt: knownA,
-    sourceManifest: { releaseId: releaseA, releaseKind: "live", site: { tarSha256: knownA.source.siteTarSha256 } },
-    sourceIdentity: { artifactId: knownA.source.artifactId, artifactDigest: knownA.source.artifactDigest, manifestSha256: knownA.source.manifestSha256 },
-    fetchImpl: deploymentApiFixture({ publicReleaseId: releaseA, receipts: [statuslessB, knownA] }),
-  }), /unresolved|non-submission/);
-
-  const queuedB = deploymentReceipt({
-    releaseId: releaseB,
-    repositoryDeploymentId: 304,
-    deploymentId: "pages-b-queued",
-    pagesStatus: "queued",
-    knownGood: false,
-    repositoryState: "failure",
-    attemptPhase: "status-uncertain",
-    uncertain: true,
-    previous: knownA,
-    sourceArtifactId: 999,
-  });
-  await assert.rejects(verifyCurrentPublication({
-    operation: "rollback",
-    token: "token",
-    currentReceipt: queuedB,
-    rollbackTargetReceipt: knownA,
-    sourceManifest: { releaseId: releaseA, releaseKind: "live", site: { tarSha256: knownA.source.siteTarSha256 } },
-    sourceIdentity: { artifactId: knownA.source.artifactId, artifactDigest: knownA.source.artifactDigest, manifestSha256: knownA.source.manifestSha256 },
-    fetchImpl: deploymentApiFixture({ publicReleaseId: releaseA, receipts: [queuedB, knownA] }),
-  }), /not reached a recognized terminal state/);
-
-  for (const [index, pagesStatus] of ["in_progress", "unknown", "error"].entries()) {
-    const nonterminal = deploymentReceipt({
-      releaseId: releaseB,
-      repositoryDeploymentId: 310 + index,
-      deploymentId: `pages-b-${pagesStatus}`,
-      pagesStatus,
-      knownGood: false,
-      repositoryState: "failure",
-      attemptPhase: "status-uncertain",
-      uncertain: true,
-      previous: knownA,
-      sourceArtifactId: 999,
-    });
-    await assert.rejects(verifyCurrentPublication({
-      operation: "rollback",
-      token: "token",
-      currentReceipt: nonterminal,
-      rollbackTargetReceipt: knownA,
-      sourceManifest: { releaseId: releaseA, releaseKind: "live", site: { tarSha256: knownA.source.siteTarSha256 } },
-      sourceIdentity: { artifactId: knownA.source.artifactId, artifactDigest: knownA.source.artifactDigest, manifestSha256: knownA.source.manifestSha256 },
-      fetchImpl: deploymentApiFixture({ publicReleaseId: releaseA, receipts: [nonterminal, knownA] }),
-    }), /recognized terminal state/);
-  }
-
-  const unknownB = deploymentReceipt({
-    releaseId: releaseB,
-    repositoryDeploymentId: 305,
-    deploymentId: "pages-b-unknown",
-    pagesStatus: "future-status",
-    knownGood: false,
-    repositoryState: "failure",
-    attemptPhase: "status-uncertain",
-    uncertain: true,
-    previous: knownA,
-    sourceArtifactId: 999,
-  });
-  await assert.rejects(verifyCurrentPublication({
-    operation: "rollback",
-    token: "token",
-    currentReceipt: unknownB,
-    rollbackTargetReceipt: knownA,
-    sourceManifest: { releaseId: releaseA, releaseKind: "live", site: { tarSha256: knownA.source.siteTarSha256 } },
-    sourceIdentity: { artifactId: knownA.source.artifactId, artifactDigest: knownA.source.artifactDigest, manifestSha256: knownA.source.manifestSha256 },
-    fetchImpl: deploymentApiFixture({ publicReleaseId: releaseA, receipts: [unknownB, knownA] }),
-  }), /recognized terminal state/);
-
-  const rejectedB = deploymentReceipt({
-    releaseId: releaseB,
-    repositoryDeploymentId: 306,
-    deploymentId: null,
-    knownGood: false,
-    repositoryState: "failure",
-    attemptPhase: "submission-rejected",
-    uncertain: false,
-    previous: knownA,
-    sourceArtifactId: 999,
-  });
-  await assert.doesNotReject(verifyCurrentPublication({
-    operation: "rollback",
-    token: "token",
-    currentReceipt: rejectedB,
-    rollbackTargetReceipt: knownA,
-    sourceManifest: { releaseId: releaseA, releaseKind: "live", site: { tarSha256: knownA.source.siteTarSha256 } },
-    sourceIdentity: { artifactId: knownA.source.artifactId, artifactDigest: knownA.source.artifactDigest, manifestSha256: knownA.source.manifestSha256 },
-    fetchImpl: deploymentApiFixture({ publicReleaseId: releaseA, receipts: [rejectedB, knownA] }),
-  }));
-
-  await assert.rejects(verifyCurrentPublication({
-    operation: "promote",
-    sourceManifest: { releaseId: releaseB },
-    sourceIdentity: { artifactId: 999, artifactDigest, manifestSha256: "1".repeat(64) },
-    token: "token",
-    fetchImpl: async (input: URL | RequestInfo) => String(input).includes("release.json")
-      ? new Response(null, { status: 404 })
-      : new Response(null, { status: 404 }),
-  }), /unavailable/);
-});
-
-test("the exact failed first promotion can be reconciled only by its immutable receipt and latest failed environment deployment", async () => {
-  const receipt = failedPreSubmissionReceipt();
-  const receiptDigest = "sha256:bf3c1430abf5bf1ebc8707e601b51f3776705cde507997ff3b606fcc88601874";
-  const exactApproval = `RECONCILE_PRE_SUBMISSION:${receiptDigest}:6394978446`;
-  const sourceManifest = { releaseId: "e".repeat(64) };
-  const sourceIdentity = { artifactId: 999, artifactDigest, manifestSha256: "1".repeat(64) };
-  const result = await verifyCurrentPublication({
-    operation: "promote",
-    token: "token",
-    currentReceipt: receipt,
-    sourceManifest,
-    sourceIdentity,
-    currentReceiptArtifactId: 10_267_367_634,
-    currentReceiptArtifactDigest: receiptDigest,
-    preSubmissionFailureApproval: exactApproval,
-    fetchImpl: failedPreSubmissionApiFixture(),
-  });
-  assert.deepEqual(result, {
-    state: "reconciled-pre-submission-failure",
-    publicReleaseId: "NONE_404",
-    environmentDeploymentId: 6_394_978_446,
-  });
-
-  await assert.rejects(verifyCurrentPublication({
-    operation: "promote",
-    token: "token",
-    currentReceipt: receipt,
-    sourceManifest,
-    sourceIdentity,
-    currentReceiptArtifactId: 10_267_367_634,
-    currentReceiptArtifactDigest: receiptDigest,
-    preSubmissionFailureApproval: `RECONCILE_PRE_SUBMISSION:${receiptDigest}:6394978447`,
-    fetchImpl: failedPreSubmissionApiFixture(),
-  }), /exact Project Manager reconciliation approval/);
-
-  await assert.rejects(verifyCurrentPublication({
-    operation: "promote",
-    token: "token",
-    currentReceipt: receipt,
-    sourceManifest,
-    sourceIdentity,
-    currentReceiptArtifactId: 10_267_367_634,
-    currentReceiptArtifactDigest: receiptDigest,
-    preSubmissionFailureApproval: exactApproval,
-    fetchImpl: failedPreSubmissionApiFixture({ newerEnvironmentDeployment: true }),
-  }), /unbound newer environment deployment/);
-
-  const currentPromotion = { runId: 999_000, runAttempt: 1, workflowSha: "f".repeat(40), job: "deploy" };
-  await assert.doesNotReject(verifyCurrentPublication({
-    operation: "promote",
-    token: "token",
-    currentReceipt: receipt,
-    sourceManifest,
-    sourceIdentity,
-    currentReceiptArtifactId: 10_267_367_634,
-    currentReceiptArtifactDigest: receiptDigest,
-    preSubmissionFailureApproval: exactApproval,
-    currentPromotion,
-    fetchImpl: failedPreSubmissionApiFixture({ currentPromotion: true }),
-  }));
-  await assert.rejects(verifyCurrentPublication({
-    operation: "promote",
-    token: "token",
-    currentReceipt: receipt,
-    sourceManifest,
-    sourceIdentity,
-    currentReceiptArtifactId: 10_267_367_634,
-    currentReceiptArtifactDigest: receiptDigest,
-    preSubmissionFailureApproval: exactApproval,
-    currentPromotion,
-    fetchImpl: failedPreSubmissionApiFixture({ currentPromotion: true, duplicateCurrent: true }),
-  }), /one exact newer environment deployment/);
-  for (const [fixture, useCurrentPromotion, message] of [
-    [failedPreSubmissionApiFixture({ tamperReceiptArtifact: true }), false, /artifact provenance/],
-    [failedPreSubmissionApiFixture({ tamperSubmissionStep: true }), false, /submission step was skipped/],
-    [failedPreSubmissionApiFixture({ currentPromotion: true, currentStatus: "queued" }), true, /not bound to its protected job/],
-    [failedPreSubmissionApiFixture({ currentPromotion: true, incompleteCurrentJobs: true }), true, /collection is incomplete/],
-  ] as const) {
-    await assert.rejects(verifyCurrentPublication({
-      operation: "promote",
-      token: "token",
-      currentReceipt: receipt,
-      sourceManifest,
-      sourceIdentity,
-      currentReceiptArtifactId: 10_267_367_634,
-      currentReceiptArtifactDigest: receiptDigest,
-      preSubmissionFailureApproval: exactApproval,
-      currentPromotion: useCurrentPromotion ? currentPromotion : null,
-      fetchImpl: fixture,
-    }), message);
-  }
-
-  const alteredReceipt = structuredClone(receipt);
-  alteredReceipt.source.artifactId += 1;
-  await assert.rejects(verifyCurrentPublication({
-    operation: "promote",
-    token: "token",
-    currentReceipt: alteredReceipt,
-    sourceManifest,
-    sourceIdentity,
-    currentReceiptArtifactId: 10_267_367_634,
-    currentReceiptArtifactDigest: receiptDigest,
-    preSubmissionFailureApproval: exactApproval,
-    fetchImpl: failedPreSubmissionApiFixture(),
-  }), /exactly match the reviewed/);
-});
-
-test("the current-publication environment contract receives the exact incident artifact ID and rejects legacy or invalid names", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "lionlog-current-receipt-contract-"));
-  const receiptPath = path.join(root, "deployment-receipt.json");
-  const manifestPath = path.join(root, "release-manifest.json");
-  const receiptDigest = "sha256:bf3c1430abf5bf1ebc8707e601b51f3776705cde507997ff3b606fcc88601874";
-  await writeFile(receiptPath, JSON.stringify(failedPreSubmissionReceipt()));
-  await writeFile(manifestPath, JSON.stringify({ releaseId: "e".repeat(64) }));
-
-  const environment = {
-    OPERATION: "promote",
-    GITHUB_TOKEN: "token",
-    EXPECTED_CURRENT_RECEIPT_PATH: receiptPath,
-    ROLLBACK_TARGET_RECEIPT_PATH: "NONE_FIRST_DEPLOYMENT",
-    RELEASE_MANIFEST_PATH: manifestPath,
-    SOURCE_ARTIFACT_ID: "999",
-    SOURCE_ARTIFACT_DIGEST: artifactDigest,
-    SOURCE_MANIFEST_DIGEST: "1".repeat(64),
-    CURRENT_RECEIPT_ARTIFACT_ID: "10267367634",
-    CURRENT_RECEIPT_ARTIFACT_DIGEST: receiptDigest,
-    PRE_SUBMISSION_FAILURE_APPROVAL: `RECONCILE_PRE_SUBMISSION:${receiptDigest}:6394978446`,
-    GITHUB_JOB: "verify-and-stage",
-  };
-  await assert.doesNotReject(verifyCurrentPublicationFromEnvironment(environment, {
-    fetchImpl: failedPreSubmissionApiFixture(),
-  }));
-
-  for (const invalidEnvironment of [
-    { ...environment, CURRENT_RECEIPT_ARTIFACT_ID: undefined },
-    { ...environment, CURRENT_RECEIPT_ARTIFACT_ID: "not-an-artifact-id" },
-    { ...environment, CURRENT_RECEIPT_ARTIFACT_ID: "10267367635" },
-    { ...environment, CURRENT_RECEIPT_ARTIFACT_ID: undefined, CURRENT_RECEIPT_ID: "10267367634" },
-  ]) {
-    await assert.rejects(verifyCurrentPublicationFromEnvironment(invalidEnvironment, {
-      fetchImpl: failedPreSubmissionApiFixture(),
-    }), /not the reviewed incident artifact/);
-  }
-});
-
-test("new final-gate failures remain definitive non-submissions without weakening ordinary missing-ID failures", async () => {
-  const prior = failedPreSubmissionReceipt();
-  const receipt = publicationDeploymentReceiptSchema.parse({
-    ...prior,
-    attemptPhase: "pre-submission",
-    pagesStatus: "final-gate",
-    reconciliation: { outcome: "not-submitted", publicReleaseId: "NONE_404" },
-    uncertain: false,
-  });
-  const result = await verifyCurrentPublication({
-    operation: "promote",
-    token: "token",
-    currentReceipt: receipt,
-    sourceManifest: { releaseId: "e".repeat(64) },
-    sourceIdentity: { artifactId: 999, artifactDigest, manifestSha256: "1".repeat(64) },
-    fetchImpl: deploymentApiFixture({ publicReleaseId: "NONE_404", deployments: [] }),
-  });
-  assert.deepEqual(result, { state: "definitive-pre-submission", publicReleaseId: "NONE_404" });
-});
-
-test("first-release recovery is authorized from the exact failed current attempt", async () => {
-  const failedLive = deploymentReceipt({
-    releaseId: "b".repeat(64),
-    repositoryDeploymentId: 606,
-    deploymentId: "pages-failed-smoke",
-    sourceArtifactId: 900,
-    knownGood: false,
-    repositoryState: "failure",
-    publicProductVerified: false,
-  });
-  const recovery = failedLive.recovery!;
-  const result = await verifyCurrentPublication({
-    operation: "first-release-recovery",
-    token: "token",
-    currentReceipt: failedLive,
-    rollbackTargetReceipt: null,
-    sourceManifest: { releaseId: recovery.releaseId, releaseKind: "first-release-recovery" },
-    sourceIdentity: { artifactId: recovery.artifactId, artifactDigest: recovery.artifactDigest, manifestSha256: recovery.manifestSha256 },
-    fetchImpl: deploymentApiFixture({ publicReleaseId: failedLive.releaseId, receipts: [failedLive] }),
-  });
-  assert.equal(result.state, "reconciled-current-attempt");
-
-  const ledgerlessFailure = publicationDeploymentReceiptSchema.parse({
-    ...failedLive,
-    deploymentId: null,
-    pageUrl: null,
-    attemptPhase: "submission-uncertain",
-    repositoryDeployment: { id: null, state: "unknown", statusRecorded: false },
-    pagesAccepted: false,
-    pagesStatus: null,
-    markerVerified: false,
-    publicProductVerified: false,
-    reconciliation: { outcome: "submission-uncertain", publicReleaseId: "NONE_404" },
-    knownGood: false,
-    uncertain: true,
-  });
-  await assert.rejects(verifyCurrentPublication({
-    operation: "first-release-recovery",
-    token: "token",
-    currentReceipt: ledgerlessFailure,
-    rollbackTargetReceipt: null,
-    sourceManifest: { releaseId: recovery.releaseId, releaseKind: "first-release-recovery" },
-    sourceIdentity: { artifactId: recovery.artifactId, artifactDigest: recovery.artifactDigest, manifestSha256: recovery.manifestSha256 },
-    fetchImpl: deploymentApiFixture({ publicReleaseId: "NONE_404", deployments: [] }),
-  }), /no exact repository deployment ledger match/);
-
-  const newerAttempt = deploymentReceipt({
-    releaseId: "c".repeat(64),
-    repositoryDeploymentId: 607,
-    deploymentId: "pages-newer-c",
-    sourceArtifactId: 901,
-    knownGood: false,
-    repositoryState: "failure",
-    publicProductVerified: false,
-  });
-  await assert.rejects(verifyCurrentPublication({
-    operation: "first-release-recovery",
-    token: "token",
-    currentReceipt: ledgerlessFailure,
-    rollbackTargetReceipt: null,
-    sourceManifest: { releaseId: recovery.releaseId, releaseKind: "first-release-recovery" },
-    sourceIdentity: { artifactId: recovery.artifactId, artifactDigest: recovery.artifactDigest, manifestSha256: recovery.manifestSha256 },
-    fetchImpl: deploymentApiFixture({
-      publicReleaseId: "NONE_404",
-      receipts: [newerAttempt, failedLive],
-      deployments: [repositoryDeploymentForReceipt(newerAttempt), repositoryDeploymentForReceipt(failedLive)],
-    }),
-  }), /historical rather than current/);
-});
-
-test("repository deployment ledger uses supported contracts and recovers an accepted Pages ID", async () => {
-  const payload = publicationLedgerPayload({ promotionRunId: 700, runAttempt: 1, releaseId: "f".repeat(64), sourceArtifactId: 701, stagedArtifactId: 702 });
-  const requests: Array<{ url: string; method: string }> = [];
-  const deployment = { id: 703, sha: sourceSha, task: "lionlog-pages-release", environment: "github-pages", transient_environment: false, production_environment: true, payload: { ...payload } };
-  const createdId = await createRepositoryDeploymentLedger({
-    token: "token",
-    workflowSha: sourceSha,
-    payload,
-    fetchImpl: async (input, init) => {
-      requests.push({ url: String(input), method: init?.method ?? "GET" });
-      return Response.json(deployment, { status: 201 });
-    },
-  });
-  assert.equal(createdId, 703);
-  assert.deepEqual(requests, [{ url: "https://api.github.com/repos/CrunchyBrunch/lionlog/deployments", method: "POST" }]);
-
-  const recovered = await recoverRepositoryDeploymentAttempt({
-    token: "token",
-    expectedPayload: payload,
-    expectedWorkflowSha: sourceSha,
-    now: () => Date.parse("2026-09-07T12:00:00.000Z"),
-    fetchImpl: async (input) => {
-      const url = String(input);
-      if (/\/deployments\?task=/.test(url)) return Response.json([deployment]);
-      if (url.endsWith("/deployments/703")) return Response.json(deployment);
-      if (url.includes("/deployments/703/statuses")) return Response.json([{
-        state: "in_progress",
-        deployment_url: "https://api.github.com/repos/CrunchyBrunch/lionlog/deployments/703",
-        log_url: "https://api.github.com/repos/CrunchyBrunch/lionlog/pages/deployments/pages-accepted",
-      }]);
-      if (url.endsWith("/pages/deployments/pages-accepted")) return Response.json({ id: "pages-accepted", status: "succeed" });
-      return new Response(null, { status: 404 });
-    },
-  });
-  assert.equal(recovered.attempt.repositoryDeploymentId, 703);
-  assert.equal(recovered.attempt.deploymentId, "pages-accepted");
-  assert.equal(recovered.attempt.phase, "terminal");
-  assert.equal(recovered.attempt.uncertain, false);
-
-  const createdWithoutStatus = await recoverRepositoryDeploymentAttempt({
-    token: "token",
-    expectedPayload: payload,
-    expectedWorkflowSha: sourceSha,
-    fetchImpl: async (input) => {
-      const url = String(input);
-      if (/\/deployments\?task=/.test(url)) return Response.json([deployment]);
-      if (/\/deployments\/703$/.test(url)) return Response.json(deployment);
-      if (/\/deployments\/703\/statuses\?/.test(url)) return Response.json([]);
-      return new Response(null, { status: 404 });
-    },
-  });
-  assert.equal(createdWithoutStatus.attempt.repositoryDeploymentId, 703);
-  assert.equal(createdWithoutStatus.attempt.phase, "submission-uncertain");
-  assert.equal(createdWithoutStatus.repositoryState, "pending");
-  assert.equal(createdWithoutStatus.repositoryStatusRecorded, false);
-});
-
-test("repository deployment history is complete within a fixed bound and fails closed when truncated", async () => {
-  const deployment = (id: number) => ({ id });
-  const pages = [
-    Array.from({ length: 100 }, (_, index) => deployment(1_000 - index)),
-    [deployment(900)],
-  ];
-  const requested: string[] = [];
-  const history = await readRepositoryDeploymentHistory({
-    token: "token",
-    fetchImpl: async (input) => {
-      const url = new URL(String(input));
-      requested.push(url.href);
-      return Response.json(pages[Number(url.searchParams.get("page")) - 1] ?? []);
-    },
-  });
-  assert.equal(history.length, 101);
-  assert.deepEqual(requested.map((url) => new URL(url).searchParams.get("page")), ["1", "2"]);
-
-  await assert.rejects(readRepositoryDeploymentHistory({
-    token: "token",
-    fetchImpl: async (input) => {
-      const page = Number(new URL(String(input)).searchParams.get("page"));
-      return Response.json(Array.from({ length: 100 }, (_, index) => deployment(page * 1_000 + index)));
-    },
-  }), /exceeds the 1000-entry verification bound/);
-  await assert.rejects(readRepositoryDeploymentHistory({
-    token: "token",
-    fetchImpl: async () => new Response(null, { status: 500 }),
-  }), /unavailable/);
-});
-
-test("ordinary rollback can restore an exact known-good app-only recovery after a later live failure", async () => {
-  const appOnly = deploymentReceipt({
-    releaseId: "9".repeat(64),
-    releaseKind: "first-release-recovery",
-    operation: "first-release-recovery",
-    repositoryDeploymentId: 801,
-    deploymentId: "pages-app-only-a",
-    sourceArtifactId: 455,
-    sourceArtifactDigest: `sha256:${"7".repeat(64)}`,
-    sourceManifestSha256: "8".repeat(64),
-  });
-  const failedLive = deploymentReceipt({
-    releaseId: "c".repeat(64),
-    repositoryDeploymentId: 802,
-    deploymentId: "pages-live-c",
-    sourceArtifactId: 901,
-    knownGood: false,
-    repositoryState: "failure",
-    publicProductVerified: false,
-    previous: appOnly,
-  });
-  const result = await verifyCurrentPublication({
-    operation: "rollback",
-    token: "token",
-    currentReceipt: failedLive,
-    rollbackTargetReceipt: appOnly,
-    sourceManifest: { releaseId: appOnly.releaseId, releaseKind: "first-release-recovery", site: { tarSha256: appOnly.source.siteTarSha256 } },
-    sourceIdentity: { artifactId: appOnly.source.artifactId, artifactDigest: appOnly.source.artifactDigest, manifestSha256: appOnly.source.manifestSha256 },
-    fetchImpl: deploymentApiFixture({ publicReleaseId: failedLive.releaseId, receipts: [failedLive, appOnly] }),
-  });
-  assert.equal(result.state, "reconciled-current-attempt");
-});
-
-test("exact Pages adapter submits once, returns the deployment ID, and never retries uncertainty", async () => {
-  const requests: string[] = [];
-  const accepted: unknown[] = [];
-  const result = await deployExactPagesArtifact({
-    artifactId: 456,
-    buildVersion: sourceSha,
-    repositoryDeploymentId: 77,
-    githubToken: "token",
-    oidcToken: "oidc",
-    approvalExpiresAt: "2099-01-01T00:00:00.000Z",
-    wait: async () => {},
-    recordAccepted: async (value: unknown) => { accepted.push(value); },
-    fetchImpl: async (input, init) => {
-      requests.push(`${init?.method ?? "GET"} ${String(input)}`);
-      return init?.method === "POST"
-        ? Response.json({
-          id: "deployment-1",
-          status_url: "https://api.github.com/repos/CrunchyBrunch/lionlog/pages/deployments/deployment-1/status",
-          page_url: "https://crunchybrunch.github.io/lionlog/",
-        })
-        : Response.json({ status: "succeed" });
-    },
-  });
-  assert.equal(result.deploymentId, "deployment-1");
-  assert.deepEqual(accepted, [{ repositoryDeploymentId: 77, pagesDeploymentId: "deployment-1" }]);
-  assert.equal(requests.filter((request) => request.startsWith("POST ")).length, 1);
-  let attempts = 0;
-  await assert.rejects(deployExactPagesArtifact({
-    artifactId: 456,
-    buildVersion: sourceSha,
-    repositoryDeploymentId: 77,
-    githubToken: "token",
-    oidcToken: "oidc",
-    approvalExpiresAt: "2099-01-01T00:00:00.000Z",
-    fetchImpl: async () => { attempts += 1; throw new Error("connection reset"); },
-  }), /uncertain/);
-  assert.equal(attempts, 1);
-  const submissionEvidence: unknown[] = [];
-  await assert.rejects(deployExactPagesArtifact({
-    artifactId: 456,
-    buildVersion: sourceSha,
-    repositoryDeploymentId: 77,
-    githubToken: "token",
-    oidcToken: "oidc",
-    approvalExpiresAt: "2099-01-01T00:00:00.000Z",
-    recordAttempt: async (value: unknown) => { submissionEvidence.push(value); },
-    fetchImpl: async () => new Response(null, { status: 503 }),
-  }), /outcome is uncertain/);
-  assert.deepEqual(
-    Object.fromEntries(Object.entries(submissionEvidence.at(-1) as Record<string, unknown>).filter(([key]) => ["phase", "status", "uncertain", "deploymentId"].includes(key))),
-    { phase: "submission-uncertain", deploymentId: null, status: "http-503", uncertain: true },
-  );
-  await assert.rejects(deployExactPagesArtifact({
-    artifactId: 456,
-    buildVersion: sourceSha,
-    repositoryDeploymentId: 77,
-    githubToken: "token",
-    oidcToken: "oidc",
-    approvalExpiresAt: "2099-01-01T00:00:00.000Z",
-    wait: async () => {},
-    fetchImpl: async (_input, init) => init?.method === "POST"
-      ? Response.json({
-        id: "deployment-2",
-        status_url: "https://api.github.com/repos/CrunchyBrunch/lionlog/pages/deployments/deployment-2/status",
-        page_url: "https://crunchybrunch.github.io/lionlog-lookalike/",
-      })
-      : Response.json({ status: "succeed" }),
-  }), /unexpected public URL/);
-  const evidence: unknown[] = [];
-  await assert.rejects(deployExactPagesArtifact({
-    artifactId: 456,
-    buildVersion: sourceSha,
-    repositoryDeploymentId: 77,
-    githubToken: "token",
-    oidcToken: "oidc",
-    approvalExpiresAt: "2099-01-01T00:00:00.000Z",
-    wait: async () => {},
-    recordAttempt: async (value: unknown) => { evidence.push(value); },
-    fetchImpl: async (_input, init) => init?.method === "POST"
-      ? Response.json({
-        id: "deployment-evidence",
-        status_url: "https://api.github.com/repos/CrunchyBrunch/lionlog/pages/deployments/deployment-evidence/status",
-        page_url: "https://crunchybrunch.github.io/lionlog/",
-      })
-      : new Response(null, { status: 503 }),
-  }), /deployment-evidence/);
-  assert.equal((evidence.at(-1) as { deploymentId: string }).deploymentId, "deployment-evidence");
-  const timeoutEvidence: unknown[] = [];
-  await assert.rejects(deployExactPagesArtifact({
-    artifactId: 456,
-    buildVersion: sourceSha,
-    repositoryDeploymentId: 77,
-    githubToken: "token",
-    oidcToken: "oidc",
-    approvalExpiresAt: "2099-01-01T00:00:00.000Z",
-    timeoutMs: 0,
-    recordAttempt: async (value: unknown) => { timeoutEvidence.push(value); },
-    fetchImpl: async () => Response.json({
-      id: "deployment-timeout",
-      status_url: "https://api.github.com/repos/CrunchyBrunch/lionlog/pages/deployments/deployment-timeout/status",
-      page_url: "https://crunchybrunch.github.io/lionlog/",
-    }),
-  }), /timed out/);
-  assert.equal((timeoutEvidence.at(-1) as { deploymentId: string }).deploymentId, "deployment-timeout");
-  let clockReads = 0;
-  let submissions = 0;
-  const temporalEvidence: unknown[] = [];
-  await assert.rejects(deployExactPagesArtifact({
-    artifactId: 456,
-    buildVersion: sourceSha,
-    repositoryDeploymentId: 77,
-    githubToken: "token",
-    oidcToken: "oidc",
-    approvalExpiresAt: "2026-09-07T12:00:01.000Z",
-    now: () => new Date("2026-09-07T12:00:00.000Z").getTime() + (clockReads++ * 2_000),
-    recordAttempt: async (value: unknown) => { temporalEvidence.push(value); },
-    fetchImpl: async () => { submissions += 1; return Response.json({}); },
-  }), /expired before submission/);
-  assert.equal(submissions, 0);
-  assert.equal((temporalEvidence.at(-1) as { phase: string } | undefined)?.phase, "submission-rejected");
-});
-
-test("final promotion gate blocks state and time mutations before OIDC and submission", async () => {
-  const expected = {
-    operation: "promote",
-    promotionWorkflowSha: sourceSha,
-    approvalExpiresAt: "2026-09-07T15:00:00.000Z",
-    minimumFreshUntil: "2026-09-07T14:00:00.000Z",
-    source: { runId: 123, sourceSha },
-    ci: { runId: 999 },
-    site: { tarSha256: "c".repeat(64), bytes: 10, inventory: [{ path: "index.html", bytes: 10, sha256: "d".repeat(64) }] },
-    artifacts: [
-      { id: 456, digest: artifactDigest, runId: 123, headSha: sourceSha, role: "source" },
-      { id: 789, digest: `sha256:${"e".repeat(64)}`, runId: 321, headSha: sourceSha, role: "staged" },
-    ],
-  };
-  const actual = {
-    checkoutSha: sourceSha,
-    mainSha: sourceSha,
-    sourceRun: { id: 123, workflow_id: 347_085_467, path: ".github/workflows/build-live-menu-artifact.yml", event: "workflow_dispatch", head_sha: sourceSha, head_branch: "main", run_attempt: 1, status: "completed", conclusion: "success" },
-    ciRun: { id: 999, workflow_id: 346_680_782, path: ".github/workflows/ci.yml", event: "push", head_sha: sourceSha, head_branch: "main", run_attempt: 1, status: "completed", conclusion: "success" },
-    ciJobs: [{ name: "verify", head_sha: sourceSha, status: "completed", conclusion: "success" }],
-    artifacts: [
-      { id: 456, digest: artifactDigest, expired: false, workflow_run: { id: 123, head_sha: sourceSha, head_branch: "main", head_repository_id: 1_346_360_244 } },
-      { id: 789, digest: "e".repeat(64), expired: false, workflow_run: { id: 321, head_sha: sourceSha, head_branch: "main", head_repository_id: 1_346_360_244 } },
-    ],
-  };
-  const run = (
-    states: typeof actual[],
-    times = [Date.parse("2026-09-07T12:00:00.000Z"), Date.parse("2026-09-07T12:00:01.000Z")],
-    currentChecks: Array<Error | null> = [null, null],
-    expectedState = expected,
-  ) => {
-    let stateRead = 0;
-    let timeRead = 0;
-    let currentRead = 0;
-    const calls = { oidc: 0, submissions: 0 };
-    const result = executeFinalPromotionGate({
-      expected: expectedState,
-      readActual: async () => states[Math.min(stateRead++, states.length - 1)],
-      verifyCurrentState: async () => {
-        const error = currentChecks[Math.min(currentRead++, currentChecks.length - 1)];
-        if (error) throw error;
-      },
-      clock: () => times[Math.min(timeRead++, times.length - 1)],
-      requestOidc: async () => { calls.oidc += 1; return "oidc"; },
-      submit: async () => { calls.submissions += 1; return "submitted"; },
-    });
-    return { result, calls };
-  };
-  const preOidcMutations: Array<{ state: typeof actual; message: RegExp }> = [
-    { state: { ...actual, mainSha: "0".repeat(40) }, message: /Main/ },
-    { state: { ...actual, sourceRun: { ...actual.sourceRun, conclusion: "failure" } }, message: /producer/ },
-    { state: { ...actual, ciRun: { ...actual.ciRun, conclusion: "failure" } }, message: /CI/ },
-    { state: { ...actual, artifacts: [{ ...actual.artifacts[0], expired: true }, actual.artifacts[1]] }, message: /Artifact/ },
-  ];
-  for (const mutation of preOidcMutations) {
-    const blocked = run([mutation.state]);
-    await assert.rejects(blocked.result, mutation.message);
-    assert.deepEqual(blocked.calls, { oidc: 0, submissions: 0 });
-  }
-  const changedAfterOidc = run([actual, { ...actual, artifacts: [{ ...actual.artifacts[0], digest: `sha256:${"0".repeat(64)}` }, actual.artifacts[1]] }]);
-  await assert.rejects(changedAfterOidc.result, /Artifact/);
-  assert.deepEqual(changedAfterOidc.calls, { oidc: 1, submissions: 0 });
-  const currentChangedAfterOidc = run([actual, actual], undefined, [null, new Error("Current deployment authority changed.")]);
-  await assert.rejects(currentChangedAfterOidc.result, /Current deployment authority/);
-  assert.deepEqual(currentChangedAfterOidc.calls, { oidc: 1, submissions: 0 });
-  const freshnessExpiredAfterOidc = run([actual, actual], [
-    Date.parse("2026-09-07T12:00:00.000Z"),
-    Date.parse("2026-09-07T12:00:01.000Z"),
-    Date.parse("2026-09-07T13:45:01.000Z"),
-  ]);
-  await assert.rejects(freshnessExpiredAfterOidc.result, /freshness/);
-  assert.deepEqual(freshnessExpiredAfterOidc.calls, { oidc: 1, submissions: 0 });
-  const approvalExpiredDuringValidation = run([actual], [
-    Date.parse("2026-09-07T12:59:58.000Z"),
-    Date.parse("2026-09-07T13:00:01.000Z"),
-  ], undefined, { ...expected, approvalExpiresAt: "2026-09-07T13:00:00.000Z" });
-  await assert.rejects(approvalExpiredDuringValidation.result, /approval expired/);
-  assert.deepEqual(approvalExpiredDuringValidation.calls, { oidc: 0, submissions: 0 });
-  const approvalExpiredDuringOidc = run([actual, actual], [
-    Date.parse("2026-09-07T12:59:58.000Z"),
-    Date.parse("2026-09-07T12:59:59.000Z"),
-    Date.parse("2026-09-07T13:00:01.000Z"),
-  ], undefined, { ...expected, approvalExpiresAt: "2026-09-07T13:00:00.000Z" });
-  await assert.rejects(approvalExpiredDuringOidc.result, /approval expired/);
-  assert.deepEqual(approvalExpiredDuringOidc.calls, { oidc: 1, submissions: 0 });
-  const approvalExpiredBeforeOidc = run(
-    [actual],
-    [Date.parse("2026-09-07T13:00:01.000Z")],
-    undefined,
-    { ...expected, approvalExpiresAt: "2026-09-07T13:00:00.000Z" },
-  );
-  await assert.rejects(approvalExpiredBeforeOidc.result, /approval expired/);
-  assert.deepEqual(approvalExpiredBeforeOidc.calls, { oidc: 0, submissions: 0 });
-  const accepted = run([actual, actual]);
-  assert.equal(await accepted.result, "submitted");
-  assert.deepEqual(accepted.calls, { oidc: 1, submissions: 1 });
-});
-
-test("final promotion state reader uses only exact approved run and artifact identities", async () => {
-  const expected = {
-    source: { runId: 123 },
-    ci: { runId: 999 },
-    artifacts: [{ id: 456 }, { id: 789 }],
-  };
-  const requested: string[] = [];
-  const state = await readFinalPromotionState({
-    expected,
-    githubToken: "token",
-    checkoutSha: sourceSha,
-    fetchImpl: async (input) => {
-      const url = String(input);
-      requested.push(url);
-      if (url.endsWith("/commits/main")) return Response.json({ sha: sourceSha });
-      if (url.endsWith("/actions/runs/123")) return Response.json({ id: 123 });
-      if (url.endsWith("/actions/runs/999")) return Response.json({ id: 999 });
-      if (url.endsWith("/actions/runs/999/jobs?per_page=100")) return Response.json({ jobs: [{ name: "verify" }] });
-      const artifact = url.match(/\/actions\/artifacts\/(\d+)$/);
-      if (artifact) return Response.json({ id: Number(artifact[1]) });
-      return new Response(null, { status: 404 });
-    },
-  });
-  assert.equal(state.ciRun.id, 999);
-  assert.equal(requested.some((url) => url.includes("workflows/") || url.includes("head_sha=")), false);
-  assert.deepEqual(requested.filter((url) => url.includes("/actions/artifacts/")).sort(), [
-    "https://api.github.com/repos/CrunchyBrunch/lionlog/actions/artifacts/456",
-    "https://api.github.com/repos/CrunchyBrunch/lionlog/actions/artifacts/789",
-  ]);
-});
-
-test("known-good receipts require the complete served inventory, not only the marker", async () => {
-  const marker = Buffer.from("marker");
-  const index = Buffer.from("index");
-  const manifest = {
-    releaseId: "f".repeat(64),
-    target: { origin: "https://crunchybrunch.github.io", basePath: "/lionlog/" },
-    site: { inventory: [
-      { path: "index.html", bytes: index.byteLength, sha256: sha256(index) },
-      { path: "release.json", bytes: marker.byteLength, sha256: sha256(marker) },
-    ] },
-  };
-  await assert.rejects(verifyPublicSite({
-    manifest,
-    fetchImpl: async (input: URL | RequestInfo) => String(input).endsWith("release.json")
-      ? new Response(marker)
-      : new Response("broken"),
-  }), /index.html/);
-  const input = {
-    recordedAt: "2026-09-07T12:30:00.000Z",
-    operation: "promote",
+  assert.equal(validated.release.coverage, "complete");
+  assert.equal(validated.site.inventory.length > 5, true);
+  assert.deepEqual(await selectBrowserVerificationContext(liveBundle), {
+    contextVersion: "lionlog.pages-browser-context.v1",
     releaseId: manifest.releaseId,
-    releaseKind: "live",
-    previousKnownGoodReleaseId: "NONE_FIRST_DEPLOYMENT",
-    previousKnownGoodRepositoryDeploymentId: "NONE_FIRST_DEPLOYMENT",
-    previousKnownGoodPagesDeploymentId: "NONE_FIRST_DEPLOYMENT",
-    workflowSha: sourceSha,
-    approvalExpiresAt: "2026-09-07T13:00:00.000Z",
-    sourceArtifactId: 456,
-    sourceArtifactDigest: artifactDigest,
-    sourceManifestSha256: "d".repeat(64),
-    sourceSiteTarSha256: "c".repeat(64),
-    recovery: { releaseId: "9".repeat(64), manifestSha256: "8".repeat(64), artifactId: 455, artifactDigest: `sha256:${"7".repeat(64)}` },
-    stagedArtifactId: 789,
-    stagedArtifactDigest: `sha256:${"e".repeat(64)}`,
-    stagedArtifactExpiresAt: "2026-12-01T00:00:00.000Z",
-    runId: 321,
-    runAttempt: 1,
-    publicProductVerified: false,
-    markerVerified: true,
-    publicReleaseId: manifest.releaseId,
-    repositoryState: "success",
-    repositoryStatusRecorded: true,
-    attempt: { phase: "terminal", repositoryDeploymentId: 1234, deploymentId: "deployment-1", status: "succeed", uncertain: false },
-  };
-  assert.equal(createDeploymentReceipt(input).knownGood, false);
-  const completeReceipt = createDeploymentReceipt({ ...input, publicProductVerified: true });
-  assert.equal(completeReceipt.knownGood, true);
-  assert.equal(publicationDeploymentReceiptSchema.safeParse(completeReceipt).success, true);
-  const collectorDependencyFailure = createDeploymentReceipt({
-    ...input,
-    markerVerified: false,
-    publicProductVerified: false,
-    repositoryState: "unknown",
-    repositoryStatusRecorded: false,
-    attempt: { phase: "status-uncertain", repositoryDeploymentId: 1234, deploymentId: "deployment-1", status: "collector-unavailable", uncertain: true },
+    shellRevision: sourceSha,
+    serviceDate: "2026-09-17",
+    hallId: PSU_RELEASE_HALL_IDS[0],
+    mealPeriodId: "lunch",
+    snapshotId: catalogSnapshotId(await readFile(path.join(liveSite, "menu-data", "v2", "catalog.json"), "utf8")),
+    expectedItemCount: 1,
+    expectedFirstFoodName: "Fixture Food",
   });
-  assert.equal(collectorDependencyFailure.knownGood, false);
-  assert.equal(collectorDependencyFailure.uncertain, true);
-  assert.equal(publicationDeploymentReceiptSchema.safeParse(collectorDependencyFailure).success, true);
-  const preSubmissionFailure = createDeploymentReceipt({
-    ...input,
-    markerVerified: false,
-    publicProductVerified: false,
-    publicReleaseId: "NONE_404",
-    repositoryState: "unknown",
-    repositoryStatusRecorded: false,
-    attempt: { phase: "pre-submission", repositoryDeploymentId: null, deploymentId: null, status: "final-gate", uncertain: false },
-  });
-  assert.equal(preSubmissionFailure.attemptPhase, "pre-submission");
-  assert.equal(preSubmissionFailure.reconciliation.outcome, "not-submitted");
-  assert.equal(preSubmissionFailure.knownGood, false);
-  assert.equal(preSubmissionFailure.uncertain, false);
-  assert.equal(publicationDeploymentReceiptSchema.safeParse(preSubmissionFailure).success, true);
-  assert.equal(createDeploymentReceipt({
-    ...input,
-    publicProductVerified: true,
-    attempt: { ...input.attempt, phase: "accepted" },
-  }).knownGood, false);
-  assert.throws(() => createDeploymentReceipt({
-    ...input,
-    attempt: { ...input.attempt, phase: "invented" },
-  }), /phase is invalid/);
 });
 
-async function writeFieldReleaseSite(root: string, policy: { freshForMs: number; retainForMs: number }): Promise<void> {
-  await writeRecoverySite(root);
-  const retrievedAt = new Date("2026-09-07T11:30:00.000Z");
-  const cachedAt = new Date("2026-09-07T12:00:00.000Z");
-  const snapshots = PSU_RELEASE_HALL_IDS.map((hallId) => {
+test("protected final check rejects main drift, artifact drift, expiration, and unresolved prior submissions", () => {
+  const summary = summaryFixture();
+  const emptyHistory = { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] };
+  assert.equal(verifyFinalState({ summary, state: finalState(), incidents: emptyHistory, now }).release.id, hash);
+  assert.throws(() => verifyFinalState({ summary, state: { ...finalState(), main: { sha: "f".repeat(40) } }, incidents: emptyHistory, now }), /main drifted/);
+  assert.throws(() => verifyFinalState({
+    summary,
+    state: { ...finalState(), stagedArtifacts: [{ ...finalState().stagedArtifacts[0], digest: `sha256:${"e".repeat(64)}` }] },
+    incidents: emptyHistory,
+    now,
+  }), /Staged Pages artifact/);
+  assert.throws(() => verifyFinalState({
+    summary: { ...summary, release: { ...summary.release, earliestRetainUntil: "2026-09-17T11:59:00.000Z" } },
+    state: finalState(), incidents: emptyHistory, now,
+  }), /retention.*headroom/);
+  const fixtureIncidentEvidence = {
+    workflowId: 347_992_874,
+    workflowPath: ".github/workflows/deploy-github-pages.yml",
+    event: "workflow_dispatch",
+    headBranch: "main",
+    status: "completed",
+    conclusion: "failure",
+    jobs: [{
+      jobId: 901, runId: 99, runAttempt: 1, headSha: workflowSha, jobName: "deploy", jobStatus: "completed", jobConclusion: "failure",
+      steps: [{ stepNumber: 1, stepName: "Deploy fixture", stepStatus: "completed", stepConclusion: "failure" }],
+    }],
+  };
+  const unresolved = priorAttempt({ runId: 99, conclusion: "failure", deploymentConclusion: "failure", incidentEvidence: fixtureIncidentEvidence });
+  assert.throws(() => verifyFinalState({ summary, state: { ...finalState(), priorAttempts: [unresolved] }, incidents: emptyHistory, now }), /unknown or unresolved/);
+  assert.doesNotThrow(() => verifyFinalState({
+    summary,
+    state: { ...finalState(), priorAttempts: [unresolved] },
+    incidents: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [{
+      runId: 99, runAttempt: 1, workflowSha, candidateArtifactId: 1, stagedArtifactId: 2, repositoryDeploymentId: 3,
+      collectorEvidence: fixtureIncidentEvidence,
+      outcome: "resolved-unknown-no-publication", publicReleaseId: "NONE_404", checkedAt: "2026-09-17T11:00:00.000Z",
+      note: "Reviewed fixture incident with no publication.",
+    }] },
+    now,
+  }));
+});
+
+test("flat receipt becomes known-good only after official success and all public checks", () => {
+  const good = createFlatReceipt({
+    summary: summaryFixture(),
+    recordedAt: now.toISOString(),
+    official: { submissionStarted: true, result: "success", pageUrl: "https://crunchybrunch.github.io/lionlog/", deploymentId: null },
+    publicChecks: { markerVerified: true, inventoryVerified: true, browserVerified: true },
+  });
+  assert.equal(good.knownGood, true);
+  assert.equal(good.unresolved, false);
+  const failed = createFlatReceipt({
+    summary: summaryFixture(),
+    recordedAt: now.toISOString(),
+    official: { submissionStarted: true, result: "failure", pageUrl: null, deploymentId: null },
+    publicChecks: { markerVerified: false, inventoryVerified: false, browserVerified: false },
+  });
+  assert.equal(failed.knownGood, false);
+  assert.equal(failed.unresolved, true);
+});
+
+test("mobile PWA verifier requires attribution, no overflow, and zero warnings/errors", () => {
+  const expected = browserContext();
+  const page = {
+    url: "https://crunchybrunch.github.io/lionlog/",
+    title: "Build a meal | LionLog",
+    text: "LionLog Retrieved one minute ago. LionLog is independent and is not affiliated with or endorsed by Penn State.",
+    scrollWidth: 390,
+    clientWidth: 390,
+    shellRevision: workflowSha,
+    publicReleaseId: hash,
+    selectedHall: "east",
+    selectedPeriod: "lunch",
+    selectedDate: "2026-09-17",
+    itemNames: ["Fixture Food"],
+    sourceState: "Live PSU snapshots",
+    livePressed: true,
+    samplePressed: false,
+  };
+  assert.doesNotThrow(() => assertPageState(page, expected));
+  assert.doesNotThrow(() => assertPageState({ ...page, publicReleaseId: undefined }, expected, { offline: true }));
+  assert.throws(() => assertPageState({ ...page, scrollWidth: 391 }, expected), /overflows/);
+  assert.throws(() => assertPageState({ ...page, text: "LionLog" }, expected), /retrieval time/);
+  assert.throws(() => assertPageState({ ...page, itemNames: [] }, expected), /identity\/count/);
+  assert.throws(() => assertPageState({ ...page, samplePressed: true, livePressed: false }, expected), /sample/);
+  assert.doesNotThrow(() => assertNoBrowserDiagnostics([{ kind: "console", type: "log" }]));
+  assert.throws(() => assertNoBrowserDiagnostics([{ kind: "console", type: "warning" }]), /diagnostics/);
+  assert.throws(() => assertNoBrowserDiagnostics([{ kind: "service-worker", text: "install failed" }]), /diagnostics/);
+});
+
+test("public predecessor authorization is exact and fail-closed", async () => {
+  assert.deepEqual(assertExpectedPredecessor(FIRST_PUBLICATION, { state: "absent", releaseId: null }), { state: "absent", releaseId: null });
+  assert.deepEqual(assertExpectedPredecessor(hash, { state: "present", releaseId: hash }), { state: "present", releaseId: hash });
+  assert.throws(() => assertExpectedPredecessor(FIRST_PUBLICATION, { state: "present", releaseId: hash }), /already exists/);
+  assert.throws(() => assertExpectedPredecessor(hash, { state: "absent", releaseId: null }), /absent or differs/);
+  assert.throws(() => assertExpectedPredecessor(hash, { state: "present", releaseId: "e".repeat(64) }), /absent or differs/);
+  await assert.rejects(observePublicRelease(async () => new Response("unavailable", { status: 503 })), /unavailable or ambiguous/);
+  await assert.rejects(observePublicRelease(async () => new Response("not json", {
+    status: 200,
+    headers: { "content-type": "text/plain" },
+  })), /unavailable or ambiguous|content type/);
+});
+
+test("final gate requires exact predecessor and time headroom", () => {
+  const summary = summaryFixture();
+  const incidents = { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] };
+  assert.throws(() => verifyFinalState({
+    summary,
+    state: { ...finalState(), publicPredecessor: { state: "present", releaseId: hash } },
+    incidents,
+    now,
+  }), /already exists/);
+  assert.throws(() => verifyFinalState({
+    summary: { ...summary, authorization: { ...summary.authorization, approvalExpiresAt: "2026-09-17T12:14:59.999Z" } },
+    state: finalState(), incidents, now,
+  }), /approval expired|headroom/);
+  assert.throws(() => verifyFinalState({
+    summary: { ...summary, release: { ...summary.release, earliestFreshUntil: "2026-09-17T12:14:59.999Z" } },
+    state: finalState(), incidents, now,
+  }), /freshness/);
+  assert.throws(() => verifyFinalState({
+    summary,
+    state: {
+      ...finalState(),
+      candidateArtifact: { ...finalState().candidateArtifact, expires_at: "2026-09-17T12:14:59.999Z" },
+    },
+    incidents,
+    now,
+  }), /Candidate artifact state drifted/);
+});
+
+test("only known-good or affirmative pre-submission failures clear attempt history", () => {
+  const summary = summaryFixture();
+  const incidents = { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] };
+  const knownGood = priorAttempt({
+    conclusion: "success",
+    finalGateConclusion: "success",
+    submissionBoundaryConclusion: "success",
+    deploymentConclusion: "success",
+    receipt: receiptEvidence({ submissionStarted: true, result: "success", knownGood: true, unresolved: false, publicVerified: true }),
+  });
+  const preSubmission = priorAttempt({
+    runId: 98,
+    conclusion: "failure",
+    finalGateConclusion: "failure",
+    submissionBoundaryConclusion: "skipped",
+    deploymentConclusion: "skipped",
+    receipt: receiptEvidence({ runId: 98, submissionStarted: false, result: "failure", knownGood: false, unresolved: false, publicVerified: false }),
+  });
+  assert.doesNotThrow(() => verifyFinalState({ summary, state: { ...finalState(), priorAttempts: [knownGood, preSubmission] }, incidents, now }));
+  const unsafe = [
+    priorAttempt({ status: "completed", conclusion: "cancelled", receipt: null }),
+    priorAttempt({ conclusion: "failure", receipt: null }),
+    priorAttempt({ status: "in_progress", conclusion: null, jobsComplete: false }),
+    priorAttempt({ runAttempt: 2, conclusion: "failure", finalGateConclusion: "failure", submissionBoundaryConclusion: "skipped", deploymentConclusion: "skipped", receipt: null }),
+  ];
+  for (const attempt of unsafe) {
+    assert.throws(() => verifyFinalState({ summary, state: { ...finalState(), priorAttempts: [attempt] }, incidents, now }), /incomplete|unknown or unresolved/);
+  }
+});
+
+test("real legacy pre-submission identities reconcile only against exact affirmative evidence", async () => {
+  const incidents = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
+  const attempts = [legacyAttempt346(), legacyAttempt348(), legacyAttempt352()];
+  assert.doesNotThrow(() => verifyFinalState({
+    summary: summaryFixture(), state: { ...finalState(), priorAttempts: attempts }, incidents, now,
+  }));
+
+  const altered = structuredClone(attempts[0]);
+  altered.legacyEvidence.deploymentBoundary!.stepConclusion = "success";
+  const missing = structuredClone(attempts[0]);
+  missing.legacyEvidence.validationFailure = null;
+  const incomplete = { ...attempts[0], jobsComplete: false };
+  const mismatched = { ...attempts[0], workflowSha: "f".repeat(40) };
+  const changedIncidentEvidence = structuredClone(attempts[2]);
+  changedIncidentEvidence.incidentEvidence!.jobs[1].steps[9].stepConclusion = "success";
+  const wrongWorkflowId = { ...attempts[0], workflowId: 1 };
+  const wrongWorkflowPath = { ...attempts[0], workflowPath: ".github/workflows/other.yml" };
+  const wrongEvent = { ...attempts[0], event: "push" };
+  const wrongBranch = { ...attempts[0], headBranch: "feature" };
+  const missingIncidentEvidence = { ...attempts[2], incidentEvidence: null };
+  const outerStateMutations = attempts.flatMap((attempt) => [
+    { ...attempt, status: undefined as unknown as string },
+    { ...attempt, status: "in_progress" },
+    { ...attempt, status: "completed", conclusion: "success" },
+    { ...attempt, status: "completed", conclusion: null },
+    { ...attempt, status: "queued", conclusion: "failure" },
+    { ...attempt, status: "unexpected", conclusion: "failure" },
+  ]);
+  for (const attempt of [altered, missing, incomplete, mismatched, changedIncidentEvidence, wrongWorkflowId, wrongWorkflowPath, wrongEvent, wrongBranch, missingIncidentEvidence, ...outerStateMutations]) {
+    assert.throws(() => verifyFinalState({
+      summary: summaryFixture(), state: { ...finalState(), priorAttempts: [attempt] }, incidents, now,
+    }), /incomplete|unknown or unresolved/);
+  }
+
+  const duplicate = { ...incidents, incidents: [...incidents.incidents, structuredClone(incidents.incidents[0])] };
+  assert.throws(() => verifyFinalState({
+    summary: summaryFixture(), state: { ...finalState(), priorAttempts: attempts }, incidents: duplicate, now,
+  }), /invalid or duplicate/);
+  assert.throws(() => verifyFinalState({
+    summary: summaryFixture(), state: { ...finalState(), priorAttempts: [...attempts, structuredClone(attempts[1])] }, incidents, now,
+  }), /duplicate run\/attempt/);
+});
+
+test("legacy collector selects exact incident-bound evidence without fuzzy-name ambiguity", () => {
+  const job = {
+    id: 103295384726, name: "deploy", status: "completed", conclusion: "failure",
+    steps: [
+      { number: 7, name: "Perform final provenance, state, deadline, and freshness checks", status: "completed", conclusion: "failure" },
+      { number: 8, name: "Deploy exact staged artifact", status: "completed", conclusion: "skipped" },
+    ],
+  };
+  const successfulOverlappingName = {
+    id: 103295186583,
+    name: "verify-and-stage",
+    status: "completed",
+    conclusion: "success",
+    steps: [{ number: 11, name: "Verify current attempt separately from the known-good rollback target", status: "completed", conclusion: "success" }],
+  };
+  assert.deepEqual(collectLegacyEvidence([successfulOverlappingName, job], legacyAttempt346().legacyEvidence), legacyAttempt346().legacyEvidence);
+  const jobs348 = [{
+    id: 104100073427,
+    name: "verify-and-stage",
+    status: "completed",
+    conclusion: "failure",
+    steps: [{ number: 11, name: "Verify current attempt separately from the known-good rollback target", status: "completed", conclusion: "failure" }],
+  }, {
+    id: 104100243029,
+    name: "deploy",
+    status: "completed",
+    conclusion: "skipped",
+    steps: [],
+  }];
+  assert.deepEqual(collectLegacyEvidence(jobs348, legacyAttempt348().legacyEvidence), legacyAttempt348().legacyEvidence);
+  assert.throws(() => collectLegacyEvidence([job, { ...job, id: job.id + 1 }], legacyAttempt346().legacyEvidence), /ambiguous/);
+});
+
+test("attempt history binds every completed job and step to the exact requested attempt", async () => {
+  const requested: string[] = [];
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+    requested.push(url);
+    if (url.includes(`/actions/workflows/347992874/runs?`)) {
+      return jsonResponse({ total_count: 1, workflow_runs: [{ id: 77, run_attempt: 2 }] });
+    }
+    if (url.includes("/actions/runs/77/artifacts?")) return jsonResponse({ total_count: 0, artifacts: [] });
+    const attempt = url.match(/\/actions\/runs\/77\/attempts\/(\d+)(?:\?|$)/)?.[1];
+    if (attempt) return jsonResponse({
+      id: 77,
+      workflow_id: 347_992_874,
+      run_attempt: Number(attempt),
+      path: ".github/workflows/deploy-github-pages.yml",
+      event: "workflow_dispatch",
+      head_branch: "main",
+      head_sha: workflowSha,
+        status: "completed", conclusion: "failure",
+    });
+    const jobsAttempt = url.match(/\/actions\/runs\/77\/attempts\/(\d+)\/jobs\?/)?.[1];
+    if (jobsAttempt) return jsonResponse({
+      total_count: 1,
+      jobs: [{
+        id: 700 + Number(jobsAttempt),
+        name: "deploy",
+        run_id: 77,
+        run_attempt: Number(jobsAttempt),
+        head_sha: workflowSha,
+        status: "completed",
+        conclusion: "failure",
+        steps: [{ number: 1, name: "Recheck all authority immediately before submission", status: "completed", conclusion: "failure" }],
+      }],
+    });
+    return new Response("not found", { status: 404 });
+  };
+  const evidence = await collectPagesAttemptHistory({
+    repository: "CrunchyBrunch/lionlog",
+    currentRunId: 88,
+    token: "fixture-token",
+    incidentHistory: emptyIncidentHistory(),
+    fetchImpl,
+  });
+  assert.equal(evidence.length, 2);
+  assert.equal(evidence[0].jobsComplete, true);
+  assert.equal(evidence[1].jobsComplete, true);
+  assert.ok(requested.some((url) => url.includes("/attempts/1/jobs?")));
+  assert.ok(requested.some((url) => url.includes("/attempts/2/jobs?")));
+  assert.ok(!requested.some((url) => /\/actions\/runs\/77\/jobs\?/.test(url)));
+});
+
+test("all three real historical attempts collect and reconcile only with exact incident contracts", async () => {
+  const incidents = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
+  const evidence = await collectPagesAttemptHistory({
+    repository: "CrunchyBrunch/lionlog",
+    currentRunId: 999,
+    token: "fixture-token",
+    incidentHistory: incidents,
+    fetchImpl: historicalAttemptFetch(),
+  });
+  assert.deepEqual(evidence.map((attempt) => [attempt.runId, attempt.runAttempt]), [
+    [34609219734, 1], [34881025561, 1], [35221481720, 1],
+  ]);
+  assert.doesNotThrow(() => verifyFinalState({
+    summary: summaryFixture(), state: { ...finalState(), priorAttempts: evidence }, incidents, now,
+  }));
+
+  const mutations: Array<(jobs: Array<Record<string, unknown>>, runId: number) => void> = [
+    (jobs, runId) => { if (runId === 34609219734) jobs[1].run_id = 1; },
+    (jobs, runId) => { if (runId === 34609219734) jobs[1].run_attempt = 2; },
+    (jobs, runId) => { if (runId === 34609219734) jobs[1].head_sha = "f".repeat(40); },
+    (jobs, runId) => { if (runId === 34609219734) { jobs[1].status = "in_progress"; jobs[1].conclusion = null; } },
+    (jobs, runId) => { if (runId === 34609219734) (jobs[1].steps as Array<Record<string, unknown>>)[6].status = "in_progress"; },
+    (jobs, runId) => { if (runId === 34609219734) (jobs[1].steps as Array<Record<string, unknown>>)[6].conclusion = "success"; },
+    (jobs, runId) => { if (runId === 34609219734) (jobs[1].steps as Array<Record<string, unknown>>).splice(6, 1); },
+    (jobs, runId) => { if (runId === 34609219734) (jobs[1].steps as Array<Record<string, unknown>>).push(structuredClone((jobs[1].steps as Array<Record<string, unknown>>)[6])); },
+    (jobs, runId) => { if (runId === 34609219734) jobs.push(structuredClone(jobs[1])); },
+  ];
+  for (const mutate of mutations) {
+    await assert.rejects(() => collectPagesAttemptHistory({
+      repository: "CrunchyBrunch/lionlog",
+      currentRunId: 999,
+      token: "fixture-token",
+      incidentHistory: incidents,
+      fetchImpl: historicalAttemptFetch(mutate),
+    }), /invalid|missing|ambiguous|duplicate|nonterminal|contract/);
+  }
+
+  const attemptMutations: Array<(attempt: Record<string, unknown>) => void> = [
+    (attempt) => { attempt.workflow_id = 1; },
+    (attempt) => { attempt.path = ".github/workflows/other.yml"; },
+    (attempt) => { attempt.head_sha = "f".repeat(40); },
+    (attempt) => { attempt.status = "in_progress"; attempt.conclusion = null; },
+  ];
+  for (const mutateAttempt of attemptMutations) {
+    await assert.rejects(() => collectPagesAttemptHistory({
+      repository: "CrunchyBrunch/lionlog",
+      currentRunId: 999,
+      token: "fixture-token",
+      incidentHistory: incidents,
+      fetchImpl: historicalAttemptFetch(undefined, mutateAttempt),
+    }), /invalid|terminal|match/);
+  }
+});
+
+test("incident collection rejects every unknown or altered job and step before projection", async () => {
+  const incidents = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
+  const collect = (mutate: (jobs: Array<Record<string, unknown>>, runId: number) => void) => collectPagesAttemptHistory({
+    repository: "CrunchyBrunch/lionlog",
+    currentRunId: 999,
+    token: "fixture-token",
+    incidentHistory: incidents,
+    fetchImpl: historicalAttemptFetch(mutate),
+  });
+  const extraStep = (name: string, status = "completed", conclusion: string | null = "success", number = 999) =>
+    ({ number, name, status, conclusion });
+  const appendToValidation = (jobs: Array<Record<string, unknown>>, runId: number, step: Record<string, unknown>) => {
+    if (runId === 34881025561) (jobs[0].steps as Array<Record<string, unknown>>).push(step);
+  };
+  const unknownJob = (id = 104100999999) => ({
+    id, run_id: 34881025561, run_attempt: 1,
+    head_sha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64", name: "release-production",
+    status: "completed", conclusion: "success",
+    steps: [extraStep("Run actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346")],
+  });
+  const mutations: Array<(jobs: Array<Record<string, unknown>>, runId: number) => void> = [
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Run actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346")),
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Run node scripts/submit-production-release.mjs --now")),
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Dеploy exact staged artifact")),
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Write harmless summary")),
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Unknown failed validation", "completed", "failure")),
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Unknown skipped validation", "completed", "skipped")),
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Unknown queued validation", "queued", null)),
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Unknown active validation", "in_progress", null)),
+    (jobs, runId) => { if (runId === 34881025561) jobs.push(unknownJob()); },
+    (jobs, runId) => { if (runId === 34881025561) jobs.push(unknownJob(), structuredClone(unknownJob())); },
+    (jobs, runId) => appendToValidation(jobs, runId, extraStep("Step-number collision", "completed", "success", 11)),
+    (jobs, runId) => {
+      if (runId === 34881025561) {
+        const steps = jobs[0].steps as Array<Record<string, unknown>>;
+        [steps[9], steps[10]] = [steps[10], steps[9]];
+      }
+    },
+    (jobs, runId) => {
+      if (runId === 34881025561) (jobs[0].steps as Array<Record<string, unknown>>)[10].name = "Verify current attempt (renamed)";
+    },
+    (jobs, runId) => {
+      if (runId === 34881025561) (jobs[0].steps as Array<Record<string, unknown>>)[10].status = "in_progress";
+    },
+    (jobs, runId) => {
+      if (runId === 34881025561) (jobs[0].steps as Array<Record<string, unknown>>)[10].conclusion = "success";
+    },
+    (jobs, runId) => {
+      if (runId === 34881025561) {
+        const steps = jobs[0].steps as Array<Record<string, unknown>>;
+        const unknown = extraStep("Duplicated unknown evidence");
+        steps.push(unknown, structuredClone(unknown));
+      }
+    },
+  ];
+  for (const mutate of mutations) {
+    await assert.rejects(() => collect(mutate), /graph|nonterminal|duplicate|contract|invalid/);
+  }
+
+  const evidence = await collect(() => undefined);
+  assert.equal(evidence.length, 3);
+  assert.equal(evidence[1].incidentEvidence?.jobs.length, 3);
+  assert.ok(evidence[1].incidentEvidence?.jobs[0].steps.some((step) => step.stepName === "Validate immutable input shapes"));
+  assert.ok(evidence[1].incidentEvidence?.jobs[0].steps.some((step) => step.stepName === "Stage exact Pages tar for protected deployment"));
+});
+
+test("incident collection rejects later-page additions, incomplete pagination, and conflicting page copies", async () => {
+  const incidents = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
+  const original = historicalJobs(34881025561, "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64");
+  const filler = (index: number) => ({
+    id: 104101000000 + index, run_id: 34881025561, run_attempt: 1,
+    head_sha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64", name: `validation-${index}`,
+    status: "completed", conclusion: "success", steps: [],
+  });
+  const firstPage = [...original, ...Array.from({ length: 97 }, (_, index) => filler(index))];
+  const extraJob = {
+    id: 104101999999, run_id: 34881025561, run_attempt: 1,
+    head_sha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64", name: "release-production",
+    status: "completed", conclusion: "success",
+    steps: [{ number: 999, name: "Run actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346", status: "completed", conclusion: "success" }],
+  };
+  const pageVariants: Array<(page: string | null) => { total_count: number; jobs: Array<Record<string, unknown>> }> = [
+    (page) => page === "1" ? { total_count: 101, jobs: firstPage } : { total_count: 101, jobs: [extraJob] },
+    (page) => page === "1" ? { total_count: 101, jobs: firstPage } : { total_count: 101, jobs: [] },
+    (page) => page === "1" ? { total_count: 101, jobs: firstPage } : { total_count: 101, jobs: [structuredClone(original[0])] },
+  ];
+  for (const pages of pageVariants) {
+    const baseFetch = historicalAttemptFetch();
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/actions/runs/34881025561/attempts/1/jobs")) return jsonResponse(pages(url.searchParams.get("page")));
+      return baseFetch(input, init);
+    };
+    await assert.rejects(() => collectPagesAttemptHistory({
+      repository: "CrunchyBrunch/lionlog", currentRunId: 999, token: "fixture-token", incidentHistory: incidents, fetchImpl,
+    }), /graph|duplicate evidence|ended before/);
+  }
+});
+
+test("workflow-run pagination rejects duplicate run/attempt evidence across pages", async () => {
+  const firstPage = Array.from({ length: 100 }, (_, index) => ({ id: 1_000 + index, run_attempt: 1 }));
+  firstPage[0] = { id: 34881025561, run_attempt: 1 };
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.searchParams.get("page") === "1") return jsonResponse({ total_count: 101, workflow_runs: firstPage });
+    if (url.searchParams.get("page") === "2") return jsonResponse({ total_count: 101, workflow_runs: [{ id: 34881025561, run_attempt: 1 }] });
+    return new Response("not found", { status: 404 });
+  };
+  await assert.rejects(() => collectPagesAttemptHistory({
+    repository: "CrunchyBrunch/lionlog",
+    currentRunId: 999,
+    token: "fixture-token",
+    incidentHistory: emptyIncidentHistory(),
+    fetchImpl,
+  }), /duplicate evidence/);
+});
+
+test("representative 22-file Pages candidate preserves the exact candidate-to-stage inventory bytewise", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "lionlog-real-stage-"));
+  const source = path.join(root, "source");
+  const prepared = path.join(root, "prepared");
+  await writeShellSite(source);
+  for (let index = 0; index < 16; index += 1) {
+    await writeFile(path.join(source, "_next", "static", `chunk-${String(index).padStart(2, "0")}.js`), `export default ${index};\n`);
+  }
+  await preparePagesArtifact(source, prepared);
+  const paths = await validatePagesArtifact(prepared);
+  assert.equal(paths.length, 22);
+  const entries = await readPublicationFiles(prepared, paths);
+  const candidateInventory = entries
+    .map((entry) => ({ path: entry.path, bytes: entry.data.byteLength, sha256: sha256(entry.data) }))
+    .sort(bytewisePathOrder);
+  const stagedInventory = inspectPagesActionTar(createPublicationTar(entries));
+  assert.deepEqual(stagedInventory, candidateInventory);
+  assert.equal(stagedInventory[0].path, ".nojekyll");
+});
+
+function browserContext() {
+  return {
+    contextVersion: "lionlog.pages-browser-context.v1",
+    releaseId: hash,
+    shellRevision: workflowSha,
+    serviceDate: "2026-09-17",
+    hallId: "east",
+    mealPeriodId: "lunch",
+    expectedItemCount: 1,
+    expectedFirstFoodName: "Fixture Food",
+  };
+}
+
+function priorAttempt(overrides: Partial<PriorAttemptEvidence> = {}): PriorAttemptEvidence {
+  return {
+    runId: 99,
+    workflowId: 347_992_874,
+    workflowPath: ".github/workflows/deploy-github-pages.yml",
+    workflowSha,
+    event: "workflow_dispatch",
+    headBranch: "main",
+    runAttempt: 1,
+    status: "completed",
+    conclusion: "failure",
+    jobsComplete: true,
+    finalGateConclusion: null,
+    submissionBoundaryConclusion: null,
+    deploymentConclusion: null,
+    incidentEvidence: null,
+    legacyEvidence: { validationFailure: null, deploymentBoundary: null },
+    receipt: null,
+    ...overrides,
+  };
+}
+
+function legacyAttempt346(): PriorAttemptEvidence {
+  return priorAttempt({
+    runId: 34609219734,
+    workflowSha: "3d5181c962486aa25345f4f16fbdd75932e0d831",
+    incidentEvidence: incidentEvidence346(),
+    legacyEvidence: {
+      validationFailure: {
+        jobId: 103295384726,
+        jobName: "deploy",
+        jobStatus: "completed",
+        jobConclusion: "failure",
+        stepNumber: 7,
+        stepName: "Perform final provenance, state, deadline, and freshness checks",
+        stepStatus: "completed",
+        stepConclusion: "failure",
+      },
+      deploymentBoundary: {
+        jobId: 103295384726,
+        jobName: "deploy",
+        jobStatus: "completed",
+        jobConclusion: "failure",
+        stepNumber: 8,
+        stepName: "Deploy exact staged artifact",
+        stepStatus: "completed",
+        stepConclusion: "skipped",
+      },
+    },
+  });
+}
+
+function legacyAttempt348(): PriorAttemptEvidence {
+  return priorAttempt({
+    runId: 34881025561,
+    workflowSha: "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64",
+    incidentEvidence: incidentEvidence348(),
+    legacyEvidence: {
+      validationFailure: {
+        jobId: 104100073427,
+        jobName: "verify-and-stage",
+        jobStatus: "completed",
+        jobConclusion: "failure",
+        stepNumber: 11,
+        stepName: "Verify current attempt separately from the known-good rollback target",
+        stepStatus: "completed",
+        stepConclusion: "failure",
+      },
+      deploymentBoundary: {
+        jobId: 104100243029,
+        jobName: "deploy",
+        jobStatus: "completed",
+        jobConclusion: "skipped",
+        stepNumber: null,
+        stepName: null,
+        stepStatus: "completed",
+        stepConclusion: "skipped",
+      },
+    },
+  });
+}
+
+function legacyAttempt352(): PriorAttemptEvidence {
+  return priorAttempt({
+    runId: 35221481720,
+    workflowSha: "4a91cda0de93b920607f2aa37163790bb4b662f2",
+    incidentEvidence: incidentEvidence352(),
+  });
+}
+
+function incidentEvidence346() {
+  return incidentEvidenceForRun(34609219734);
+}
+
+function incidentEvidence348() {
+  return incidentEvidenceForRun(34881025561);
+}
+
+function incidentEvidence352() {
+  return incidentEvidenceForRun(35221481720);
+}
+
+function incidentEvidenceForRun(runId: number) {
+  const incident = historicalIncidentHistory.incidents.find((candidate: { runId: number }) => candidate.runId === runId);
+  if (!incident) throw new Error(`Missing historical incident fixture: ${runId}`);
+  return structuredClone(incident.collectorEvidence);
+}
+
+function receiptEvidence(options: {
+  runId?: number;
+  submissionStarted: boolean;
+  result: string;
+  knownGood: boolean;
+  unresolved: boolean;
+  publicVerified: boolean;
+}) {
+  return {
+    artifactId: 600,
+    artifactDigest: digest,
+    artifactExpiresAt: "2026-12-01T00:00:00.000Z",
+    content: {
+      receiptVersion: "lionlog.pages-flat-receipt.v1",
+      workflow: { runId: options.runId ?? 99, runAttempt: 1 },
+      official: { submissionStarted: options.submissionStarted, result: options.result },
+      public: {
+        markerVerified: options.publicVerified,
+        inventoryVerified: options.publicVerified,
+        browserVerified: options.publicVerified,
+      },
+      knownGood: options.knownGood,
+      unresolved: options.unresolved,
+    },
+  };
+}
+
+function emptyIncidentHistory() {
+  return { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] };
+}
+
+function historicalAttemptFetch(
+  mutateJobs?: (jobs: Array<Record<string, unknown>>, runId: number) => void,
+  mutateAttempt?: (attempt: Record<string, unknown>, runId: number) => void,
+): typeof fetch {
+  const identities = new Map([
+    [34609219734, "3d5181c962486aa25345f4f16fbdd75932e0d831"],
+    [34881025561, "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64"],
+    [35221481720, "4a91cda0de93b920607f2aa37163790bb4b662f2"],
+  ]);
+  return async (input) => {
+    const url = String(input);
+    if (url.includes(`/actions/workflows/347992874/runs?`)) {
+      return jsonResponse({ total_count: 3, workflow_runs: [...identities.keys()].map((id) => ({ id, run_attempt: 1 })) });
+    }
+    const artifactRun = Number(url.match(/\/actions\/runs\/(\d+)\/artifacts\?/)?.[1]);
+    if (identities.has(artifactRun)) return jsonResponse({ total_count: 0, artifacts: [] });
+    const jobsRun = Number(url.match(/\/actions\/runs\/(\d+)\/attempts\/1\/jobs\?/)?.[1]);
+    if (identities.has(jobsRun)) {
+      const jobs = historicalJobs(jobsRun, identities.get(jobsRun)!);
+      mutateJobs?.(jobs, jobsRun);
+      return jsonResponse({ total_count: jobs.length, jobs });
+    }
+    const attemptRun = Number(url.match(/\/actions\/runs\/(\d+)\/attempts\/1(?:\?|$)/)?.[1]);
+    const headSha = identities.get(attemptRun);
+    if (headSha) {
+      const attempt: Record<string, unknown> = {
+      id: attemptRun,
+      workflow_id: 347_992_874,
+      run_attempt: 1,
+      path: ".github/workflows/deploy-github-pages.yml",
+      event: "workflow_dispatch",
+      head_branch: "main",
+      head_sha: headSha,
+      status: "completed",
+      conclusion: "failure",
+      };
+      mutateAttempt?.(attempt, attemptRun);
+      return jsonResponse(attempt);
+    }
+    return new Response("not found", { status: 404 });
+  };
+}
+
+function historicalJobs(runId: number, headSha: string): Array<Record<string, unknown>> {
+  const evidence = incidentEvidenceForRun(runId);
+  return evidence.jobs.map((job: {
+    jobId: number; runId: number; runAttempt: number; headSha: string; jobName: string;
+    jobStatus: string; jobConclusion: string;
+    steps: Array<{ stepNumber: number; stepName: string; stepStatus: string; stepConclusion: string }>;
+  }) => {
+    assert.equal(job.headSha, headSha);
+    return {
+      id: job.jobId,
+      run_id: job.runId,
+      run_attempt: job.runAttempt,
+      head_sha: job.headSha,
+      name: job.jobName,
+      status: job.jobStatus,
+      conclusion: job.jobConclusion,
+      steps: job.steps.map((step) => ({
+        number: step.stepNumber,
+        name: step.stepName,
+        status: step.stepStatus,
+        conclusion: step.stepConclusion,
+      })),
+    };
+  });
+}
+
+function bytewisePathOrder(left: { path: string }, right: { path: string }): number {
+  return left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
+}
+
+function jsonResponse(value: unknown): Response {
+  return new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
+}
+
+function validatedFixture(inventory: Array<{ path: string; bytes: number; sha256: string }>): ValidatedRelease {
+  return {
+    summaryVersion: "lionlog.pages-validated-release.v1",
+    operation: "promote",
+    workflow: { sha: workflowSha, runId: 100, runAttempt: 1 },
+    candidate: {
+      runId: 200, sourceSha, artifactId: 300, artifactName: "lionlog-live-fixture", artifactDigest: digest,
+      artifactExpiresAt: "2026-12-01T00:00:00.000Z", manifestSha256: hash,
+    },
+    ci: { runId: 400 },
+    release: {
+      id: hash, kind: "live", serviceDate: "2026-09-17", coverage: "complete", omissions: { "invalid-name": 0 },
+      earliestFreshUntil: "2026-09-17T14:00:00.000Z", earliestRetainUntil: "2026-09-24T00:00:00.000Z",
+    },
+    site: { tarFile: "site.tar", tarSha256: hash, bytes: 1, inventory },
+    rollbackReceipt: null,
+    authorization: { approvalExpiresAt: "2026-09-17T13:00:00.000Z", predecessorReleaseId: FIRST_PUBLICATION },
+  };
+}
+
+function summaryFixture(): PreapprovalSummary {
+  return {
+    ...validatedFixture([{ path: "index.html", bytes: 5, sha256: hash }]),
+    summaryVersion: "lionlog.pages-preapproval.v1",
+    staged: {
+      artifactId: 500, artifactName: "lionlog-pages-100-1", artifactDigest: digest,
+      artifactExpiresAt: "2026-12-01T00:00:00.000Z", tarSha256: hash,
+    },
+  };
+}
+
+function stagedArtifact(): GithubArtifact {
+  return {
+    id: 500, name: "lionlog-pages-100-1", digest, size_in_bytes: 100, expired: false,
+    expires_at: "2026-12-01T00:00:00.000Z",
+    workflow_run: { id: 100, head_sha: workflowSha, head_branch: "main", head_repository_id: 1_346_360_244 },
+  };
+}
+
+function finalState() {
+  return {
+    repository: { id: 1_346_360_244, full_name: "CrunchyBrunch/lionlog" },
+    main: { sha: workflowSha },
+    workflowRun: currentWorkflowRun(),
+    candidateRun: candidateRun(),
+    candidateArtifact: { id: 300, digest, expired: false, expires_at: "2026-12-01T00:00:00.000Z" },
+    stagedArtifacts: [{ id: 500, name: "lionlog-pages-100-1", digest, expired: false, expires_at: "2026-12-01T00:00:00.000Z" }],
+    ciRun: ciRun(),
+    priorAttempts: [],
+    publicPredecessor: { state: "absent" as const, releaseId: null },
+    rollbackReceiptArtifact: null,
+    rollbackReceiptRun: null,
+  };
+}
+
+function currentWorkflowRun() {
+  return { id: 100, workflow_id: 347_992_874, path: ".github/workflows/deploy-github-pages.yml", event: "workflow_dispatch", head_sha: workflowSha, head_branch: "main", run_attempt: 1, status: "in_progress", conclusion: null } as const;
+}
+
+function candidateRun() {
+  return { id: 200, workflow_id: 347_085_467, path: ".github/workflows/build-live-menu-artifact.yml", event: "workflow_dispatch", head_sha: sourceSha, head_branch: "main", run_attempt: 1, status: "completed", conclusion: "success" } as const;
+}
+
+function ciRun() {
+  return { id: 400, workflow_id: 346_680_782, path: ".github/workflows/ci.yml", event: "push", head_sha: sourceSha, head_branch: "main", run_attempt: 1, status: "completed", conclusion: "success" } as const;
+}
+
+function candidateArtifact(): GithubArtifact {
+  return { id: 300, name: "lionlog-live-fixture", digest, size_in_bytes: 100, expired: false, expires_at: "2026-12-01T00:00:00.000Z", workflow_run: { id: 200, head_sha: sourceSha, head_branch: "main", head_repository_id: 1_346_360_244 } };
+}
+
+function rewriteTarChecksum(archive: Buffer): void {
+  archive.fill(0x20, 148, 156);
+  const checksum = archive.subarray(0, 512).reduce((sum, value) => sum + value, 0);
+  archive.write(checksum.toString(8).padStart(6, "0"), 148, 6, "ascii");
+  archive[154] = 0;
+  archive[155] = 0x20;
+}
+
+async function writeShellSite(root: string): Promise<void> {
+  await mkdir(path.join(root, "_next", "static"), { recursive: true });
+  await mkdir(path.join(root, "icons"), { recursive: true });
+  await writeFile(path.join(root, ".nojekyll"), "\n");
+  await writeFile(path.join(root, "index.html"), `<html data-lionlog-shell="${sourceSha}"><link href="/lionlog/_next/static/app.js"><link href="./manifest.webmanifest"></html>`);
+  await writeFile(path.join(root, "_next", "static", "app.js"), "console.log('shell');");
+  await writeFile(path.join(root, "icons", "icon-192.png"), "icon");
+  await writeFile(path.join(root, "manifest.webmanifest"), JSON.stringify({ id: "./", start_url: "./", scope: "./", icons: [{ src: "./icons/icon-192.png" }] }));
+  await writeFile(path.join(root, "sw.js"), `const SHELL_REVISION = "${sourceSha}"; const CACHE='lionlog-shell-${sourceSha}'; const EXCLUDED='menu-data';`);
+}
+
+async function writeLiveSite(root: string): Promise<void> {
+  await writeShellSite(root);
+  const retrievedAt = new Date("2026-09-17T11:20:00.000Z");
+  const cachedAt = new Date("2026-09-17T11:30:00.000Z");
+  const snapshots = PSU_RELEASE_HALL_IDS.map((hallId, index) => {
     const hall = getPsuHall(hallId);
     const period = getPsuMealPeriod("lunch");
+    const hasItem = index === 0;
     return buildPsuSnapshot(
-      { serviceDate: "2026-09-07", hallId, mealPeriodId: period.id, venueIds: [] },
-      { context: { sourceCampusId: hall.sourceCampusId, sourceDate: sourceDateFromIso("2026-09-07"), sourceMeal: period.sourceValue }, stations: [], empty: true },
-      new Map(),
-      { retrievedAt, cachedAt, ...policy },
+      { serviceDate: "2026-09-17", hallId, mealPeriodId: period.id, venueIds: [] },
+      {
+        context: { sourceCampusId: hall.sourceCampusId, sourceDate: sourceDateFromIso("2026-09-17"), sourceMeal: period.sourceValue },
+        stations: hasItem ? [{ displayName: "Fixture Station", items: [{ name: "Fixture Food", nameIssue: null, sourceHandle: "900000001", dietaryTraits: ["vegan" as const] }] }] : [],
+        empty: !hasItem,
+      },
+      hasItem ? new Map([["900000001", fixtureNutrition()]]) : new Map(),
+      { retrievedAt, cachedAt, freshForMs: 18 * 60 * 60_000, retainForMs: 48 * 60 * 60_000 },
     );
   });
-  const entries = snapshots.map((snapshot) => catalogEntryForSnapshot(
-    snapshot,
-    `./snapshots/${snapshot.query.serviceDate}/${snapshot.query.sourceCampusId}/${snapshot.query.mealPeriodId}.json`,
-  ));
   const catalog = validatePsuPublicationCatalog({
-    catalogVersion: PSU_CATALOG_VERSION,
-    snapshotSchemaVersion: PSU_SNAPSHOT_VERSION,
-    parserVersion: PSU_PARSER_VERSION,
+    catalogVersion: PSU_CATALOG_VERSION, snapshotSchemaVersion: PSU_SNAPSHOT_VERSION, parserVersion: PSU_PARSER_VERSION,
     generatedAt: cachedAt.toISOString(),
     publication: {
-      mode: "field-release",
-      sourceKind: "psu-public-menu-html",
-      commitSha: sourceSha,
-      serviceDate: "2026-09-07",
-      hallIds: [...PSU_RELEASE_HALL_IDS],
-      retrievalStartedAt: "2026-09-07T11:00:00.000Z",
-      retrievalCompletedAt: "2026-09-07T12:00:00.000Z",
-      expectedSnapshotCount: 5,
-      publishedSnapshotCount: 5,
-      recognizedEmptySnapshotCount: 5,
-      itemCount: 0,
-      coverage: "complete",
-      sourceObservationCount: 0,
-      publishedObservationCount: 0,
-      omissions: { "invalid-name": 0 },
-      requestCount: 10,
-      nutritionRequests: 0,
-      nutritionCacheHits: 0,
+      mode: "field-release", sourceKind: "psu-public-menu-html", commitSha: sourceSha, serviceDate: "2026-09-17",
+      hallIds: [...PSU_RELEASE_HALL_IDS], retrievalStartedAt: "2026-09-17T11:00:00.000Z", retrievalCompletedAt: cachedAt.toISOString(),
+      expectedSnapshotCount: 5, publishedSnapshotCount: 5, recognizedEmptySnapshotCount: 4, itemCount: 1,
+      coverage: "complete", sourceObservationCount: 1, publishedObservationCount: 1, omissions: { "invalid-name": 0 },
+      requestCount: 10, nutritionRequests: 0, nutritionCacheHits: 0,
     },
-    serviceDates: ["2026-09-07"],
+    serviceDates: ["2026-09-17"],
     halls: PSU_RELEASE_HALL_IDS.map((id) => ({ id, displayName: getPsuHall(id).displayName })),
     mealPeriods: [{ id: "lunch", displayName: getPsuMealPeriod("lunch").displayName }],
-    snapshots: entries,
+    snapshots: snapshots.map((snapshot) => catalogEntryForSnapshot(snapshot, `./snapshots/${snapshot.query.serviceDate}/${snapshot.query.sourceCampusId}/lunch.json`)),
   });
   for (const snapshot of snapshots) {
-    const file = path.join(root, "menu-data", "v2", "snapshots", snapshot.query.serviceDate, snapshot.query.sourceCampusId, `${snapshot.query.mealPeriodId}.json`);
+    const file = path.join(root, "menu-data", "v2", "snapshots", snapshot.query.serviceDate, snapshot.query.sourceCampusId, "lunch.json");
     await mkdir(path.dirname(file), { recursive: true });
     await writeFile(file, `${JSON.stringify(snapshot, null, 2)}\n`);
   }
@@ -2333,446 +1051,38 @@ async function writeFieldReleaseSite(root: string, policy: { freshForMs: number;
   await writeFile(path.join(root, "menu-data", "v2", "catalog.json"), `${JSON.stringify(catalog, null, 2)}\n`);
 }
 
-function liveVerificationOptions(bundle: string, manifest: PublicationReleaseManifest, recovery: PublicationReleaseManifest, recoveryDigest: string) {
-  if (manifest.menu === null || manifest.recovery === null) throw new Error("Expected a live publication manifest.");
+function fixtureNutrition() {
   return {
-    bundleDirectory: bundle,
-    metadata: githubMetadata(manifest, now),
-    operation: "promote" as const,
-    expectedSourceSha: sourceSha,
-    expectedRunId: 123,
-    expectedRunAttempt: 1,
-    expectedArtifactId: 456,
-    expectedArtifactDigest: artifactDigest,
-    expectedManifestSha256: "",
-    expectedServiceDate: "2026-09-07",
-    approvalExpiresAt: "2026-09-07T13:00:00.000Z",
-    partialApproval: "COMPLETE_ONLY",
-    expiredRollbackApproval: "NONE",
-    workflowSha: sourceSha,
-    expectedPromotionWorkflowSha: sourceSha,
-    expectedRecoveryArtifactId: 789,
-    expectedRecoveryArtifactDigest: recoveryDigest,
-    expectedRecoveryManifestSha256: manifest.recovery.manifestSha256,
-    expectedRecoveryReleaseId: recovery.releaseId,
-    now,
-  };
-}
-
-async function rewriteLiveBundle(
-  bundle: string,
-  mutateCatalog: (catalog: PsuPublicationCatalog) => PsuPublicationCatalog,
-  mutateSnapshot?: (snapshot: PsuMenuSnapshot) => PsuMenuSnapshot,
-): Promise<void> {
-  const manifestPath = path.join(bundle, "release-manifest.json");
-  const manifest = publicationReleaseManifestSchema.parse(JSON.parse(await readFile(manifestPath, "utf8")));
-  if (manifest.menu === null || manifest.recovery === null) throw new Error("Expected a live publication manifest.");
-  let entries = parsePublicationTar(await readFile(path.join(bundle, "site.tar")));
-  const catalogEntry = entries.find((entry) => entry.path === "menu-data/v2/catalog.json")!;
-  let catalog = validatePsuPublicationCatalog(JSON.parse(catalogEntry.data.toString("utf8")));
-  if (mutateSnapshot) {
-    const changed = new Map<string, PsuMenuSnapshot>();
-    entries = entries.map((entry) => {
-      if (!entry.path.startsWith("menu-data/v2/snapshots/")) return entry;
-      const snapshot = mutateSnapshot(buildPsuSnapshotFromBytes(entry.data));
-      changed.set(entry.path, snapshot);
-      return { ...entry, data: Buffer.from(`${JSON.stringify(snapshot, null, 2)}\n`) };
-    });
-    catalog = validatePsuPublicationCatalog({
-      ...catalog,
-      snapshots: catalog.snapshots.map((entry) => {
-        const snapshot = changed.get(`menu-data/v2/${entry.snapshotUrl.slice(2)}`);
-        return snapshot ? catalogEntryForSnapshot(snapshot, entry.snapshotUrl) : entry;
-      }),
-    });
-  }
-  const catalogBytes = Buffer.from(`${JSON.stringify(mutateCatalog(catalog), null, 2)}\n`);
-  entries = entries.map((entry) => entry.path === catalogEntry.path ? { ...entry, data: catalogBytes } : entry);
-  manifest.menu.catalogSha256 = sha256(catalogBytes);
-  manifest.releaseId = computePublicationReleaseId({
-    releaseKind: "live",
-    sourceCommitSha: manifest.source.commitSha,
-    workflowRunId: manifest.source.workflowRunId,
-    workflowRunAttempt: manifest.source.workflowRunAttempt,
-    serviceDate: manifest.menu.serviceDate,
-    catalogSha256: manifest.menu.catalogSha256,
-    shellRevision: manifest.shellRevision,
-    recoveryReleaseId: manifest.recovery.releaseId,
-  });
-  const markerIndex = entries.findIndex((entry) => entry.path === "release.json");
-  const marker = JSON.parse(entries[markerIndex].data.toString("utf8"));
-  marker.releaseId = manifest.releaseId;
-  marker.catalogSha256 = manifest.menu.catalogSha256;
-  const markerBytes = Buffer.from(`${JSON.stringify(marker, null, 2)}\n`);
-  entries[markerIndex] = { ...entries[markerIndex], data: markerBytes };
-  const tar = createPublicationTar(entries);
-  manifest.marker.sha256 = sha256(markerBytes);
-  manifest.site.tarSha256 = sha256(tar);
-  manifest.site.bytes = tar.byteLength;
-  manifest.site.inventory = parsePublicationTar(tar).map((entry) => ({ path: entry.path, bytes: entry.data.byteLength, sha256: sha256(entry.data) }));
-  await writeFile(path.join(bundle, "site.tar"), tar);
-  await writeFile(manifestPath, `${JSON.stringify(publicationReleaseManifestSchema.parse(manifest), null, 2)}\n`);
-}
-
-function buildPsuSnapshotFromBytes(bytes: Buffer): PsuMenuSnapshot {
-  return validatePsuSnapshot(JSON.parse(bytes.toString("utf8")));
-}
-
-async function writeRecoverySite(root: string): Promise<void> {
-  await mkdir(path.join(root, "_next", "static"), { recursive: true });
-  await mkdir(path.join(root, "icons"), { recursive: true });
-  await writeFile(path.join(root, ".nojekyll"), "\n");
-  await writeFile(path.join(root, "index.html"), `<html data-lionlog-shell="${sourceSha}"><link href="/lionlog/_next/static/app.js"><link href="./manifest.webmanifest"></html>`);
-  await writeFile(path.join(root, "_next", "static", "app.js"), "console.log('shell');");
-  await writeFile(path.join(root, "icons", "icon-192.png"), "icon");
-  await writeFile(path.join(root, "manifest.webmanifest"), JSON.stringify({
-    id: "./", start_url: "./", scope: "./", icons: [{ src: "./icons/icon-192.png" }],
-  }));
-  await writeFile(path.join(root, "sw.js"), `const SHELL_REVISION = "${sourceSha}"; const CACHE='lionlog-shell-${sourceSha}'; const EXCLUDED='menu-data';`);
-}
-
-function githubMetadata(manifest: { releaseKind: "live" | "first-release-recovery" }, current: Date) {
-  return {
-    repository: { id: 1_346_360_244, full_name: "CrunchyBrunch/lionlog" },
-    main: { sha: sourceSha },
-    artifact: {
-      id: 456,
-      name: manifest.releaseKind === "live" ? "lionlog-live-fixture" : "lionlog-first-release-recovery-fixture",
-      digest: artifactDigest,
-      size_in_bytes: 1_024,
-      expired: false,
-      expires_at: new Date(current.getTime() + 60_000).toISOString(),
-      workflow_run: { id: 123, head_sha: sourceSha, head_branch: "main", head_repository_id: 1_346_360_244 },
+    name: "Fixture Food",
+    nameIssue: null,
+    servingLabel: "1 plate",
+    sourceQuantity: 1,
+    sourceUnit: "plate",
+    calories: 420,
+    proteinG: 18,
+    carbsG: 52,
+    fatG: 14,
+    additional: {
+      saturatedFatG: null,
+      transFatG: null,
+      cholesterolMg: null,
+      sodiumMg: 480,
+      fiberG: null,
+      sugarsG: null,
+      addedSugarsG: null,
+      vitaminDMcg: null,
+      calciumMg: null,
+      ironMg: null,
+      potassiumMg: null,
     },
-    run: {
-      id: 123,
-      event: "workflow_dispatch",
-      head_sha: sourceSha,
-      head_branch: "main",
-      run_attempt: 1,
-      status: "completed",
-      conclusion: "success",
-      path: ".github/workflows/build-live-menu-artifact.yml",
-      workflow_id: 347_085_467,
-    },
-    ciRun: {
-      id: 999,
-      workflow_id: 346_680_782,
-      path: ".github/workflows/ci.yml",
-      event: "push",
-      head_sha: sourceSha,
-      head_branch: "main",
-      run_attempt: 1,
-      status: "completed",
-      conclusion: "success",
-    },
-    ciJobs: [{ name: "verify", head_sha: sourceSha, status: "completed", conclusion: "success" }],
-  };
+    ingredients: "Fixture ingredients.",
+    allergens: [],
+  } as const;
 }
 
-function rewriteTarChecksum(archive: Buffer): void {
-  archive.fill(0x20, 148, 156);
-  const checksum = archive.subarray(0, 512).reduce((total, value) => total + value, 0);
-  archive.write(checksum.toString(8).padStart(6, "0"), 148, 6, "ascii");
-  archive[154] = 0;
-  archive[155] = 0x20;
-}
-
-function deploymentReceipt(options: {
-  releaseId: string;
-  repositoryDeploymentId: number;
-  deploymentId: string | null;
-  sourceArtifactId: number;
-  sourceArtifactDigest?: string;
-  sourceManifestSha256?: string;
-  releaseKind?: "live" | "first-release-recovery";
-  operation?: "promote" | "rollback" | "first-release-recovery";
-  knownGood?: boolean;
-  repositoryState?: "pending" | "in_progress" | "success" | "failure";
-  repositoryStatusRecorded?: boolean;
-  publicProductVerified?: boolean;
-  pagesStatus?: string;
-  attemptPhase?: "pre-submission" | "submission-uncertain" | "submission-rejected" | "status-uncertain" | "terminal";
-  uncertain?: boolean;
-  previous?: PublicationDeploymentReceipt;
-}): PublicationDeploymentReceipt {
-  const knownGood = options.knownGood ?? true;
-  const repositoryState = options.repositoryState ?? (knownGood ? "success" : "failure");
-  const statusRecorded = options.repositoryStatusRecorded ?? true;
-  const publicProductVerified = options.publicProductVerified ?? knownGood;
-  const previous = options.previous;
-  const releaseKind = options.releaseKind ?? "live";
-  const recovery = releaseKind === "live" ? { releaseId: "9".repeat(64), manifestSha256: "8".repeat(64), artifactId: 455, artifactDigest: `sha256:${"7".repeat(64)}` } : null;
-  return publicationDeploymentReceiptSchema.parse({
-    receiptVersion: "lionlog.pages-deployment-receipt.v3",
-    recordedAt: "2026-09-07T11:00:00.000Z",
-    operation: options.operation ?? "promote",
-    releaseId: options.releaseId,
-    releaseKind,
-    deploymentId: options.deploymentId,
-    pageUrl: knownGood ? "https://crunchybrunch.github.io/lionlog/" : null,
-    previous: previous ? {
-      knownGoodReleaseId: previous.releaseId,
-      knownGoodRepositoryDeploymentId: previous.repositoryDeployment.id,
-      knownGoodPagesDeploymentId: previous.deploymentId,
-    } : {
-      knownGoodReleaseId: "NONE_FIRST_DEPLOYMENT",
-      knownGoodRepositoryDeploymentId: "NONE_FIRST_DEPLOYMENT",
-      knownGoodPagesDeploymentId: "NONE_FIRST_DEPLOYMENT",
-    },
-    promotion: { workflowId: 347_992_874, workflowSha: sourceSha, runId: options.repositoryDeploymentId + 1_000, runAttempt: 1, approvalExpiresAt: "2026-09-07T13:00:00.000Z" },
-    source: {
-      artifactId: options.sourceArtifactId,
-      artifactDigest: options.sourceArtifactDigest ?? artifactDigest,
-      manifestSha256: options.sourceManifestSha256 ?? "d".repeat(64),
-      siteTarSha256: "c".repeat(64),
-      recoveryArtifactId: recovery?.artifactId ?? null,
-      recoveryArtifactDigest: recovery?.artifactDigest ?? null,
-      recoveryManifestSha256: recovery?.manifestSha256 ?? null,
-    },
-    recovery,
-    staged: { artifactId: 789, artifactDigest: `sha256:${"e".repeat(64)}`, artifactExpiresAt: "2026-12-01T00:00:00.000Z" },
-    attemptPhase: options.attemptPhase ?? "terminal",
-    repositoryDeployment: { id: options.repositoryDeploymentId, state: repositoryState, statusRecorded },
-    pagesAccepted: options.deploymentId !== null,
-    pagesStatus: options.deploymentId === null ? null : (options.pagesStatus ?? "succeed"),
-    markerVerified: true,
-    publicProductVerified,
-    reconciliation: { outcome: knownGood ? "known-good" : options.uncertain ? "submission-uncertain" : "served-unverified", publicReleaseId: options.releaseId },
-    knownGood,
-    uncertain: options.uncertain ?? !statusRecorded,
-  });
-}
-
-function failedPreSubmissionReceipt(): PublicationDeploymentReceipt {
-  return publicationDeploymentReceiptSchema.parse({
-    receiptVersion: "lionlog.pages-deployment-receipt.v3",
-    recordedAt: "2026-09-11T14:18:57Z",
-    operation: "promote",
-    releaseId: "7dce94463a4d87541812eda2d500baefead34e4a5394f82d95baa10163d1cec1",
-    releaseKind: "live",
-    deploymentId: null,
-    pageUrl: null,
-    previous: {
-      knownGoodReleaseId: "NONE_FIRST_DEPLOYMENT",
-      knownGoodRepositoryDeploymentId: "NONE_FIRST_DEPLOYMENT",
-      knownGoodPagesDeploymentId: "NONE_FIRST_DEPLOYMENT",
-    },
-    promotion: {
-      workflowId: 347_992_874,
-      workflowSha: "3d5181c962486aa25345f4f16fbdd75932e0d831",
-      runId: 34_609_219_734,
-      runAttempt: 1,
-      approvalExpiresAt: "2026-09-11T16:00:00Z",
-    },
-    source: {
-      artifactId: 10_266_588_499,
-      artifactDigest: "sha256:8667efc4e8b7603ec034d60715b4359d8c737b6aedfef2ff29a926b4ba0c30e2",
-      manifestSha256: "99858cf98e0330aa2018460051154c5245404a8efdd9e001780d8b7634fbcd4c",
-      siteTarSha256: "6d798e96e932ecb5b51cb22fd158bc370dd4e786de2f67e72b16fa4667ab752a",
-      recoveryArtifactId: 10_267_140_347,
-      recoveryArtifactDigest: "sha256:83a47e669a5542ab86496c20ce39931b0a07b3d261d8fbed0dbbed81a503c5dd",
-      recoveryManifestSha256: "eecf7e52423789cd16a1b1a7bb44ffd97fff2c4acca6818cf6928455e8fdcd0e",
-    },
-    recovery: {
-      releaseId: "0c39c8f56df6d0d9b72ff644fd7d7fb98c78af28f4f5e700ec6f639340d53d95",
-      manifestSha256: "eecf7e52423789cd16a1b1a7bb44ffd97fff2c4acca6818cf6928455e8fdcd0e",
-      artifactId: 10_267_140_347,
-      artifactDigest: "sha256:83a47e669a5542ab86496c20ce39931b0a07b3d261d8fbed0dbbed81a503c5dd",
-    },
-    staged: {
-      artifactId: 10_267_282_434,
-      artifactDigest: "sha256:bc6a29288377cfb9f46a238a9094185e9fb095077d63addde162402991e80ae0",
-      artifactExpiresAt: "2026-12-10T14:17:12Z",
-    },
-    attemptPhase: "submission-uncertain",
-    repositoryDeployment: { id: null, state: "unknown", statusRecorded: false },
-    pagesAccepted: false,
-    pagesStatus: "ledger-unavailable",
-    markerVerified: false,
-    publicProductVerified: false,
-    reconciliation: { outcome: "submission-uncertain", publicReleaseId: "UNKNOWN" },
-    knownGood: false,
-    uncertain: true,
-  });
-}
-
-function failedPreSubmissionApiFixture({
-  newerEnvironmentDeployment = false,
-  currentPromotion = false,
-  duplicateCurrent = false,
-  tamperReceiptArtifact = false,
-  tamperSubmissionStep = false,
-  currentStatus = "in_progress",
-  incompleteCurrentJobs = false,
-} = {}) {
-  const workflowSha = "3d5181c962486aa25345f4f16fbdd75932e0d831";
-  const matchingDeployment = {
-    id: 6_394_978_446,
-    task: "deploy",
-    environment: "github-pages",
-    sha: workflowSha,
-    ref: "main",
-    payload: {},
-    original_environment: "github-pages",
-    transient_environment: false,
-    production_environment: false,
-    performed_via_github_app: { id: 15_368, slug: "github-actions" },
-  };
-  const currentDeployment = { ...matchingDeployment, id: matchingDeployment.id + 100, sha: "f".repeat(40) };
-  const environmentDeployments = currentPromotion
-    ? [currentDeployment, ...(duplicateCurrent ? [{ ...currentDeployment, id: currentDeployment.id + 1 }] : []), matchingDeployment]
-    : newerEnvironmentDeployment
-      ? [{ ...matchingDeployment, id: matchingDeployment.id + 1, sha: "0".repeat(40) }, matchingDeployment]
-      : [matchingDeployment];
-  return async (input: URL | RequestInfo): Promise<Response> => {
-    const url = String(input);
-    if (url.includes("crunchybrunch.github.io/lionlog/release.json")) return new Response(null, { status: 404 });
-    if (url.includes("deployments?task=lionlog-pages-release")) return Response.json([]);
-    if (url.includes("deployments?task=deploy")) return Response.json(environmentDeployments);
-    if (url.endsWith("/actions/artifacts/10267367634")) return Response.json({
-      id: 10_267_367_634,
-      name: "lionlog-deployment-receipt-34609219734-1",
-      digest: tamperReceiptArtifact ? `sha256:${"0".repeat(64)}` : "sha256:bf3c1430abf5bf1ebc8707e601b51f3776705cde507997ff3b606fcc88601874",
-      expired: false,
-      workflow_run: { id: 34_609_219_734, head_sha: workflowSha, head_branch: "main", head_repository_id: 1_346_360_244 },
-    });
-    if (url.endsWith("/actions/runs/34609219734")) return Response.json({
-      id: 34_609_219_734,
-      workflow_id: 347_992_874,
-      path: ".github/workflows/deploy-github-pages.yml",
-      event: "workflow_dispatch",
-      head_sha: workflowSha,
-      head_branch: "main",
-      run_attempt: 1,
-      status: "completed",
-      conclusion: "failure",
-    });
-    if (url.endsWith("/deployments/6394978446")) return Response.json(matchingDeployment);
-    if (url.includes("/deployments/6394978446/statuses?")) return Response.json([{
-      id: 18_228_833_381,
-      state: "failure",
-      environment: "github-pages",
-      deployment_url: "https://api.github.com/repos/CrunchyBrunch/lionlog/deployments/6394978446",
-      log_url: "https://github.com/CrunchyBrunch/lionlog/actions/runs/34609219734/job/103295384726",
-      target_url: "https://github.com/CrunchyBrunch/lionlog/actions/runs/34609219734/job/103295384726",
-    }]);
-    if (url.endsWith("/actions/jobs/103295384726")) return Response.json({
-      id: 103_295_384_726,
-      name: "deploy",
-      workflow_name: "Promote exact LionLog release to GitHub Pages",
-      run_id: 34_609_219_734,
-      run_attempt: 1,
-      head_sha: workflowSha,
-      status: "completed",
-      conclusion: "failure",
-      steps: reviewedIncidentSteps(tamperSubmissionStep),
-    });
-    if (currentPromotion && url.endsWith("/actions/runs/999000")) return Response.json({
-      id: 999_000,
-      workflow_id: 347_992_874,
-      path: ".github/workflows/deploy-github-pages.yml",
-      event: "workflow_dispatch",
-      head_sha: "f".repeat(40),
-      head_branch: "main",
-      run_attempt: 1,
-      status: "in_progress",
-      conclusion: null,
-    });
-    if (currentPromotion && url.includes("/actions/runs/999000/jobs?")) return Response.json({
-      total_count: incompleteCurrentJobs ? 3 : 2,
-      jobs: [
-        { id: 555_000, name: "verify-and-stage", run_id: 999_000, run_attempt: 1, head_sha: "f".repeat(40), status: "completed", conclusion: "success" },
-        { id: 555_001, name: "deploy", run_id: 999_000, run_attempt: 1, head_sha: "f".repeat(40), status: "in_progress", conclusion: null },
-      ],
-    });
-    if (currentPromotion && url.includes(`/deployments/${currentDeployment.id}/statuses?`)) return Response.json([{
-      id: 18_300_000_001,
-      state: currentStatus,
-      environment: "github-pages",
-      deployment_url: `https://api.github.com/repos/CrunchyBrunch/lionlog/deployments/${currentDeployment.id}`,
-      log_url: "https://github.com/CrunchyBrunch/lionlog/actions/runs/999000/job/555001",
-      target_url: "https://github.com/CrunchyBrunch/lionlog/actions/runs/999000/job/555001",
-    }]);
-    if (currentPromotion && url.endsWith(`/deployments/${currentDeployment.id}`)) return Response.json(currentDeployment);
-    return new Response(null, { status: 404 });
-  };
-}
-
-function reviewedIncidentSteps(tamperSubmissionStep = false) {
-  const steps = [
-    [1, "Set up job", "success"],
-    [2, "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "success"],
-    [3, "Re-download the exact retained approval summary", "success"],
-    [4, "Download exact source and recovery wrappers after protected approval", "success"],
-    [5, "Re-download and identify the exact staged artifact", "success"],
-    [6, "Re-download current-attempt and rollback-target receipts after approval", "success"],
-    [7, "Perform final provenance, state, deadline, and freshness checks", "failure"],
-    [8, "Deploy exact staged artifact", "skipped"],
-    [9, "Preserve deployment attempt evidence", "skipped"],
-    [18, "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "success"],
-    [19, "Complete job", "success"],
-  ].map(([number, name, conclusion]) => ({ number, name, status: "completed", conclusion }));
-  if (tamperSubmissionStep) steps[7] = { ...steps[7], conclusion: "success" };
-  return steps;
-}
-
-function deploymentApiFixture(
-  state: { publicReleaseId: string; receipts?: PublicationDeploymentReceipt[]; deployments?: unknown[] },
-  requested: string[] = [],
-) {
-  const receipts = state.receipts ?? [];
-  const deployments = state.deployments ?? receipts.map(repositoryDeploymentForReceipt);
-  return async (input: URL | RequestInfo): Promise<Response> => {
-    const url = String(input);
-    requested.push(url);
-    if (url.includes("crunchybrunch.github.io/lionlog/release.json")) {
-      return state.publicReleaseId === "NONE_404" ? new Response(null, { status: 404 }) : Response.json({ releaseId: state.publicReleaseId });
-    }
-    if (/\/deployments\?task=/.test(url)) return Response.json(deployments);
-    const statusMatch = /\/deployments\/(\d+)\/statuses\?/.exec(url);
-    if (statusMatch) {
-      const receipt = receipts.find((value) => value.repositoryDeployment.id === Number(statusMatch[1]));
-      if (!receipt) return new Response(null, { status: 404 });
-      if (!receipt.repositoryDeployment.statusRecorded) return Response.json([]);
-      return Response.json([{
-        state: receipt.repositoryDeployment.state,
-        deployment_url: `https://api.github.com/repos/CrunchyBrunch/lionlog/deployments/${receipt.repositoryDeployment.id}`,
-        log_url: receipt.deploymentId === null
-          ? `https://github.com/CrunchyBrunch/lionlog/actions/runs/${receipt.promotion.runId}`
-          : `https://api.github.com/repos/CrunchyBrunch/lionlog/pages/deployments/${receipt.deploymentId}`,
-      }]);
-    }
-    const repositoryMatch = /\/deployments\/(\d+)$/.exec(url);
-    if (repositoryMatch) {
-      const receipt = receipts.find((value) => value.repositoryDeployment.id === Number(repositoryMatch[1]));
-      return receipt ? Response.json(repositoryDeploymentForReceipt(receipt)) : new Response(null, { status: 404 });
-    }
-    const pagesMatch = /\/pages\/deployments\/([A-Za-z0-9._-]+)$/.exec(url);
-    if (pagesMatch) {
-      const receipt = receipts.find((value) => value.deploymentId === pagesMatch[1]);
-      return receipt ? Response.json({ id: receipt.deploymentId, status: receipt.pagesStatus }) : new Response(null, { status: 404 });
-    }
-    return new Response(null, { status: 404 });
-  };
-}
-
-function repositoryDeploymentForReceipt(receipt: PublicationDeploymentReceipt) {
-  return {
-    id: receipt.repositoryDeployment.id,
-    sha: receipt.promotion.workflowSha,
-    task: "lionlog-pages-release",
-    environment: "github-pages",
-    transient_environment: false,
-    production_environment: true,
-    payload: publicationLedgerPayload({
-      promotionRunId: receipt.promotion.runId,
-      runAttempt: receipt.promotion.runAttempt,
-      releaseId: receipt.releaseId,
-      sourceArtifactId: receipt.source.artifactId,
-      stagedArtifactId: receipt.staged.artifactId,
-    }),
-  };
+function catalogSnapshotId(catalogText: string): string {
+  const catalog = JSON.parse(catalogText) as { snapshots: Array<{ snapshotId: string }> };
+  return catalog.snapshots[0].snapshotId;
 }
 
 function createStoredZip(entries: Array<{ path: string; data: Buffer; mode?: number }>): Buffer {
@@ -2781,41 +1091,25 @@ function createStoredZip(entries: Array<{ path: string; data: Buffer; mode?: num
   let offset = 0;
   for (const entry of entries) {
     const name = Buffer.from(entry.path);
-    const crc = testCrc32(entry.data);
+    const crc = crc32(entry.data);
     const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(0x0800, 6);
-    local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(entry.data.byteLength, 18);
-    local.writeUInt32LE(entry.data.byteLength, 22);
-    local.writeUInt16LE(name.byteLength, 26);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x0800, 6);
+    local.writeUInt32LE(crc, 14); local.writeUInt32LE(entry.data.length, 18); local.writeUInt32LE(entry.data.length, 22); local.writeUInt16LE(name.length, 26);
     localParts.push(local, name, entry.data);
     const central = Buffer.alloc(46);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE((3 << 8) | 20, 4);
-    central.writeUInt16LE(20, 6);
-    central.writeUInt16LE(0x0800, 8);
-    central.writeUInt32LE(crc, 16);
-    central.writeUInt32LE(entry.data.byteLength, 20);
-    central.writeUInt32LE(entry.data.byteLength, 24);
-    central.writeUInt16LE(name.byteLength, 28);
-    central.writeUInt32LE(((entry.mode ?? 0o100644) << 16) >>> 0, 38);
-    central.writeUInt32LE(offset, 42);
+    central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE((3 << 8) | 20, 4); central.writeUInt16LE(20, 6); central.writeUInt16LE(0x0800, 8);
+    central.writeUInt32LE(crc, 16); central.writeUInt32LE(entry.data.length, 20); central.writeUInt32LE(entry.data.length, 24); central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE(((entry.mode ?? 0o100644) << 16) >>> 0, 38); central.writeUInt32LE(offset, 42);
     centralParts.push(central, name);
-    offset += local.byteLength + name.byteLength + entry.data.byteLength;
+    offset += local.length + name.length + entry.data.length;
   }
   const central = Buffer.concat(centralParts);
-  const eocd = Buffer.alloc(22);
-  eocd.writeUInt32LE(0x06054b50, 0);
-  eocd.writeUInt16LE(entries.length, 8);
-  eocd.writeUInt16LE(entries.length, 10);
-  eocd.writeUInt32LE(central.byteLength, 12);
-  eocd.writeUInt32LE(offset, 16);
-  return Buffer.concat([...localParts, central, eocd]);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(central.length, 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...localParts, central, end]);
 }
 
-function testCrc32(data: Buffer): number {
+function crc32(data: Buffer): number {
   let crc = 0xffffffff;
   for (const byte of data) {
     crc ^= byte;
