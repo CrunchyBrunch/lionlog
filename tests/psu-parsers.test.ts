@@ -47,6 +47,25 @@ test("pure menu parser distinguishes a validated empty menu from structural fail
   );
 });
 
+test("menu parser rejects source items that contradict a recognized empty state", async () => {
+  const emptyHtml = await fixture("menu-empty.sanitized.html");
+  const populatedHtml = await fixture("menu-east-lunch.sanitized.html");
+  const emptyContext = { sourceCampusId: "17", sourceDate: "8/31/26", sourceMeal: "Late Night" };
+  const populatedContext = { sourceCampusId: "11", sourceDate: "8/31/26", sourceMeal: "Lunch" };
+  const sourceItem = '<div class="menu-items daily-menu-item"><a class="daily-menu-item__link" href="nutrition-label.cfm?mid=900000001">Fixture Lemon Chicken</a></div>';
+
+  for (const html of [
+    emptyHtml.replace("</body>", `${sourceItem}</body>`),
+    emptyHtml.replace("</body>", '<a class="daily-menu-item__link" href="nutrition-label.cfm?mid=900000001">Fixture Lemon Chicken</a></body>'),
+  ]) {
+    assert.throws(() => parsePsuMenuHtml(html, emptyContext), /empty state while containing source items/i);
+  }
+  assert.throws(
+    () => parsePsuMenuHtml(populatedHtml.replace("</body>", '<div class="daily-menu-empty">No menu items are available.</div></body>'), populatedContext),
+    /empty state while containing source items/i,
+  );
+});
+
 test("menu parser validates the returned selected meal value instead of the requested label", async () => {
   const html = await fixture("menu-east-lunch.sanitized.html");
   assert.throws(
