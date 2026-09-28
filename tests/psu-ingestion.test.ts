@@ -277,6 +277,34 @@ test("structural failures are not retried and preserve last-known-good as stale"
   assert.equal(calls, 1);
 });
 
+test("contradictory empty refresh preserves the same-query snapshot and cannot become live", async () => {
+  const store = new MemoryPsuSnapshotStore();
+  const first = await pipelineFor(fixtureFetch(), store).run(eastLunchQuery);
+  assert.equal(first.state, "live");
+  if (first.state !== "live") return;
+
+  let calls = 0;
+  const contradictoryFetch: typeof fetch = async (input) => {
+    calls += 1;
+    const emptyHtml = (await fixture("menu-empty.sanitized.html"))
+      .replace('value="Late Night" selected', 'value="Lunch" selected')
+      .replace('value="17" selected', 'value="11" selected')
+      .replace("</body>", '<div class="menu-items daily-menu-item"><a class="daily-menu-item__link" href="nutrition-label.cfm?mid=900000001">Fixture Lemon Chicken</a></div></body>');
+    return htmlResponse(emptyHtml, String(input));
+  };
+  const failed = await pipelineFor(contradictoryFetch, store).run(eastLunchQuery);
+  assert.equal(failed.state, "stale");
+  if (failed.state !== "stale") return;
+  assert.match(failed.error.message, /empty state while containing source items/i);
+  assert.equal(failed.snapshot.snapshotId, first.snapshot.snapshotId);
+  assert.deepEqual(await store.readMenu(eastLunchQuery), first.snapshot);
+  assert.equal(calls, 1);
+
+  const withoutPrior = await pipelineFor(contradictoryFetch, new MemoryPsuSnapshotStore()).run(eastLunchQuery);
+  assert.equal(withoutPrior.state, "unavailable");
+  assert.equal(withoutPrior.snapshot, null);
+});
+
 test("failure without retained data returns unavailable rather than sample", async () => {
   const brokenFetch: typeof fetch = async (input) => htmlResponse(
     await fixture("menu-structural-failure.sanitized.html"),

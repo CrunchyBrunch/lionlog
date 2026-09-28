@@ -62,6 +62,12 @@ export function parsePsuMenuHtml(html: string, expected: PsuMenuParseContext): P
     hasClass(element, "daily-menu-empty") || getAttribute(element, "data-menu-empty") !== undefined
   ).some((element) => /no (?:menu items|items|menu) (?:are )?available/i.test(normalizedText(element)));
 
+  if (recognizedEmpty && descendants(document, (element) =>
+    hasClass(element, "daily-menu-item") || hasClass(element, "daily-menu-item__link")
+  ).length > 0) {
+    throw new PsuStructuralError("PSU menu response claimed an empty state while containing source items.");
+  }
+
   if (itemCount === 0 && !recognizedEmpty) {
     throw new PsuStructuralError("PSU menu response contained neither validated items nor a recognized empty state.");
   }
