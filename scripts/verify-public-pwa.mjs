@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, rm, readFile, realpath } from "node:fs/promises";
+import { access, mkdtemp, rm, readFile, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { connect as connectTcp, createServer as createTcpServer } from "node:net";
@@ -41,11 +42,16 @@ export async function verifyBrowserSession({
 }) {
   const expected = validateExpectedContext(expectedValue);
   const expectedUrl = new URL(targetUrl).href;
-  const browserExecutable = process.platform === "win32" ? await resolveWindowsBrowserExecutable(chromeBin) : chromeBin;
+  let browserExecutable;
+  try {
+    browserExecutable = await resolveBrowserExecutable(chromeBin);
+  } catch (error) {
+    throw browserStartupFailure({ reason: "executable-unavailable", executable: chromeBin, spawnError: error.code ?? "unresolved" });
+  }
   const profile = await mkdtemp(path.join(tmpdir(), "lionlog-pages-chrome-"));
   const port = await availablePort();
   const networkGate = await createBrowserNetworkGate();
-  const chrome = spawn(chromeBin, [
+  const chrome = spawn(browserExecutable, [
     "--headless=new",
     "--no-sandbox",
     "--disable-dev-shm-usage",
@@ -55,29 +61,29 @@ export async function verifyBrowserSession({
     "--proxy-bypass-list=<-loopback>",
     "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"] });
-  let launchDiagnostics = "";
-  chrome.stderr.on("data", (chunk) => { launchDiagnostics = (launchDiagnostics + chunk.toString("utf8")).slice(-2_000); });
+  const launchDiagnostics = createLaunchDiagnostics(profile);
+  chrome.stderr.on("data", (chunk) => launchDiagnostics.append(chunk.toString("utf8")));
+  let launchError;
+  chrome.on("error", (error) => { launchError = error; });
   const exited = new Promise((resolve) => chrome.once("exit", resolve));
-  const processOwner = createBrowserProcessOwner({
-    launcher: chrome,
-    launcherExited: exited,
-    profile,
-    debuggingPort: port,
-    browserExecutable,
-  });
+  let processOwner;
   let pageClient;
   let browserClient;
   const cleanup = createBrowserCleanup({
     getPageClient: () => pageClient,
     getBrowserClient: () => browserClient,
-    processOwner,
+    processOwner: { terminate: () => processOwner?.terminate() },
     networkGate,
     profile,
   });
   let verificationFailure;
   let result;
   try {
-    const endpoint = await waitForEndpoint(port, chrome, () => launchDiagnostics);
+    // A failed spawn has no PID and emits error instead of exit. Install both
+    // listeners immediately, before attempting process-owner construction.
+    await waitForBrowserSpawn(chrome, browserExecutable);
+    processOwner = createBrowserProcessOwner({ launcher: chrome, launcherExited: exited, profile, debuggingPort: port, browserExecutable });
+    const endpoint = await waitForEndpoint(port, chrome, () => launchDiagnostics.read(), { getLaunchError: () => launchError, profile });
     pageClient = await connectCdp(endpoint.page.webSocketDebuggerUrl);
     browserClient = await connectCdp(endpoint.browser.webSocketDebuggerUrl);
     processOwner.recordCdpProcessInfo((await browserClient.command("SystemInfo.getProcessInfo")).processInfo);
@@ -131,6 +137,7 @@ export async function verifyBrowserSession({
     const offlineServerRequestCount = await getOfflineServerRequestCount?.();
     if (offlineServerRequestCount !== undefined && offlineServerRequestCount !== 0) throw new Error(`The origin recorded ${offlineServerRequestCount} request(s) during the offline phase.`);
     result = {
+      startup: endpoint.startup,
       online,
       offline,
       diagnostics: diagnostics.length,
@@ -308,6 +315,16 @@ async function resolveWindowsBrowserExecutable(browserExecutable) {
   const first = output.split(/\r?\n/).find(Boolean);
   if (!first || !path.win32.isAbsolute(first)) throw new Error("Browser executable path could not be resolved.");
   return realpath(first);
+}
+
+async function resolveBrowserExecutable(browserExecutable) {
+  if (process.platform === "win32") return resolveWindowsBrowserExecutable(browserExecutable);
+  const candidates = browserExecutable.includes("/") ? [path.resolve(browserExecutable)]
+    : (process.env.PATH ?? "").split(path.delimiter).map((directory) => path.resolve(directory, browserExecutable));
+  for (const candidate of candidates) {
+    try { await access(candidate, constants.X_OK); return await realpath(candidate); } catch { /* Try the next PATH entry. */ }
+  }
+  throw Object.assign(new Error("Browser executable is unavailable."), { code: "ENOENT" });
 }
 
 export function matchesWindowsBrowserOwnership(identity, { profile, debuggingPort, expectedExecutablePath }) {
@@ -674,22 +691,114 @@ async function settleWithin(promise, timeoutMs) {
   return result;
 }
 
-export async function waitForEndpoint(port, chrome, launchDiagnostics) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+export function waitForBrowserSpawn(chrome, executable) {
+  return new Promise((resolve, reject) => {
+    chrome.once("spawn", resolve);
+    chrome.once("error", (error) => reject(browserStartupFailure({
+      reason: "spawn-error", executable, spawnError: error.code ?? "unknown",
+    })));
+  });
+}
+
+export async function waitForEndpoint(port, chrome, launchDiagnostics, {
+  timeoutMs = 30_000,
+  probeTimeoutMs = 1_000,
+  now = () => performance.now(),
+  pause = delay,
+  fetchEndpoint = fetch,
+  getLaunchError = () => undefined,
+  profile,
+} = {}) {
+  const started = now();
+  const deadline = started + timeoutMs;
+  let probes = 0;
+  let lastProbe = "not-attempted";
+  const failure = (reason) => browserStartupFailure({
+    reason, executable: chrome.spawnfile ?? "unknown", pid: chrome.pid ?? null,
+    exitCode: chrome.exitCode, signal: chrome.signalCode, spawnError: getLaunchError()?.code ?? null,
+    elapsedMs: Math.round(now() - started), timeoutMs, probes, port, lastProbe,
+    stderr: redactLaunchDiagnostics(launchDiagnostics(), profile),
+  });
+  while (now() < deadline) {
+    if (getLaunchError()) throw failure("spawn-error");
+    if ((chrome.exitCode !== null && chrome.exitCode !== 0) || chrome.signalCode !== null) throw failure("process-exit");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.min(probeTimeoutMs, deadline - now()));
+    probes += 1;
     try {
-      const [pagesResponse, browserResponse] = await Promise.all([fetch(`http://127.0.0.1:${port}/json/list`), fetch(`http://127.0.0.1:${port}/json/version`)]);
-      const pages = await pagesResponse.json();
-      const browser = await browserResponse.json();
-      const page = pages.find((target) => target.type === "page" && target.url === "about:blank")
-        ?? pages.find((target) => target.type === "page");
-      if (page?.webSocketDebuggerUrl && browser?.webSocketDebuggerUrl) return { page, browser };
-    } catch { /* Chrome is still starting. */ }
-    if ((chrome.exitCode !== null && chrome.exitCode !== 0) || chrome.signalCode !== null) {
-      throw new Error(`Chrome DevTools endpoint did not start (browser exited: ${chrome.exitCode ?? chrome.signalCode}). ${launchDiagnostics()}`);
+      const readEndpoint = async (endpoint) => {
+        const response = await fetchEndpoint(`http://127.0.0.1:${port}/json/${endpoint}`, { signal: controller.signal });
+        if (!response.ok) throw Object.assign(new Error(), { probeCode: `http-${response.status}` });
+        try { return await response.json(); } catch (error) {
+          if (controller.signal.aborted) throw error;
+          throw Object.assign(new Error(), { probeCode: "invalid-json" });
+        }
+      };
+      const [pages, browser] = await Promise.all([readEndpoint("list"), readEndpoint("version")]);
+      const page = Array.isArray(pages) ? pages.find((target) => target.type === "page" && target.url === "about:blank")
+        ?? pages.find((target) => target.type === "page") : undefined;
+      if (page?.webSocketDebuggerUrl && browser?.webSocketDebuggerUrl && now() < deadline) {
+        return { page, browser, startup: {
+          outcome: now() - started >= 10_000 ? "delayed-ready" : "ready",
+          executable: chrome.spawnfile ?? "unknown", elapsedMs: Math.round(now() - started), probes,
+          launcherExitCode: chrome.exitCode, launcherSignal: chrome.signalCode,
+        } };
+      }
+      lastProbe = "missing-targets";
+    } catch (error) {
+      // Never log endpoint bodies, URLs, arguments or arbitrary exception text.
+      lastProbe = controller.signal.aborted ? "probe-timeout" : error.probeCode ?? "connection-error";
+    } finally {
+      clearTimeout(timer);
+      controller.abort(); // Also cancel the sibling request if only one failed.
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (now() < deadline) await pause(Math.min(100, deadline - now()));
   }
-  throw new Error(`Chrome DevTools endpoint did not start. ${launchDiagnostics()}`);
+  throw failure("timeout");
+}
+
+export function createLaunchDiagnostics(profile) {
+  let tail = "";
+  let line = "";
+  let oversized = false;
+  return {
+    append(chunk) {
+      // Preserve record prefixes across chunks. Never retain a raw truncated
+      // suffix whose credential/URL prefix has already been discarded.
+      for (const character of chunk) {
+        if (character === "\n") {
+          const record = oversized ? "<oversized diagnostic omitted>" : redactLaunchDiagnostics(line, profile);
+          tail = `${tail}${record}\n`.slice(-2_000);
+          line = "";
+          oversized = false;
+        } else if (!oversized) {
+          line += character;
+          if (line.length > 2_000) { line = ""; oversized = true; }
+        }
+      }
+    },
+    read() { return (tail + (oversized ? "<oversized diagnostic omitted>" : redactLaunchDiagnostics(line, profile))).slice(-2_000); },
+  };
+}
+
+function redactLaunchDiagnostics(value, profile) {
+  let text = String(value);
+  if (profile) text = text.split(profile).join("<isolated-profile>");
+  const redacted = text.replace(/(?:https?|wss?):\/\/[^\s"'<>]+/gi, "<redacted-url>")
+    .replace(/\b(?:authorization|cookie|set-cookie)\s*[:=][^\r\n]*/gi, "<redacted-header>")
+    .replace(/\b(?:token|password|secret|api[_-]?key)\s*[:=][^\r\n]*/gi, "<redacted-credential>")
+    .slice(-2_000);
+  return [...redacted].map((character) => {
+    const code = character.charCodeAt(0);
+    return (code < 32 && ![9, 10, 13].includes(code)) || code === 127 ? "?" : character;
+  }).join("");
+}
+
+function browserStartupFailure(startup) {
+  const error = new Error(`BROWSER_STARTUP_FAILED: Chrome DevTools endpoint did not start. ${JSON.stringify(startup)}`);
+  error.code = "BROWSER_STARTUP_FAILED";
+  error.startup = startup;
+  return error;
 }
 
 async function connectCdp(url) {

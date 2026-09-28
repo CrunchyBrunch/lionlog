@@ -19,5 +19,13 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --ignore-scripts
+      - name: Identify regression browser
+        shell: bash
+        run: |
+          browser="$(command -v google-chrome)"
+          test -x "$browser"
+          printf 'Regression browser: %s\n' "$browser"
+          "$browser" --version
+          printf 'CHROME_BIN=%s\n' "$browser" >> "$GITHUB_ENV"
       - run: npm test
       - run: npm run lint
