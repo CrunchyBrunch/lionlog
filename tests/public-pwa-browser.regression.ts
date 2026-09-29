@@ -20,7 +20,7 @@ const fixedBrowserNow = "2026-09-17T12:00:00.000Z";
 const browserBasePath = process.env.LIONLOG_BROWSER_TEST_BASE_PATH ?? "";
 if (!/^(?:|\/[A-Za-z0-9][A-Za-z0-9._-]*)$/.test(browserBasePath)) throw new Error("Browser regression base path is invalid.");
 
-test("React-controlled historical date and target-wide offline reload use only validated saved data", { timeout: 90_000 }, async () => {
+test("React-controlled historical date and target-wide offline reload use only validated saved data", { timeout: 90_000 }, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "lionlog-browser-regression-"));
   const site = path.join(root, "site");
   let offlinePhase = false;
@@ -125,6 +125,7 @@ test("React-controlled historical date and target-wide offline reload use only v
       }).catch((error) => {
         throw new Error(`${error instanceof Error ? error.message : String(error)}; origin requests: ${JSON.stringify(requestPaths)}`);
       });
+      t.diagnostic(`Browser startup: ${JSON.stringify(result.startup)}`);
       assert.equal(result.uncachedResourceFailed, true);
       assert.equal(result.dedicatedWorkerUncachedResourceFailed, true);
       assert.equal(result.offlineServerRequestCount, 0);
