@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { createLaunchDiagnostics, waitForBrowserSpawn, waitForEndpoint } from "../scripts/verify-public-pwa.mjs";
 
@@ -8,6 +11,63 @@ const running = { pid: 123, exitCode: null, signalCode: null, spawnfile: "/brows
 const ready = (url) => new Response(JSON.stringify(url.endsWith("/list")
   ? [{ type: "page", url: "about:blank", webSocketDebuggerUrl: "ws://127.0.0.1/page" }]
   : { webSocketDebuggerUrl: "ws://127.0.0.1/browser" }));
+
+test("quoted credentials never reach retained diagnostics or startup errors across chunk boundaries", async () => {
+  for (const record of [
+    '{"token":"SYNTHETIC_SECRET words"}',
+    "{'password': 'SYNTHETIC_SECRET words'}",
+    '{"Authorization":"Bearer SYNTHETIC_SECRET"}',
+    'URL https://example.test/?token="SYNTHETIC_SECRET words"',
+    'api-key="SYNTHETIC_SECRET words"',
+  ]) {
+    for (let split = 0; split <= record.length; split += 1) {
+      const diagnostics = createLaunchDiagnostics();
+      diagnostics.append(record.slice(0, split));
+      diagnostics.append(record.slice(split));
+      assert.doesNotMatch(diagnostics.read(), /SYNTHETIC_SECRET/);
+      diagnostics.append("\n");
+      await assert.rejects(waitForEndpoint(1, { ...running, exitCode: 1 }, () => diagnostics.read()), (error) => {
+        assert.equal(error.code, "BROWSER_STARTUP_FAILED");
+        assert.doesNotMatch(error.message, /SYNTHETIC_SECRET/);
+        return true;
+      });
+    }
+    const diagnostics = createLaunchDiagnostics();
+    for (const character of record + "\n") diagnostics.append(character);
+    assert.doesNotMatch(diagnostics.read(), /SYNTHETIC_SECRET/);
+  }
+});
+
+test("a real synchronous Windows spawn failure closes servers and removes its profile", { skip: process.platform !== "win32", timeout: 10_000 }, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lionlog-invalid-launch-"));
+  try {
+    const executable = path.join(directory, "invalid.exe");
+    await writeFile(executable, "This is a synthetic invalid executable.\n");
+    const verifier = new URL("../scripts/verify-public-pwa.mjs", import.meta.url).href;
+    const script = `import { verifyBrowserSession } from ${JSON.stringify(verifier)};
+      try { await verifyBrowserSession({ targetUrl: 'http://127.0.0.1:1/', chromeBin: ${JSON.stringify(executable)},
+        expected: { contextVersion: 'lionlog.pages-browser-context.v1', releaseId: 'b'.repeat(64), shellRevision: 'a'.repeat(40),
+          serviceDate: '2026-08-31', hallId: 'psu:campus:11', mealPeriodId: 'lunch', expectedItemCount: 2, expectedFirstFoodName: 'Fixture' } });
+      } catch (error) { console.log(JSON.stringify({ code: error.code, reason: error.startup?.reason, spawnError: error.startup?.spawnError })); }`;
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
+      env: { ...process.env, TEMP: directory, TMP: directory }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+    });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.resume();
+    let forced = false;
+    const timer = setTimeout(() => { forced = true; child.kill(); }, 5_000);
+    let exitCode;
+    try { exitCode = await new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); }); }
+    finally { clearTimeout(timer); }
+    assert.equal(forced, false, "verifier must exit naturally without listening servers");
+    assert.equal(exitCode, 0);
+    assert.deepEqual(JSON.parse(stdout), { code: "BROWSER_STARTUP_FAILED", reason: "spawn-error", spawnError: "UNKNOWN" });
+    assert.deepEqual((await readdir(directory)).filter((name) => name.startsWith("lionlog-pages-chrome-")), []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("diagnostics redact split records and drop oversized records before tail retention", () => {
   const diagnostics = createLaunchDiagnostics("/private/profile");
@@ -36,7 +96,7 @@ test("a real failed spawn is classified without an unhandled process error", asy
 
 test("startup failure reports exit state and redacted diagnostics, not an application failure", async () => {
   await assert.rejects(waitForEndpoint(1, { ...running, exitCode: 7 },
-    () => "sandbox failed https://user:secret@example.test/?token=secret token=hidden", {
+    () => "sandbox failed\nhttps://user:secret@example.test/?token=secret token=hidden", {
       timeoutMs: 100, fetchEndpoint: async () => { throw new Error("connection refused"); },
     }), (error) => {
     assert.equal(error.code, "BROWSER_STARTUP_FAILED");

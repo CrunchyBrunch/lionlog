@@ -51,21 +51,6 @@ export async function verifyBrowserSession({
   const profile = await mkdtemp(path.join(tmpdir(), "lionlog-pages-chrome-"));
   const port = await availablePort();
   const networkGate = await createBrowserNetworkGate();
-  const chrome = spawn(browserExecutable, [
-    "--headless=new",
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    `--remote-debugging-port=${port}`,
-    `--user-data-dir=${profile}`,
-    `--proxy-server=http://127.0.0.1:${networkGate.port}`,
-    "--proxy-bypass-list=<-loopback>",
-    "about:blank",
-  ], { stdio: ["ignore", "ignore", "pipe"] });
-  const launchDiagnostics = createLaunchDiagnostics(profile);
-  chrome.stderr.on("data", (chunk) => launchDiagnostics.append(chunk.toString("utf8")));
-  let launchError;
-  chrome.on("error", (error) => { launchError = error; });
-  const exited = new Promise((resolve) => chrome.once("exit", resolve));
   let processOwner;
   let pageClient;
   let browserClient;
@@ -79,6 +64,28 @@ export async function verifyBrowserSession({
   let verificationFailure;
   let result;
   try {
+    let chrome;
+    try {
+      chrome = spawn(browserExecutable, [
+        "--headless=new",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        `--remote-debugging-port=${port}`,
+        `--user-data-dir=${profile}`,
+        `--proxy-server=http://127.0.0.1:${networkGate.port}`,
+        "--proxy-bypass-list=<-loopback>",
+        "about:blank",
+      ], { stdio: ["ignore", "ignore", "pipe"] });
+    } catch (error) {
+      // Windows may throw before returning a ChildProcess. The proxy/profile
+      // still belong to this session and must pass through the same cleanup.
+      throw browserStartupFailure({ reason: "spawn-error", executable: browserExecutable, spawnError: error.code ?? "unknown" });
+    }
+    const launchDiagnostics = createLaunchDiagnostics(profile);
+    chrome.stderr.on("data", (chunk) => launchDiagnostics.append(chunk.toString("utf8")));
+    let launchError;
+    chrome.on("error", (error) => { launchError = error; });
+    const exited = new Promise((resolve) => chrome.once("exit", resolve));
     // A failed spawn has no PID and emits error instead of exit. Install both
     // listeners immediately, before attempting process-owner construction.
     await waitForBrowserSpawn(chrome, browserExecutable);
@@ -782,11 +789,13 @@ export function createLaunchDiagnostics(profile) {
 }
 
 function redactLaunchDiagnostics(value, profile) {
-  let text = String(value);
+  // Omit the entire credential-bearing record before any replacement can
+  // erase its key. This also covers quoted JSON keys and multiword values.
+  let text = String(value).split("\n").map((record) =>
+    /\b(?:authorization|cookie|set-cookie|token|password|secret|api[_-]?key)\b/i.test(record)
+      ? "<credential diagnostic omitted>" : record).join("\n");
   if (profile) text = text.split(profile).join("<isolated-profile>");
   const redacted = text.replace(/(?:https?|wss?):\/\/[^\s"'<>]+/gi, "<redacted-url>")
-    .replace(/\b(?:authorization|cookie|set-cookie)\s*[:=][^\r\n]*/gi, "<redacted-header>")
-    .replace(/\b(?:token|password|secret|api[_-]?key)\s*[:=][^\r\n]*/gi, "<redacted-credential>")
     .slice(-2_000);
   return [...redacted].map((character) => {
     const code = character.charCodeAt(0);
