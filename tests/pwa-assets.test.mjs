@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
+import { createServer } from "node:http";
 import path from "node:path";
 import test from "node:test";
 import vm from "node:vm";
@@ -147,6 +148,75 @@ test("service-worker installation fails when any offline startup asset is unavai
   vm.runInNewContext(source, context);
   await assert.rejects(context.cacheApplicationShell(), /asset was unavailable/);
   assert.ok(cached.includes("https://lionlog.example/lionlog/"));
+});
+
+test("project-site worker skips the canonical alias while rejecting redirected startup assets", { timeout: 15_000 }, async () => {
+  const shellRevision = "a".repeat(40);
+  const source = (await readFile(path.join(projectRoot, "public/sw.js"), "utf8"))
+    .replaceAll("__LIONLOG_SHELL_REVISION__", shellRevision);
+  const requests = [];
+  const cached = new Map();
+  let redirectAppScript = false;
+  let origin;
+  const server = createServer((request, response) => {
+    const pathname = new URL(request.url ?? "/", origin).pathname;
+    requests.push(pathname);
+    if (pathname === "/lionlog") {
+      response.writeHead(301, { location: "/lionlog/" });
+      response.end();
+      return;
+    }
+    if (pathname === "/lionlog/_next/app.js" && redirectAppScript) {
+      response.writeHead(302, { location: "/lionlog/_next/redirected-app.js" });
+      response.end();
+      return;
+    }
+    const shell = `<html data-lionlog-shell="${shellRevision}"><head>`
+      + `<link rel="canonical" href="${origin}/lionlog"/>`
+      + `<link rel="stylesheet" href="${origin}/lionlog/_next/app.css"/>`
+      + `</head><body><script src="${origin}/lionlog/_next/app.js"></script></body></html>`;
+    const assets = new Map([
+      ["/lionlog/", ["text/html", shell]],
+      ["/lionlog/manifest.webmanifest", ["application/manifest+json", "{}"]],
+      ["/lionlog/_next/app.css", ["text/css", "body{}"]],
+      ["/lionlog/_next/app.js", ["text/javascript", "console.log('app')"]],
+      ["/lionlog/_next/redirected-app.js", ["text/javascript", "console.log('redirected')"]],
+      ...["icon-192.png", "icon-512.png", "apple-touch-icon.png"]
+        .map((name) => [`/lionlog/icons/${name}`, ["image/png", "icon"]]),
+    ]);
+    const asset = assets.get(pathname);
+    if (!asset) { response.writeHead(404); response.end(); return; }
+    response.writeHead(200, { "content-type": asset[0] });
+    response.end(asset[1]);
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    origin = `http://127.0.0.1:${server.address().port}`;
+    const context = {
+      URL, TextEncoder, fetch,
+      caches: { open: async () => ({
+        async put(url, response) { cached.set(String(url), (await response.arrayBuffer()).byteLength); },
+      }) },
+      self: {
+        location: { origin },
+        registration: { scope: `${origin}/lionlog/` },
+        addEventListener() {},
+      },
+    };
+    vm.runInNewContext(source, context);
+    await context.cacheApplicationShell();
+    assert.equal(requests.includes("/lionlog"), false, "the redundant canonical alias must not be fetched as an asset");
+    for (const url of ["/lionlog/", "/lionlog/manifest.webmanifest", "/lionlog/_next/app.css", "/lionlog/_next/app.js"]) {
+      assert.ok(cached.has(`${origin}${url}`), `${url} must remain available offline`);
+    }
+    redirectAppScript = true;
+    await assert.rejects(context.cacheApplicationShell(), /LionLog shell asset was unavailable: .*\/lionlog\/_next\/app\.js/);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 });
 
 test("service-worker lifecycle scopes caches and preserves the active shell across interrupted update and rollback", async () => {

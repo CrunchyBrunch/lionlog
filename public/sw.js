@@ -43,7 +43,7 @@ async function cacheApplicationShell() {
   const html = await shellResponse.text();
   const assetUrls = [...html.matchAll(/(?:src|href)=["']([^"']+)["']/g)]
     .map((match) => new URL(match[1], SCOPE_URL))
-    .filter(isWithinApplicationScope)
+    .filter((url) => isWithinApplicationScope(url) && url.pathname !== SCOPE_PATH.slice(0, -1))
     .map((url) => url.href);
 
   await Promise.all(
