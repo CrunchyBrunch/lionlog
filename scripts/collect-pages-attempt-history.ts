@@ -5,6 +5,8 @@ import { pathToFileURL } from "node:url";
 import { parseArtifactZip } from "./artifact-zip.ts";
 import { assertArtifactDigest } from "./artifact-digest.ts";
 import { LIONLOG_REPOSITORY_ID, PROMOTION_WORKFLOW_ID } from "../infrastructure/publication/release-contract.ts";
+import { validatePublishedIncidentRecord, type PublishedIncident } from "./published-incident.ts";
+import { collectPublishedResolution, type PublishedResolution } from "./published-incident-collection.ts";
 
 const API_ROOT = "https://api.github.com";
 const PER_PAGE = 100;
@@ -27,6 +29,7 @@ export interface CollectedAttemptEvidence {
   submissionBoundaryConclusion: string | null;
   deploymentConclusion: string | null;
   incidentEvidence: IncidentCollectionEvidence | null;
+  publishedResolution: PublishedResolution | null;
   legacyEvidence: LegacyAttemptEvidence;
   receipt: null | {
     artifactId: number;
@@ -86,6 +89,7 @@ interface IncidentContract {
   workflowSha: string;
   collectorEvidence: IncidentCollectionEvidence;
   legacyEvidence: LegacyAttemptEvidence | null;
+  published: PublishedIncident | null;
 }
 
 const TERMINAL_CONCLUSIONS = new Set(["success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", "stale"]);
@@ -96,12 +100,13 @@ export async function collectPagesAttemptHistory(options: {
   token: string;
   incidentHistory: unknown;
   fetchImpl?: typeof fetch;
+  now?: Date;
 }): Promise<CollectedAttemptEvidence[]> {
   if (options.repository !== "CrunchyBrunch/lionlog" || !positive(options.currentRunId) || options.token.length < 1) {
     throw new Error("Attempt-history authority is invalid.");
   }
   const fetchImpl = options.fetchImpl ?? fetch;
-  const incidentContracts = parseIncidentContracts(options.incidentHistory);
+  const incidentContracts = parseIncidentContracts(options.incidentHistory, options.now ?? new Date());
   const runs = await paginated(fetchImpl, options.token,
     `/repos/${options.repository}/actions/workflows/${PROMOTION_WORKFLOW_ID}/runs`, "workflow_runs");
   assertUniqueRecords(runs, "id", "Workflow-run history");
@@ -144,6 +149,7 @@ export async function collectPagesAttemptHistory(options: {
       evidenceKeys.add(key);
       if (contract && contract.workflowSha !== attemptRun.head_sha) throw new Error("Incident-bound workflow SHA does not match the requested attempt.");
       const incidentEvidence = contract ? collectIncidentEvidence(attemptRun, jobs, contract.collectorEvidence) : null;
+      if (contract?.published) await assertExtraIncidentJobsPage(fetchImpl, options.token, options.repository, runId, attempt, jobs.length);
       const legacyEvidence = collectLegacyEvidence(jobs, contract?.legacyEvidence ?? null);
       const receiptName = `lionlog-pages-receipt-${runId}-${attempt}`;
       const receiptArtifacts = artifacts.filter((artifactValue) => (artifactValue as Record<string, unknown>).name === receiptName);
@@ -151,6 +157,21 @@ export async function collectPagesAttemptHistory(options: {
       const receipt = receiptArtifacts.length === 1
         ? await readReceipt(fetchImpl, options.token, options.repository, runId, attemptRun.head_sha, receiptArtifacts[0] as Record<string, unknown>)
         : null;
+      let publishedResolution: PublishedResolution | null = null;
+      if (contract?.published) {
+        const candidateArtifacts = await paginated(fetchImpl, options.token,
+          `/repos/${options.repository}/actions/runs/${contract.published.evidence.release.candidateProducerRunId}/artifacts`, "artifacts");
+        const collected = await collectPublishedResolution({
+          record: contract.published, token: options.token,
+          artifactMetadata: [...artifacts, ...candidateArtifacts], fetchImpl, now: options.now,
+        });
+        if (!receipt || receipt.artifactId !== collected.resolution.receiptArtifactId
+          || receipt.artifactDigest !== collected.resolution.receiptArtifactDigest
+          || JSON.stringify(receipt.content) !== JSON.stringify(collected.receipt)) {
+          throw new Error("Published incident flat receipt differs from bound artifact bytes.");
+        }
+        publishedResolution = collected.resolution;
+      }
       evidence.push({
         runId,
         workflowId: number(attemptRun.workflow_id, "Attempt workflow ID"),
@@ -166,6 +187,7 @@ export async function collectPagesAttemptHistory(options: {
         submissionBoundaryConclusion: stepConclusion(steps, "Record official submission boundary"),
         deploymentConclusion: stepConclusion(steps, "Deploy with official Pages action"),
         incidentEvidence,
+        publishedResolution,
         legacyEvidence,
         receipt,
       });
@@ -286,7 +308,18 @@ async function paginated(fetchImpl: typeof fetch, token: string, endpoint: strin
   throw new Error(`Paginated ${key} history exceeds the bounded ${PER_PAGE * MAX_PAGES}-entry limit.`);
 }
 
-function parseIncidentContracts(value: unknown): Map<string, IncidentContract> {
+async function assertExtraIncidentJobsPage(
+  fetchImpl: typeof fetch, token: string, repository: string, runId: number, attempt: number, collectedCount: number,
+): Promise<void> {
+  if (collectedCount !== 3) throw new Error("Published incident exact job graph is incomplete.");
+  const body = await apiJson(fetchImpl, token,
+    `/repos/${repository}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=${PER_PAGE}&page=2`) as Record<string, unknown>;
+  if (body.total_count !== collectedCount || !Array.isArray(body.jobs) || body.jobs.length !== 0) {
+    throw new Error("Published incident jobs continuation conflicts with complete first page.");
+  }
+}
+
+function parseIncidentContracts(value: unknown, now: Date): Map<string, IncidentContract> {
   const history = value as { historyVersion?: unknown; incidents?: unknown };
   if (history?.historyVersion !== "lionlog.pages-incident-history.v1" || !Array.isArray(history.incidents)) {
     throw new Error("Pages incident history is invalid for attempt collection.");
@@ -298,6 +331,8 @@ function parseIncidentContracts(value: unknown): Map<string, IncidentContract> {
     const runAttempt = number(incident.runAttempt, "Incident run attempt");
     const workflowSha = string(incident.workflowSha, "Incident workflow SHA");
     if (!GIT_SHA.test(workflowSha)) throw new Error("Incident workflow SHA is invalid.");
+    const published = incident.outcome === "resolved-published-browser-unverified"
+      ? validatePublishedIncidentRecord(incident, now) : null;
     const collectorEvidence = validateIncidentCollectionEvidence(incident.collectorEvidence, runId, runAttempt, workflowSha);
     const legacyEvidence = incident.outcome === "resolved-legacy-pre-submission-failure"
       ? validateLegacyEvidenceContract(incident.legacyEvidence)
@@ -307,7 +342,7 @@ function parseIncidentContracts(value: unknown): Map<string, IncidentContract> {
     }
     const key = `${runId}/${runAttempt}`;
     if (contracts.has(key)) throw new Error("Pages incident history contains duplicate run/attempt contracts.");
-    contracts.set(key, { runId, runAttempt, workflowSha, collectorEvidence, legacyEvidence });
+    contracts.set(key, { runId, runAttempt, workflowSha, collectorEvidence, legacyEvidence, published });
   }
   return contracts;
 }

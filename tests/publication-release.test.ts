@@ -24,6 +24,7 @@ import { assertExpectedPredecessor, FIRST_PUBLICATION, observePublicRelease } fr
 import { collectLegacyEvidence, collectPagesAttemptHistory } from "../scripts/collect-pages-attempt-history.ts";
 import { selectBrowserVerificationContext } from "../scripts/select-browser-verification-context.ts";
 import { assertArtifactDigest, normalizeArtifactDigest } from "../scripts/artifact-digest.ts";
+import { canonicalEvidenceDigest, validatePublishedIncidentRecord } from "../scripts/published-incident.ts";
 
 const workflowSha = "a".repeat(40);
 const sourceSha = "b".repeat(40);
@@ -250,6 +251,87 @@ test("protected final check rejects main drift, artifact drift, expiration, and 
     }] },
     now,
   }));
+});
+
+test("published browser-unverified attempt needs exact proof, fresh full-inventory phase and leaves later failures blocking", async () => {
+  const raw = JSON.parse(await readFile(new URL("./fixtures/published-incident-record.json", import.meta.url), "utf8"));
+  raw.decision.evidenceDigest = canonicalEvidenceDigest(raw);
+  const gateNow = new Date("2026-10-07T19:00:00.000Z");
+  const incident = validatePublishedIncidentRecord(raw, gateNow);
+  const parsed = JSON.parse(await readFile(new URL("./fixtures/published-incident-parsed.json", import.meta.url), "utf8"));
+  const summary = summaryFixture();
+  summary.authorization.approvalExpiresAt = "2026-10-08T19:00:00.000Z";
+  summary.authorization.predecessorReleaseId = incident.evidence.release.id;
+  summary.release.earliestFreshUntil = "2026-10-08T19:00:00.000Z";
+  summary.release.earliestRetainUntil = "2026-10-09T19:00:00.000Z";
+  const prior = priorAttempt({
+    runId: incident.runId, runAttempt: 1, workflowSha: incident.workflowSha,
+    status: "completed", conclusion: "failure", jobsComplete: true,
+    finalGateConclusion: "success", submissionBoundaryConclusion: "success", deploymentConclusion: "success",
+    incidentEvidence: incident.collectorEvidence,
+    receipt: {
+      artifactId: incident.evidence.artifacts.receipt.id,
+      artifactDigest: incident.evidence.artifacts.receipt.wrapperDigest,
+      artifactExpiresAt: incident.evidence.artifacts.receipt.expiresAt,
+      content: parsed.receipt,
+    },
+    publishedResolution: {
+      evidenceDigest: incident.decision.evidenceDigest, runId: incident.runId, runAttempt: 1,
+      workflowSha: incident.workflowSha, releaseId: incident.evidence.release.id,
+      receiptArtifactId: incident.evidence.artifacts.receipt.id,
+      receiptArtifactDigest: incident.evidence.artifacts.receipt.wrapperDigest,
+      decision: {
+        commentId: incident.decision.commentId, evidenceDigest: incident.decision.evidenceDigest,
+        actorId: incident.decision.actorId, decidedAt: incident.decision.decidedAt,
+        pullRequestNumber: incident.decision.pullRequestNumber, mergedCommitSha: "b".repeat(40),
+      },
+    },
+  });
+  const check = {
+    phase: "incident-release" as const, evidenceDigest: incident.decision.evidenceDigest,
+    releaseId: incident.evidence.release.id, fileCount: 51,
+    inventoryStartedAt: "2026-10-07T18:59:30.000Z",
+    inventoryCompletedAt: "2026-10-07T18:59:50.000Z",
+    markerObservedAt: "2026-10-07T18:59:51.000Z",
+  };
+  const state = {
+    ...finalState(), priorAttempts: [prior],
+    publicPredecessor: { state: "present" as const, releaseId: incident.evidence.release.id },
+    publishedPredecessorCheck: check,
+  };
+  const incidents = { historyVersion: "lionlog.pages-incident-history.v1", incidents: [incident] };
+  assert.doesNotThrow(() => verifyFinalState({ summary, state, incidents, now: gateNow }));
+  assert.throws(() => verifyFinalState({ summary, state: { ...state, publishedPredecessorCheck: { ...check, markerObservedAt: "2026-10-07T18:59:40.000Z" } }, incidents, now: gateNow }), /order/);
+  assert.throws(() => verifyFinalState({ summary, state: { ...state, priorAttempts: [{ ...prior, publishedResolution: null }] }, incidents, now: gateNow }), /unknown or unresolved/);
+  assert.throws(() => verifyFinalState({ summary, state: { ...state, priorAttempts: [prior, priorAttempt({ runId: incident.runId + 1, conclusion: "failure" })] }, incidents, now: gateNow }), /unknown or unresolved/);
+  const laterRelease = "e".repeat(64);
+  const laterRunId = incident.runId + 1;
+  const laterKnownGood = priorAttempt({
+    runId: laterRunId, conclusion: "success", finalGateConclusion: "success",
+    submissionBoundaryConclusion: "success", deploymentConclusion: "success",
+    receipt: {
+      artifactId: 900, artifactDigest: `sha256:${"e".repeat(64)}`,
+      artifactExpiresAt: "2026-12-01T00:00:00.000Z",
+      content: {
+        receiptVersion: "lionlog.pages-flat-receipt.v1", workflow: { runId: laterRunId, runAttempt: 1 },
+        release: { id: laterRelease }, official: { submissionStarted: true, result: "success" },
+        public: { markerVerified: true, inventoryVerified: true, browserVerified: true },
+        knownGood: true, unresolved: false,
+      },
+    },
+  });
+  const laterSummary = structuredClone(summary);
+  laterSummary.authorization.predecessorReleaseId = laterRelease;
+  const laterState = {
+    ...state, priorAttempts: [prior, laterKnownGood],
+    publicPredecessor: { state: "present" as const, releaseId: laterRelease },
+    publishedPredecessorCheck: {
+      ...check, phase: "later-known-good" as const, releaseId: laterRelease,
+      fileCount: 0, inventoryStartedAt: null, inventoryCompletedAt: null,
+    },
+  };
+  assert.doesNotThrow(() => verifyFinalState({ summary: laterSummary, state: laterState, incidents, now: gateNow }));
+  assert.throws(() => verifyFinalState({ summary: laterSummary, state: { ...laterState, priorAttempts: [prior] }, incidents, now: gateNow }), /known-good/);
 });
 
 test("flat receipt becomes known-good only after official success and all public checks", () => {
