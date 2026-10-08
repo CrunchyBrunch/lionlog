@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
+import { promisify } from "node:util";
+import reviewedLogLines from "../infrastructure/publication/published-incident-log-lines.json" with { type: "json" };
 import { validatePublicationReleaseManifest } from "../infrastructure/publication/release-contract.ts";
 import { parseArtifactZip } from "./artifact-zip.ts";
 import { parsePublicationTar } from "./publication-tar.ts";
@@ -9,6 +12,7 @@ import { verifyPublishedDecision, type PublishedIncident, type VerifiedPublished
 
 type Binding = PublishedIncident["evidence"]["artifacts"]["candidate"];
 const REPOSITORY = "CrunchyBrunch/lionlog";
+const execFileAsync = promisify(execFile);
 
 function sha(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -69,15 +73,12 @@ export function verifyParsedPublishedArtifacts(
   stagedInventory: Inventory,
 ): void {
   const manifest = validatePublicationReleaseManifest(parsed.manifest);
-  // The immutable 2026-10-01 summary stores this exact expiry at second precision.
-  // Normalize only a copy for the current parser; never relax current authorization parsing.
+  // The immutable historical artifact uses the canonical millisecond spelling.
   const rawPreapproval = parsed.preapproval as { authorization?: { approvalExpiresAt?: unknown } };
-  if (rawPreapproval?.authorization?.approvalExpiresAt !== "2026-10-01T22:00:00Z") {
+  if (rawPreapproval?.authorization?.approvalExpiresAt !== "2026-10-01T22:00:00.000Z") {
     throw new Error("Published incident historical approval expiry differs.");
   }
-  const preapprovalValue = structuredClone(parsed.preapproval) as { authorization: { approvalExpiresAt: string } };
-  preapprovalValue.authorization.approvalExpiresAt = "2026-10-01T22:00:00.000Z";
-  const preapproval = validatePreapprovalSummary(preapprovalValue);
+  const preapproval = validatePreapprovalSummary(parsed.preapproval);
   const receipt = parsed.receipt as Record<string, unknown>;
   if (!exactKeys(receipt, ["receiptVersion", "recordedAt", "operation", "workflow", "candidate", "ci", "release", "staged", "rollbackSource", "official", "public", "knownGood", "unresolved"])
     || receipt.receiptVersion !== "lionlog.pages-flat-receipt.v1" || receipt.operation !== "promote"
@@ -166,6 +167,7 @@ export async function collectPublishedResolution(options: {
   artifactMetadata: unknown[];
   fetchImpl?: typeof fetch;
   now?: Date;
+  fullRunLog?: string;
 }): Promise<{ resolution: PublishedResolution; receipt: Record<string, unknown> }> {
   const { record, token, artifactMetadata } = options;
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -191,7 +193,7 @@ export async function collectPublishedResolution(options: {
   const stagedInventory = inspectPagesActionTar(contents.staged.get("artifact.tar")!);
   verifyParsedPublishedArtifacts(record, parsed, candidateInventory, stagedInventory);
 
-  const [candidateRun, ciRun, pagesStatus, deployment, statuses, statusesNext, deployLog, verifyLog, decision] = await Promise.all([
+  const [candidateRun, ciRun, pagesStatus, deployment, statuses, statusesNext, deployLog, verifyLog, decision, fullRunLog] = await Promise.all([
     githubJson(fetchImpl, `/actions/runs/${record.evidence.release.candidateProducerRunId}`, token),
     githubJson(fetchImpl, `/actions/runs/${record.evidence.release.exactSourceCiRunId}`, token),
     githubJson(fetchImpl, `/pages/deployments/${record.evidence.officialPages.deploymentId}`, token),
@@ -201,8 +203,9 @@ export async function collectPublishedResolution(options: {
     githubText(fetchImpl, `/actions/jobs/${record.evidence.officialPages.sourceJobId}/logs`, token),
     githubText(fetchImpl, `/actions/jobs/${record.evidence.browserFailure.jobId}/logs`, token),
     verifyPublishedDecision(record, fetchImpl),
+    options.fullRunLog === undefined ? reviewedFullRunLog(record.runId, token) : Promise.resolve(options.fullRunLog),
   ]);
-  verifyExternalPublishedEvidence(record, { candidateRun, ciRun, pagesStatus, deployment, statuses, statusesNext, deployLog, verifyLog });
+  verifyExternalPublishedEvidence(record, { candidateRun, ciRun, pagesStatus, deployment, statuses, statusesNext, deployLog, verifyLog, fullRunLog });
   return {
     resolution: {
       evidenceDigest: record.decision.evidenceDigest, runId: record.runId, runAttempt: record.runAttempt,
@@ -217,6 +220,7 @@ export async function collectPublishedResolution(options: {
 export function verifyExternalPublishedEvidence(record: PublishedIncident, value: {
   candidateRun: unknown; ciRun: unknown; pagesStatus: unknown; deployment: unknown; statuses: unknown;
   statusesNext: unknown; deployLog: string; verifyLog: string;
+  fullRunLog: string;
 }): void {
   const source = record.evidence.release;
   for (const [run, id] of [[value.candidateRun, source.candidateProducerRunId], [value.ciRun, source.exactSourceCiRunId]] as const) {
@@ -257,10 +261,30 @@ export function verifyExternalPublishedEvidence(record: PublishedIncident, value
     `"pages_build_version": "${record.workflowSha}"`,
     `Created deployment for ${record.workflowSha}, ID: ${official.deploymentId}`,
   ];
-  if (requiredDeployLog.some((fragment) => !deployLog.includes(fragment))
-    || !deployLog.includes(official.createdAt)
+  // The job endpoint restamps this event; the reviewed timestamp is in the run-wide export.
+  const lines = value.fullRunLog.replace(ansiColor, "").split(/\r?\n/);
+  const reviewed = Object.values(reviewedLogLines);
+  const positions = reviewed.map((line) => lines.indexOf(line));
+  if (positions.some((position, index) => position < 0 || lines.lastIndexOf(reviewed[index]) !== position
+      || (index > 0 && position <= positions[index - 1]))
+    || !reviewedLogLines.created.includes(official.createdAt)
+    || !reviewedLogLines.artifactPayload.includes(`"artifact_id": ${record.evidence.artifacts.staged.id}`)
+    || !reviewedLogLines.buildVersion.includes(record.workflowSha)
+    || !reviewedLogLines.publicInventory.includes(source.id)
+    || !reviewedLogLines.browserFailure.includes(record.evidence.browserFailure.error)
+    || requiredDeployLog.some((fragment) => !deployLog.includes(fragment))
     || !verifyLog.includes(`{"verifiedFiles":51,"releaseId":"${source.id}"}`)
     || !verifyLog.includes(record.evidence.browserFailure.error)) {
     throw new Error("Published incident official action or browser-failure log differs.");
   }
+}
+
+async function reviewedFullRunLog(runId: number, token: string): Promise<string> {
+  const { stdout } = await execFileAsync("gh", ["run", "view", String(runId), "--log", "--repo", REPOSITORY], {
+    env: { ...process.env, GH_TOKEN: token }, timeout: 30_000, maxBuffer: 12 * 1024 * 1024,
+  });
+  if (stdout.length === 0 || Buffer.byteLength(stdout) > 12 * 1024 * 1024) {
+    throw new Error("Published incident full-run log has invalid size.");
+  }
+  return stdout;
 }

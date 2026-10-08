@@ -28,7 +28,7 @@
       "snapshotSchemaVersion": "lionlog.psu-menu.v2",
       "parserVersion": "psu-html.v2",
       "generatedAt": "2026-10-01T12:34:51.886Z",
-      "retrievalStartedAt": "2026-10-01T12:18:22.03Z",
+      "retrievalStartedAt": "2026-10-01T12:18:22.030Z",
       "retrievalCompletedAt": "2026-10-01T12:34:49.113Z",
       "earliestFreshUntil": "2026-10-02T06:19:23.562Z",
       "earliestRetainUntil": "2026-10-03T12:19:23.562Z",
@@ -608,7 +608,7 @@
     },
     "rollbackReceipt": null,
     "authorization": {
-      "approvalExpiresAt": "2026-10-01T22:00:00Z",
+      "approvalExpiresAt": "2026-10-01T22:00:00.000Z",
       "predecessorReleaseId": "NONE_FIRST_PUBLICATION"
     },
     "staged": {

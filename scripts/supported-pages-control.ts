@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import reviewedPublishedReceipt from "../infrastructure/publication/published-incident-receipt.json" with { type: "json" };
 import {
   LIONLOG_REPOSITORY,
   LIONLOG_REPOSITORY_ID,
@@ -371,6 +372,7 @@ function matchesPublishedIncident(prior: PriorAttemptEvidence, incident: Publish
     && proof.decision.decidedAt === expectedDecision.decidedAt
     && proof.decision.pullRequestNumber === expectedDecision.pullRequestNumber
     && GIT_SHA.test(proof.decision.mergedCommitSha)
+    && isDeepStrictEqual(content, reviewedPublishedReceipt)
     && content.receiptVersion === "lionlog.pages-flat-receipt.v1"
     && content.knownGood === false && content.unresolved === true
     && official?.submissionStarted === true && official.result === "success"

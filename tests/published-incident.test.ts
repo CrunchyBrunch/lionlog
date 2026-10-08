@@ -44,6 +44,10 @@ test("published incident rejects malformed fields, swapped identities and digest
   mutate((copy) => { copy.evidence.officialPages.deploymentId = String(copy.evidence.repositoryEnvironment.deploymentId); });
   mutate((copy) => { copy.evidence.repositoryEnvironment.deploymentId = Number(copy.evidence.officialPages.deploymentId.slice(0, 12)); });
   mutate((copy) => { copy.evidence.release.inventory[0].sha256 = "f".repeat(64); });
+  mutate((copy) => {
+    copy.evidence.predecessor.publicInventory.reverse();
+    copy.decision.evidenceDigest = canonicalEvidenceDigest(copy);
+  });
   mutate((copy) => { copy.decision.actorId = 1; });
   mutate((copy) => { copy.evidence.predecessor.observedAt = "2026-10-06T11:30:00.000Z"; });
   mutate((copy) => { copy.evidence.predecessor.completedAt = "2026-10-06T12:14:00.000Z"; });
@@ -123,6 +127,9 @@ test("parsed historical manifest, preapproval, receipt and both tar inventories 
   const parsed = JSON.parse(await readFile(new URL("./fixtures/published-incident-parsed.json", import.meta.url), "utf8"));
   const inventory = incident.evidence.release.inventory;
   assert.doesNotThrow(() => verifyParsedPublishedArtifacts(incident, parsed, inventory, inventory));
+  const wrongExpirySpelling = structuredClone(parsed);
+  wrongExpirySpelling.preapproval.authorization.approvalExpiresAt = "2026-10-01T22:00:00Z";
+  assert.throws(() => verifyParsedPublishedArtifacts(incident, wrongExpirySpelling, inventory, inventory), /expiry/);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mutate = (change: (copy: Record<string, any>) => void) => {
     const copy = structuredClone(parsed);
@@ -139,6 +146,7 @@ test("parsed historical manifest, preapproval, receipt and both tar inventories 
 
 test("official Pages and repository environment identities remain separate and bind to action and failure logs", async () => {
   const incident = validatePublishedIncidentRecord(await fixture(), atDecision);
+  const reviewedLines = JSON.parse(await readFile(new URL("../infrastructure/publication/published-incident-log-lines.json", import.meta.url), "utf8")) as Record<string, string>;
   const sourceRun = (id: number) => ({ id, head_sha: incident.workflowSha, run_attempt: 1, status: "completed", conclusion: "success" });
   const env = incident.evidence.repositoryEnvironment;
   const value = {
@@ -159,15 +167,18 @@ test("official Pages and repository environment identities remain separate and b
     deployLog: [
       '"artifact_id": 11181496634',
       `"pages_build_version": "${incident.workflowSha}"`,
-      `${incident.evidence.officialPages.createdAt} Created deployment for ${incident.workflowSha}, ID: ${incident.evidence.officialPages.deploymentId}`,
+      `2026-10-01T17:45:47.4916379Z Created deployment for ${incident.workflowSha}, ID: ${incident.evidence.officialPages.deploymentId}`,
     ].join("\n"),
     verifyLog: `{"verifiedFiles":51,"releaseId":"${incident.evidence.release.id}"}\n${incident.evidence.browserFailure.error}`,
+    fullRunLog: Object.values(reviewedLines).join("\n"),
   };
   assert.doesNotThrow(() => verifyExternalPublishedEvidence(incident, value));
   assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, pagesStatus: { status: "failed" } }), /Pages/);
   assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, deployment: { ...value.deployment, id: incident.evidence.officialPages.deploymentId } }), /environment/);
   assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, deployLog: value.deployLog.replace("11181496634", "11181496635") }), /action/);
   assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, verifyLog: value.verifyLog.replace("shell asset", "shell file") }), /browser/);
+  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, fullRunLog: value.fullRunLog.replace("4916331Z", "4916379Z") }), /action/);
+  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, fullRunLog: value.fullRunLog.replace("deploy\tDeploy with official Pages action", "other\tDeploy with official Pages action") }), /action/);
 });
 
 test("first corrective read hashes every file before rereading the canonical marker", async () => {

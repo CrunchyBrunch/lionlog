@@ -4,6 +4,7 @@ import { z } from "zod";
 import { publicationReleaseMarkerSchema, publicationInventoryEntrySchema } from "../infrastructure/publication/release-contract.ts";
 import reviewedGraph from "../infrastructure/publication/published-incident-graph.json" with { type: "json" };
 import reviewedInventory from "../infrastructure/publication/published-incident-inventory.json" with { type: "json" };
+import reviewedPublicInventory from "../infrastructure/publication/published-incident-public-inventory.json" with { type: "json" };
 
 // This is reviewed policy for one historical attempt, not an effective resolution entry.
 export const PUBLISHED_INCIDENT_RUN = 36900859358;
@@ -130,11 +131,13 @@ export function validatePublishedIncidentRecord(value: unknown, now: Date): Publ
   }
   const release = record.evidence.release;
   const predecessor = record.evidence.predecessor;
-  const publicInventory = predecessor.publicInventory.map(({ path, bytes, sha256 }) => ({ path, bytes, sha256 }))
+  const publicInventory = predecessor.publicInventory;
+  const sortedPublicInventory = publicInventory.map(({ path, bytes, sha256 }) => ({ path, bytes, sha256 }))
     .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
   if (release.inventory.some((item, index) => index > 0 && release.inventory[index - 1].path >= item.path)
     || !isDeepStrictEqual(release.inventory, reviewedInventory)
-    || !isDeepStrictEqual(release.inventory, publicInventory)
+    || !isDeepStrictEqual(release.inventory, sortedPublicInventory)
+    || !isDeepStrictEqual(publicInventory, reviewedPublicInventory)
     || predecessor.marker.releaseId !== PUBLISHED_INCIDENT_RELEASE
     || predecessor.marker.sourceCommitSha !== PUBLISHED_INCIDENT_SHA
     || predecessor.marker.releaseKind !== "live"

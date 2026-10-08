@@ -301,6 +301,15 @@ test("published browser-unverified attempt needs exact proof, fresh full-invento
   };
   const incidents = { historyVersion: "lionlog.pages-incident-history.v1", incidents: [incident] };
   assert.doesNotThrow(() => verifyFinalState({ summary, state, incidents, now: gateNow }));
+  const rejectReceiptMutation = (change: (content: Record<string, unknown>) => void) => {
+    const mutated = structuredClone(state);
+    change(mutated.priorAttempts[0].receipt!.content);
+    assert.throws(() => verifyFinalState({ summary, state: mutated, incidents, now: gateNow }), /unknown or unresolved/);
+  };
+  rejectReceiptMutation((content) => { (content.candidate as { artifactDigest: string }).artifactDigest = `sha256:${"e".repeat(64)}`; });
+  rejectReceiptMutation((content) => { (content.ci as { runId: number }).runId += 1; });
+  rejectReceiptMutation((content) => { (content.staged as { artifactDigest: string }).artifactDigest = `sha256:${"e".repeat(64)}`; });
+  rejectReceiptMutation((content) => { content.extra = true; });
   assert.throws(() => verifyFinalState({ summary, state: { ...state, publishedPredecessorCheck: { ...check, markerObservedAt: "2026-10-07T18:59:40.000Z" } }, incidents, now: gateNow }), /order/);
   assert.throws(() => verifyFinalState({ summary, state: { ...state, priorAttempts: [{ ...prior, publishedResolution: null }] }, incidents, now: gateNow }), /unknown or unresolved/);
   assert.throws(() => verifyFinalState({ summary, state: { ...state, priorAttempts: [prior, priorAttempt({ runId: incident.runId + 1, conclusion: "failure" })] }, incidents, now: gateNow }), /unknown or unresolved/);
@@ -632,6 +641,33 @@ test("all three real historical attempts collect and reconcile only with exact i
       fetchImpl: historicalAttemptFetch(undefined, mutateAttempt),
     }), /invalid|terminal|match/);
   }
+});
+
+test("receipt artifact expiry is canonicalized only from a valid GitHub UTC timestamp", async () => {
+  const runId = 34609219734;
+  const receiptZip = createStoredZip([{ path: "pages-receipt.json", data: Buffer.from("{}") }]);
+  const artifact = {
+    id: 9001, name: `lionlog-pages-receipt-${runId}-1`, digest: `sha256:${sha256(receiptZip)}`,
+    expired: false, expires_at: "2026-12-30T17:38:26Z",
+    workflow_run: { id: runId, head_sha: "3d5181c962486aa25345f4f16fbdd75932e0d831", head_repository_id: 1_346_360_244 },
+  };
+  const collect = (expiry: string) => {
+    const baseFetch = historicalAttemptFetch();
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes(`/actions/runs/${runId}/artifacts?`)) return jsonResponse({ total_count: 1, artifacts: [{ ...artifact, expires_at: expiry }] });
+      if (url.endsWith(`/actions/artifacts/${artifact.id}/zip`)) return new Response(new Uint8Array(receiptZip));
+      return baseFetch(input, init);
+    };
+    return collectPagesAttemptHistory({
+      repository: "CrunchyBrunch/lionlog", currentRunId: 999, token: "fixture-token",
+      incidentHistory: historicalIncidentHistory, fetchImpl,
+    });
+  };
+  const evidence = await collect(artifact.expires_at);
+  assert.equal(evidence[0].receipt?.artifactExpiresAt, "2026-12-30T17:38:26.000Z");
+  await assert.rejects(() => collect("2026-12-30T17:38:26.1234Z"), /expiry/);
+  await assert.rejects(() => collect("2026-02-30T17:38:26Z"), /expiry/);
 });
 
 test("incident collection rejects every unknown or altered job and step before projection", async () => {

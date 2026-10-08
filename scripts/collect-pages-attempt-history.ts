@@ -101,6 +101,7 @@ export async function collectPagesAttemptHistory(options: {
   incidentHistory: unknown;
   fetchImpl?: typeof fetch;
   now?: Date;
+  fullRunLog?: string;
 }): Promise<CollectedAttemptEvidence[]> {
   if (options.repository !== "CrunchyBrunch/lionlog" || !positive(options.currentRunId) || options.token.length < 1) {
     throw new Error("Attempt-history authority is invalid.");
@@ -164,6 +165,7 @@ export async function collectPagesAttemptHistory(options: {
         const collected = await collectPublishedResolution({
           record: contract.published, token: options.token,
           artifactMetadata: [...artifacts, ...candidateArtifacts], fetchImpl, now: options.now,
+          fullRunLog: options.fullRunLog,
         });
         if (!receipt || receipt.artifactId !== collected.resolution.receiptArtifactId
           || receipt.artifactDigest !== collected.resolution.receiptArtifactDigest
@@ -274,7 +276,13 @@ async function readReceipt(
 ): Promise<CollectedAttemptEvidence["receipt"]> {
   const artifactId = number(artifact.id, "Receipt artifact ID");
   const digest = string(artifact.digest, "Receipt artifact digest");
-  const expiresAt = string(artifact.expires_at, "Receipt artifact expiry");
+  const rawExpiresAt = string(artifact.expires_at, "Receipt artifact expiry");
+  if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(rawExpiresAt)
+    || !Number.isFinite(Date.parse(rawExpiresAt))) throw new Error("Receipt artifact expiry is invalid.");
+  const expiresAt = new Date(rawExpiresAt).toISOString();
+  if (rawExpiresAt !== expiresAt && rawExpiresAt.replace(/Z$/, ".000Z") !== expiresAt) {
+    throw new Error("Receipt artifact expiry is noncanonical.");
+  }
   const workflowRun = artifact.workflow_run as Record<string, unknown> | undefined;
   if (
     artifact.expired !== false || Date.parse(expiresAt) <= Date.now()
