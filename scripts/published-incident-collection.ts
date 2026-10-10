@@ -1,18 +1,15 @@
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
-import { promisify } from "node:util";
-import reviewedLogLines from "../infrastructure/publication/published-incident-log-lines.json" with { type: "json" };
 import { validatePublicationReleaseManifest } from "../infrastructure/publication/release-contract.ts";
 import { parseArtifactZip } from "./artifact-zip.ts";
 import { parsePublicationTar } from "./publication-tar.ts";
 import { inspectPagesActionTar } from "./supported-pages-release.ts";
 import { validatePreapprovalSummary } from "./supported-pages-control.ts";
+import { verifyPublishedJobLogEvidence, type PublishedJobLogEvidence } from "./published-incident-job-logs.ts";
 import { verifyPublishedDecision, type PublishedIncident, type VerifiedPublishedDecision } from "./published-incident.ts";
 
 type Binding = PublishedIncident["evidence"]["artifacts"]["candidate"];
 const REPOSITORY = "CrunchyBrunch/lionlog";
-const execFileAsync = promisify(execFile);
 
 function sha(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -134,15 +131,47 @@ async function githubJson(fetchImpl: typeof fetch, route: string, token?: string
   return response.json();
 }
 
-async function githubText(fetchImpl: typeof fetch, route: string, token: string): Promise<string> {
-  const response = await fetchImpl(`${API}${route}`, {
-    redirect: "follow", signal: AbortSignal.timeout(30_000),
+export async function readPublishedJobLog(fetchImpl: typeof fetch, route: string, token: string): Promise<string> {
+  if (!/^\/actions\/jobs\/[0-9]+\/logs$/.test(route) || token.length === 0) {
+    throw new Error("Published incident job log route is invalid.");
+  }
+  const initial = await fetchImpl(`${API}${route}`, {
+    redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(30_000),
     headers: { accept: "application/vnd.github+json", authorization: `Bearer ${token}` },
   });
-  if (!response.ok) throw new Error(`Published incident job log unavailable (${response.status}).`);
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.length === 0 || bytes.length > 12 * 1024 * 1024) throw new Error("Published incident job log has invalid size.");
-  return bytes.toString("utf8");
+  let response = initial;
+  if (initial.status >= 300 && initial.status < 400) {
+    const location = initial.headers.get("location");
+    const target = location ? new URL(location) : null;
+    if (!target || target.protocol !== "https:" || target.username || target.password
+      || target.hostname === "api.github.com" || target.hash) {
+      throw new Error("Published incident job log redirect is invalid.");
+    }
+    response = await fetchImpl(target, {
+      redirect: "error", cache: "no-store", signal: AbortSignal.timeout(30_000),
+      headers: { accept: "text/plain" },
+    });
+  }
+  if (!response.ok || response.redirected || !response.body) {
+    throw new Error(`Published incident job log unavailable (${response.status}).`);
+  }
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  const reader = response.body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 512 * 1024) throw new Error("Published incident job log has invalid size.");
+      chunks.push(value);
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+  if (size === 0) throw new Error("Published incident job log has invalid size.");
+  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks));
 }
 
 function exactUtcSeconds(value: unknown, expected: string): boolean {
@@ -158,6 +187,7 @@ export interface PublishedResolution {
   releaseId: string;
   receiptArtifactId: number;
   receiptArtifactDigest: string;
+  logEvidence: PublishedJobLogEvidence;
   decision: VerifiedPublishedDecision;
 }
 
@@ -167,7 +197,6 @@ export async function collectPublishedResolution(options: {
   artifactMetadata: unknown[];
   fetchImpl?: typeof fetch;
   now?: Date;
-  fullRunLog?: string;
 }): Promise<{ resolution: PublishedResolution; receipt: Record<string, unknown> }> {
   const { record, token, artifactMetadata } = options;
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -193,25 +222,28 @@ export async function collectPublishedResolution(options: {
   const stagedInventory = inspectPagesActionTar(contents.staged.get("artifact.tar")!);
   verifyParsedPublishedArtifacts(record, parsed, candidateInventory, stagedInventory);
 
-  const [candidateRun, ciRun, pagesStatus, deployment, statuses, statusesNext, deployLog, verifyLog, decision, fullRunLog] = await Promise.all([
+  const [candidateRun, ciRun, pagesStatus, deployment, statuses, statusesNext, deployJob, verifyJob, deployLog, verifyLog, decision] = await Promise.all([
     githubJson(fetchImpl, `/actions/runs/${record.evidence.release.candidateProducerRunId}`, token),
     githubJson(fetchImpl, `/actions/runs/${record.evidence.release.exactSourceCiRunId}`, token),
     githubJson(fetchImpl, `/pages/deployments/${record.evidence.officialPages.deploymentId}`, token),
     githubJson(fetchImpl, `/deployments/${record.evidence.repositoryEnvironment.deploymentId}`),
     githubJson(fetchImpl, `/deployments/${record.evidence.repositoryEnvironment.deploymentId}/statuses?per_page=100&page=1`),
     githubJson(fetchImpl, `/deployments/${record.evidence.repositoryEnvironment.deploymentId}/statuses?per_page=100&page=2`),
-    githubText(fetchImpl, `/actions/jobs/${record.evidence.officialPages.sourceJobId}/logs`, token),
-    githubText(fetchImpl, `/actions/jobs/${record.evidence.browserFailure.jobId}/logs`, token),
+    githubJson(fetchImpl, `/actions/jobs/${record.evidence.officialPages.sourceJobId}`, token),
+    githubJson(fetchImpl, `/actions/jobs/${record.evidence.browserFailure.jobId}`, token),
+    readPublishedJobLog(fetchImpl, `/actions/jobs/${record.evidence.officialPages.sourceJobId}/logs`, token),
+    readPublishedJobLog(fetchImpl, `/actions/jobs/${record.evidence.browserFailure.jobId}/logs`, token),
     verifyPublishedDecision(record, fetchImpl),
-    options.fullRunLog === undefined ? reviewedFullRunLog(record.runId, token) : Promise.resolve(options.fullRunLog),
   ]);
-  verifyExternalPublishedEvidence(record, { candidateRun, ciRun, pagesStatus, deployment, statuses, statusesNext, deployLog, verifyLog, fullRunLog });
+  const logEvidence = verifyExternalPublishedEvidence(record, {
+    candidateRun, ciRun, pagesStatus, deployment, statuses, statusesNext, deployJob, verifyJob, deployLog, verifyLog,
+  });
   return {
     resolution: {
       evidenceDigest: record.decision.evidenceDigest, runId: record.runId, runAttempt: record.runAttempt,
       workflowSha: record.workflowSha, releaseId: record.evidence.release.id,
       receiptArtifactId: bindings.receipt.id, receiptArtifactDigest: bindings.receipt.wrapperDigest,
-      decision,
+      logEvidence, decision,
     },
     receipt: parsed.receipt,
   };
@@ -219,9 +251,8 @@ export async function collectPublishedResolution(options: {
 
 export function verifyExternalPublishedEvidence(record: PublishedIncident, value: {
   candidateRun: unknown; ciRun: unknown; pagesStatus: unknown; deployment: unknown; statuses: unknown;
-  statusesNext: unknown; deployLog: string; verifyLog: string;
-  fullRunLog: string;
-}): void {
+  statusesNext: unknown; deployJob: unknown; verifyJob: unknown; deployLog: string; verifyLog: string;
+}): PublishedJobLogEvidence {
   const source = record.evidence.release;
   for (const [run, id] of [[value.candidateRun, source.candidateProducerRunId], [value.ciRun, source.exactSourceCiRunId]] as const) {
     const item = run as Record<string, unknown>;
@@ -252,39 +283,5 @@ export function verifyExternalPublishedEvidence(record: PublishedIncident, value
     || Date.parse(expected.successAt) < Date.parse(expected.createdAt)) {
     throw new Error("Published incident environment success status differs.");
   }
-  const ansiColor = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
-  const deployLog = value.deployLog.replace(ansiColor, "");
-  const verifyLog = value.verifyLog.replace(ansiColor, "");
-  const official = record.evidence.officialPages;
-  const requiredDeployLog = [
-    '"artifact_id": 11181496634',
-    `"pages_build_version": "${record.workflowSha}"`,
-    `Created deployment for ${record.workflowSha}, ID: ${official.deploymentId}`,
-  ];
-  // The job endpoint restamps this event; the reviewed timestamp is in the run-wide export.
-  const lines = value.fullRunLog.replace(ansiColor, "").split(/\r?\n/);
-  const reviewed = Object.values(reviewedLogLines);
-  const positions = reviewed.map((line) => lines.indexOf(line));
-  if (positions.some((position, index) => position < 0 || lines.lastIndexOf(reviewed[index]) !== position
-      || (index > 0 && position <= positions[index - 1]))
-    || !reviewedLogLines.created.includes(official.createdAt)
-    || !reviewedLogLines.artifactPayload.includes(`"artifact_id": ${record.evidence.artifacts.staged.id}`)
-    || !reviewedLogLines.buildVersion.includes(record.workflowSha)
-    || !reviewedLogLines.publicInventory.includes(source.id)
-    || !reviewedLogLines.browserFailure.includes(record.evidence.browserFailure.error)
-    || requiredDeployLog.some((fragment) => !deployLog.includes(fragment))
-    || !verifyLog.includes(`{"verifiedFiles":51,"releaseId":"${source.id}"}`)
-    || !verifyLog.includes(record.evidence.browserFailure.error)) {
-    throw new Error("Published incident official action or browser-failure log differs.");
-  }
-}
-
-async function reviewedFullRunLog(runId: number, token: string): Promise<string> {
-  const { stdout } = await execFileAsync("gh", ["run", "view", String(runId), "--log", "--repo", REPOSITORY], {
-    env: { ...process.env, GH_TOKEN: token }, timeout: 30_000, maxBuffer: 12 * 1024 * 1024,
-  });
-  if (stdout.length === 0 || Buffer.byteLength(stdout) > 12 * 1024 * 1024) {
-    throw new Error("Published incident full-run log has invalid size.");
-  }
-  return stdout;
+  return verifyPublishedJobLogEvidence(record, value);
 }

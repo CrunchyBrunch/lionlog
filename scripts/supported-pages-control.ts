@@ -21,6 +21,7 @@ import type {
   LegacyStepEvidence,
 } from "./collect-pages-attempt-history.ts";
 import { validatePublishedIncidentRecord, type PublishedIncident } from "./published-incident.ts";
+import { matchesPublishedJobLogEvidence } from "./published-incident-job-logs.ts";
 import type { PublishedResolution } from "./published-incident-collection.ts";
 import type { PublishedPredecessorCheck } from "./published-final-predecessor.ts";
 
@@ -366,6 +367,7 @@ function matchesPublishedIncident(prior: PriorAttemptEvidence, incident: Publish
     && proof.runId === incident.runId && proof.runAttempt === incident.runAttempt
     && proof.workflowSha === incident.workflowSha && proof.releaseId === incident.evidence.release.id
     && proof.receiptArtifactId === receipt.artifactId && proof.receiptArtifactDigest === receipt.artifactDigest
+    && matchesPublishedJobLogEvidence(incident, proof.logEvidence)
     && proof.decision.commentId === expectedDecision.commentId
     && proof.decision.evidenceDigest === expectedDecision.evidenceDigest
     && proof.decision.actorId === expectedDecision.actorId

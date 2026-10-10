@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { canonicalEvidenceDigest, validatePublishedIncidentRecord, verifyPublishedDecision } from "../scripts/published-incident.ts";
-import { readBoundArtifact, verifyExternalPublishedEvidence, verifyParsedPublishedArtifacts } from "../scripts/published-incident-collection.ts";
+import { readBoundArtifact, readPublishedJobLog, verifyExternalPublishedEvidence, verifyParsedPublishedArtifacts } from "../scripts/published-incident-collection.ts";
 import { readPublicPredecessor } from "../scripts/published-final-predecessor.ts";
 import { collectPagesAttemptHistory } from "../scripts/collect-pages-attempt-history.ts";
 
@@ -146,7 +146,20 @@ test("parsed historical manifest, preapproval, receipt and both tar inventories 
 
 test("official Pages and repository environment identities remain separate and bind to action and failure logs", async () => {
   const incident = validatePublishedIncidentRecord(await fixture(), atDecision);
-  const reviewedLines = JSON.parse(await readFile(new URL("../infrastructure/publication/published-incident-log-lines.json", import.meta.url), "utf8")) as Record<string, string>;
+  const apiJob = (id: number) => {
+    const graph = incident.collectorEvidence.jobs.find((job) => job.jobId === id)!;
+    return {
+      id, run_id: incident.runId, run_attempt: incident.runAttempt, head_sha: incident.workflowSha,
+      name: graph.jobName, status: graph.jobStatus, conclusion: graph.jobConclusion,
+      steps: graph.steps.map((step) => ({ number: step.stepNumber, name: step.stepName,
+        status: step.stepStatus, conclusion: step.stepConclusion,
+        ...(step.stepNumber === (id === 110499484593 ? 8 : 6) ? {
+          started_at: id === 110499484593 ? "2026-10-01T17:45:45Z" : "2026-10-01T17:46:07Z",
+          completed_at: id === 110499484593 ? "2026-10-01T17:45:53Z" : "2026-10-01T17:46:56Z",
+        } : {}),
+      })),
+    };
+  };
   const sourceRun = (id: number) => ({ id, head_sha: incident.workflowSha, run_attempt: 1, status: "completed", conclusion: "success" });
   const env = incident.evidence.repositoryEnvironment;
   const value = {
@@ -164,21 +177,67 @@ test("official Pages and repository environment identities remain separate and b
       created_at: "2026-10-01T17:45:57Z",
     }],
     statusesNext: [],
+    deployJob: apiJob(110499484593), verifyJob: apiJob(110502480790),
     deployLog: [
-      '"artifact_id": 11181496634',
-      `"pages_build_version": "${incident.workflowSha}"`,
+      "\uFEFF2026-10-01T17:45:30.6807399Z Current runner version: '2.337.0'",
+      "2026-10-01T17:45:45.8182145Z ##[group]Run actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346",
+      "2026-10-01T17:45:45.8182822Z   artifact_name: lionlog-pages-36900859358-1",
+      "2026-10-01T17:45:45.8186741Z ##[endgroup]",
+      "2026-10-01T17:45:46.5455949Z \t\"artifact_id\": 11181496634,",
+      `2026-10-01T17:45:46.5456761Z \t"pages_build_version": "${incident.workflowSha}",`,
       `2026-10-01T17:45:47.4916379Z Created deployment for ${incident.workflowSha}, ID: ${incident.evidence.officialPages.deploymentId}`,
-    ].join("\n"),
-    verifyLog: `{"verifiedFiles":51,"releaseId":"${incident.evidence.release.id}"}\n${incident.evidence.browserFailure.error}`,
-    fullRunLog: Object.values(reviewedLines).join("\n"),
+      "2026-10-01T17:45:53.2872564Z Reported success!",
+      "2026-10-01T17:45:53.3102022Z Post job cleanup.",
+      "2026-10-01T17:45:53.4348513Z Post job cleanup.",
+      "2026-10-01T17:45:53.6446446Z Cleaning up orphan processes",
+    ].join("\n") + "\n",
+    verifyLog: [
+      "\uFEFF2026-10-01T17:45:59.5262469Z Current runner version: '2.337.0'",
+      "2026-10-01T17:46:05.1851975Z ##[group]Run set -euo pipefail",
+      "2026-10-01T17:46:07.1366969Z ##[group]Run set -euo pipefail",
+      "2026-10-01T17:46:07.1370475Z \u001b[36;1mnode scripts/verify-public-pwa.mjs\u001b[0m",
+      "2026-10-01T17:46:07.1423592Z ##[endgroup]",
+      `2026-10-01T17:46:10.0966663Z {"verifiedFiles":51,"releaseId":"${incident.evidence.release.id}"}`,
+      `2026-10-01T17:46:56.9538633Z Error: Service worker did not activate: {"status":{"controller":null,"installing":null,"waiting":null,"active":null,"scriptURL":null},"diagnostics":[{"kind":"service-worker","text":"Failed to register a ServiceWorker for scope ('https://crunchybrunch.github.io/lionlog/') with script ('https://crunchybrunch.github.io/lionlog/sw.js'): ServiceWorker failed to install: ServiceWorker failed to handle event (event.waitUntil Promise rejected)"},{"kind":"service-worker","text":"Uncaught (in promise) Error: LionLog shell asset was unavailable: https://crunchybrunch.github.io/lionlog"}]}`,
+      "2026-10-01T17:46:56.9613718Z ##[error]Process completed with exit code 1.",
+      "2026-10-01T17:46:56.9648056Z ##[group]Run set -euo pipefail",
+      "2026-10-01T17:46:56.9650121Z \u001b[36;1mnode --experimental-strip-types scripts/supported-pages-control.ts receipt \\\u001b[0m",
+      "2026-10-01T17:46:58.1368684Z Cleaning up orphan processes",
+    ].join("\n") + "\n",
   };
   assert.doesNotThrow(() => verifyExternalPublishedEvidence(incident, value));
   assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, pagesStatus: { status: "failed" } }), /Pages/);
   assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, deployment: { ...value.deployment, id: incident.evidence.officialPages.deploymentId } }), /environment/);
   assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, deployLog: value.deployLog.replace("11181496634", "11181496635") }), /action/);
-  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, verifyLog: value.verifyLog.replace("shell asset", "shell file") }), /browser/);
-  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, fullRunLog: value.fullRunLog.replace("4916331Z", "4916379Z") }), /action/);
-  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, fullRunLog: value.fullRunLog.replace("deploy\tDeploy with official Pages action", "other\tDeploy with official Pages action") }), /action/);
+  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, verifyLog: value.verifyLog.replace("shell asset", "shell file") }), /action/);
+  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, deployLog: value.deployLog.replace("4916379Z", "4916378Z") }), /action/);
+  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, verifyLog: value.verifyLog.replace("\u001b[36;1m", "") }), /action/);
+  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, deployLog: value.deployLog.replace("2026-10-01T17:45:46.5455949Z", "2026-10-01T17:45:46.5455950Z") }), /action/);
+  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, deployLog: value.deployLog.replace("2026-10-01T17:45:53.2872564Z Reported success!\n", "") }), /action/);
+  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, deployLog: value.deployLog.replace("2026-10-01T17:45:53.2872564Z Reported success!", "2026-10-01T17:45:53.2872564Z Reported success!\n2026-10-01T17:45:53.2872564Z Reported success!") }), /action/);
+  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, verifyLog: value.verifyLog.replace("2026-10-01T17:46:07.1423592Z ##[endgroup]", "2026-10-01T17:46:07.1423592Z ##[group]Run set -euo pipefail") }), /action/);
+  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, verifyLog: value.verifyLog.replace("2026-10-01T17:46:56.9538633Z Error:", "2026-10-01T17:46:56.9538634Z Error:") }), /action/);
+  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, deployJob: { ...value.deployJob, head_sha: "f".repeat(40) } }), /job metadata/);
+  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, verifyJob: { ...value.verifyJob, steps: value.verifyJob.steps.map((step) => step.number === 6 ? { ...step, completed_at: "2026-10-01T17:46:55Z" } : step) } }), /step timing/);
+});
+
+test("job-log download follows one HTTPS redirect without forwarding credentials and rejects oversized logs", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    calls.push({ url: String(input), init });
+    if (calls.length === 1) return new Response(null, { status: 302, headers: { location: "https://results-receiver.actions.githubusercontent.com/log.txt" } });
+    return new Response("complete\n", { headers: { "content-type": "text/plain" } });
+  };
+  assert.equal(await readPublishedJobLog(fetchImpl, "/actions/jobs/110499484593/logs", "token"), "complete\n");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].init?.redirect, "manual");
+  assert.equal((calls[0].init?.headers as Record<string, string>).authorization, "Bearer token");
+  assert.equal(calls[1].init?.redirect, "error");
+  assert.equal((calls[1].init?.headers as Record<string, string>).authorization, undefined);
+  await assert.rejects(() => readPublishedJobLog(async () => new Response("x".repeat(512 * 1024 + 1)),
+    "/actions/jobs/110499484593/logs", "token"), /size/);
+  await assert.rejects(() => readPublishedJobLog(async () => new Response(null, { status: 302, headers: { location: "http://example.com/log" } }),
+    "/actions/jobs/110499484593/logs", "token"), /redirect/);
 });
 
 test("first corrective read hashes every file before rereading the canonical marker", async () => {

@@ -25,6 +25,7 @@ import { collectLegacyEvidence, collectPagesAttemptHistory } from "../scripts/co
 import { selectBrowserVerificationContext } from "../scripts/select-browser-verification-context.ts";
 import { assertArtifactDigest, normalizeArtifactDigest } from "../scripts/artifact-digest.ts";
 import { canonicalEvidenceDigest, validatePublishedIncidentRecord } from "../scripts/published-incident.ts";
+import logMapping from "../infrastructure/publication/published-incident-job-log-mapping.json" with { type: "json" };
 
 const workflowSha = "a".repeat(40);
 const sourceSha = "b".repeat(40);
@@ -260,6 +261,27 @@ test("published browser-unverified attempt needs exact proof, fresh full-invento
   const incident = validatePublishedIncidentRecord(raw, gateNow);
   const parsed = JSON.parse(await readFile(new URL("./fixtures/published-incident-parsed.json", import.meta.url), "utf8"));
   const summary = summaryFixture();
+  const logEvidence = {
+    evidenceVersion: "lionlog.published-job-log-evidence.v1" as const,
+    archival: logMapping.archival,
+    deploy: {
+      jobId: logMapping.deploy.jobId, stepNumber: logMapping.deploy.stepNumber, stepName: logMapping.deploy.stepName,
+      stepStartedAt: logMapping.deploy.stepStartedAt, stepCompletedAt: logMapping.deploy.stepCompletedAt,
+      logSha256: "afc3177556dd20181dae622f49e93f42d89fd77a0e37b96be6578a798d53cca7",
+      firstLine: logMapping.deploy.firstLine, lastLine: logMapping.deploy.lastLine,
+      events: logMapping.deploy.events,
+      boundaries: [logMapping.deploy.start, logMapping.deploy.artifactName, logMapping.deploy.preambleEnd, logMapping.deploy.outputEnd],
+    },
+    verify: {
+      jobId: logMapping.verify.jobId, stepNumber: logMapping.verify.stepNumber, stepName: logMapping.verify.stepName,
+      stepStartedAt: logMapping.verify.stepStartedAt, stepCompletedAt: logMapping.verify.stepCompletedAt,
+      logSha256: "49efa274ab69743f1edf6912f138b207f5ac13d5b5888ee0fe20448a9a063818",
+      firstLine: logMapping.verify.firstLine, lastLine: logMapping.verify.lastLine,
+      events: logMapping.verify.events,
+      boundaries: [logMapping.verify.start, logMapping.verify.command, logMapping.verify.preambleEnd,
+        logMapping.verify.outputEnd, logMapping.verify.nextStepStart, logMapping.verify.nextStepCommand],
+    },
+  };
   summary.authorization.approvalExpiresAt = "2026-10-08T19:00:00.000Z";
   summary.authorization.predecessorReleaseId = incident.evidence.release.id;
   summary.release.earliestFreshUntil = "2026-10-08T19:00:00.000Z";
@@ -280,6 +302,7 @@ test("published browser-unverified attempt needs exact proof, fresh full-invento
       workflowSha: incident.workflowSha, releaseId: incident.evidence.release.id,
       receiptArtifactId: incident.evidence.artifacts.receipt.id,
       receiptArtifactDigest: incident.evidence.artifacts.receipt.wrapperDigest,
+      logEvidence,
       decision: {
         commentId: incident.decision.commentId, evidenceDigest: incident.decision.evidenceDigest,
         actorId: incident.decision.actorId, decidedAt: incident.decision.decidedAt,
@@ -301,6 +324,13 @@ test("published browser-unverified attempt needs exact proof, fresh full-invento
   };
   const incidents = { historyVersion: "lionlog.pages-incident-history.v1", incidents: [incident] };
   assert.doesNotThrow(() => verifyFinalState({ summary, state, incidents, now: gateNow }));
+  const missingLog = structuredClone(state);
+  if (!missingLog.priorAttempts[0].publishedResolution) throw new Error("Test proof is missing.");
+  delete (missingLog.priorAttempts[0].publishedResolution as { logEvidence?: unknown }).logEvidence;
+  assert.throws(() => verifyFinalState({ summary, state: missingLog, incidents, now: gateNow }), /unknown or unresolved/);
+  const forgedLog = structuredClone(state);
+  forgedLog.priorAttempts[0].publishedResolution!.logEvidence.deploy.logSha256 = "0".repeat(64);
+  assert.throws(() => verifyFinalState({ summary, state: forgedLog, incidents, now: gateNow }), /unknown or unresolved/);
   const rejectReceiptMutation = (change: (content: Record<string, unknown>) => void) => {
     const mutated = structuredClone(state);
     change(mutated.priorAttempts[0].receipt!.content);

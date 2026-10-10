@@ -101,7 +101,6 @@ export async function collectPagesAttemptHistory(options: {
   incidentHistory: unknown;
   fetchImpl?: typeof fetch;
   now?: Date;
-  fullRunLog?: string;
 }): Promise<CollectedAttemptEvidence[]> {
   if (options.repository !== "CrunchyBrunch/lionlog" || !positive(options.currentRunId) || options.token.length < 1) {
     throw new Error("Attempt-history authority is invalid.");
@@ -165,7 +164,6 @@ export async function collectPagesAttemptHistory(options: {
         const collected = await collectPublishedResolution({
           record: contract.published, token: options.token,
           artifactMetadata: [...artifacts, ...candidateArtifacts], fetchImpl, now: options.now,
-          fullRunLog: options.fullRunLog,
         });
         if (!receipt || receipt.artifactId !== collected.resolution.receiptArtifactId
           || receipt.artifactDigest !== collected.resolution.receiptArtifactDigest
