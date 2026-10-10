@@ -1,0 +1,676 @@
+{
+  "manifest": {
+    "manifestVersion": "lionlog.pages-release.v2",
+    "releaseId": "770748e0015df71d0b6a4fc8d7a72086c2432c328cc571214139253db783147e",
+    "releaseKind": "live",
+    "createdAt": "2026-10-01T12:34:58.648Z",
+    "repository": {
+      "id": 1346360244,
+      "name": "CrunchyBrunch/lionlog"
+    },
+    "source": {
+      "commitSha": "5be205a42930f69424d0854443b4fa4f35c237bd",
+      "workflowPath": ".github/workflows/build-live-menu-artifact.yml",
+      "workflowId": 347085467,
+      "workflowRunId": 36860769514,
+      "workflowRunAttempt": 1
+    },
+    "target": {
+      "origin": "https://crunchybrunch.github.io",
+      "basePath": "/lionlog/"
+    },
+    "shellRevision": "5be205a42930f69424d0854443b4fa4f35c237bd",
+    "menu": {
+      "serviceDate": "2026-10-01",
+      "catalogPath": "menu-data/v2/catalog.json",
+      "catalogSha256": "b2c003d5accf17703e12eba78cfc38e4033b0a3e88aca2711f07fb08e1dfaa81",
+      "catalogVersion": "lionlog.psu-catalog.v3",
+      "snapshotSchemaVersion": "lionlog.psu-menu.v2",
+      "parserVersion": "psu-html.v2",
+      "generatedAt": "2026-10-01T12:34:51.886Z",
+      "retrievalStartedAt": "2026-10-01T12:18:22.030Z",
+      "retrievalCompletedAt": "2026-10-01T12:34:49.113Z",
+      "earliestFreshUntil": "2026-10-02T06:19:23.562Z",
+      "earliestRetainUntil": "2026-10-03T12:19:23.562Z",
+      "coverage": "partial",
+      "sourceObservationCount": 858,
+      "publishedObservationCount": 856,
+      "omissions": {
+        "invalid-name": 2
+      },
+      "snapshotCount": 16
+    },
+    "recovery": {
+      "releaseId": "2dc94b9cd1c1bc485d94feebf219fdd0b9a3082598aca066a47a9e18b2271f33",
+      "manifestSha256": "46763ae0b436d478e07ae901725a1d1c519d804c33f8c880ac57c73481e0f300",
+      "artifactId": 11161177895,
+      "artifactDigest": "sha256:9a555f935633bb86b1d612809fd1079da5aa5293c79467bcb18206a750583973"
+    },
+    "marker": {
+      "path": "release.json",
+      "sha256": "cbbb69b867c8d068f91364edb6a246eb1bb5aaeaff7108993c4577c562fa4cc4"
+    },
+    "site": {
+      "tarFile": "site.tar",
+      "tarSha256": "b9613a8f97ae7b5d7fa20d9f1aa22b0656bef46bb1af5feb94a280c798e9eb4e",
+      "bytes": 5314048,
+      "inventory": [
+        {
+          "path": ".nojekyll",
+          "bytes": 1,
+          "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+        },
+        {
+          "path": "404.html",
+          "bytes": 19387,
+          "sha256": "f11cbb6ed1f08bd3249fefcc42d1d5c4bbc6cddd197c6cd681eaa72adfe6174a"
+        },
+        {
+          "path": "_headers",
+          "bytes": 139,
+          "sha256": "97dc561be4fadd4f976a5a77dfc409f3fe88598241bb21e1d9b89709723094be"
+        },
+        {
+          "path": "_next/static/353bb4a6-8397-4dc3-a2c9-618dc95f4743/_buildManifest.js",
+          "bytes": 159,
+          "sha256": "47f02b34be6dc481257b6efce4c19e19111f37ef5c437f8ffed44f0da97fa9bb"
+        },
+        {
+          "path": "_next/static/353bb4a6-8397-4dc3-a2c9-618dc95f4743/_ssgManifest.js",
+          "bytes": 76,
+          "sha256": "653f3e53e89b4f8548ff86c19e92bb3c6b84b6be7485a320b1e00893ed877479"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-8ac0455e797f/geist-001175b1.woff2",
+          "bytes": 16540,
+          "sha256": "58a6b173d5ca1dec92166ea3c6cb1a84a4144556d10928ac14e8e6b40e4787bd"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-8ac0455e797f/geist-52306abf.woff2",
+          "bytes": 7968,
+          "sha256": "f689f638f29fff460a2d5749edb5d5c38d7bef0389f32032d871f23fc6ebb008"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-8ac0455e797f/geist-875ccdd4.woff2",
+          "bytes": 14900,
+          "sha256": "6129fc8571c3e0cb0a4c41f5160c974a843b055009dc4ad8858bd808e18a2d86"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-8ac0455e797f/geist-98bbbccb.woff2",
+          "bytes": 29288,
+          "sha256": "9b6f5ff45b278c744b5f379a2c4ecbaf858a842b8eaf82ac8d21b699ca16c608"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-8ac0455e797f/geist-ff2310f5.woff2",
+          "bytes": 7252,
+          "sha256": "b7a545bbb08256bd809f11cfe66d88da3e22d169ea4407737b1ef0ec1ed3d791"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-013b2f2f.woff2",
+          "bytes": 23108,
+          "sha256": "5f3d6ad60f29d6cb708414ec6887163d63bf197377ef5417d2483ff31ace6c3b"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-0638449e.woff2",
+          "bytes": 5892,
+          "sha256": "d67e4a94ba498635f764ddca7d1ec4271f5642f032eb24b426764480f66f8497"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-44745446.woff2",
+          "bytes": 14712,
+          "sha256": "745994b5cd950ec201b66526375f057d540847cccfc70f4f24f5f571d26d3923"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-44e03052.woff2",
+          "bytes": 12872,
+          "sha256": "75b3bedbebc35f347c0ae3b416aa871941555357e7b0f83767eb5987875589ed"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-971fb274.woff2",
+          "bytes": 7728,
+          "sha256": "16e1d48b6dd29eb240aec5db36184eb182933c082cd43de7f35af686d58087d2"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-f6b33328.woff2",
+          "bytes": 6204,
+          "sha256": "e27f657e38d52887baa3b6b2f812bef93dfdd356f0810e40edd4ee284cc7e9f6"
+        },
+        {
+          "path": "_next/static/chunks/framework-DTZGTDtF.js",
+          "bytes": 190109,
+          "sha256": "2a1edf81f32a49b1eacafc3546b371bca024c82a9191836e274d90890212e9df"
+        },
+        {
+          "path": "_next/static/chunks/index-C3XkaSFM.js",
+          "bytes": 109086,
+          "sha256": "51c59a5225359b644060eb7deb9a9866828e2b45bc7546c1d02edd6415f619ff"
+        },
+        {
+          "path": "_next/static/chunks/layout-segment-context-CyC9Xx5f.js",
+          "bytes": 496,
+          "sha256": "4e93a525b0eeec14b1c17869049b45d0db4df3a8cbd7bd8ebcddcf6320f880b6"
+        },
+        {
+          "path": "_next/static/chunks/meal-builder-BW_leR-x.js",
+          "bytes": 114889,
+          "sha256": "0bb3efa45163b8e17632c8c54366361d399c28dc585a25fe7d07cddbda16c0fb"
+        },
+        {
+          "path": "_next/static/chunks/pwa-register-DamRpdof.js",
+          "bytes": 1382,
+          "sha256": "56bec86be526e5ec92ca13454bf491269b7377007f17288b6f24e7d9e12f0054"
+        },
+        {
+          "path": "_next/static/chunks/rolldown-runtime-hePW80VL.js",
+          "bytes": 716,
+          "sha256": "580ad8c58061a4dde99bde0a56905e382f0568516ee2f5b84dbfb52085709021"
+        },
+        {
+          "path": "_next/static/chunks/vinext-CLS9mVi6.js",
+          "bytes": 110138,
+          "sha256": "c6f22faeaa450ba6c65c965d2f9b1cd0a2dbe43d0a03166a56fd543db89d2ddb"
+        },
+        {
+          "path": "_next/static/css/index.C_3LqAfq.css",
+          "bytes": 12546,
+          "sha256": "15bffdfff82d9882c3cea529678782ed9386868b06b04cd79eee31ac21cacb6e"
+        },
+        {
+          "path": "icons/apple-touch-icon.png",
+          "bytes": 24254,
+          "sha256": "355e2d17bfcdb9d5c96e86519caac31cd69b21debd8b8de8e16fc77a79a7b7dc"
+        },
+        {
+          "path": "icons/icon-192.png",
+          "bytes": 27695,
+          "sha256": "445d84d99ac26f7f698d10cb447935e00b81d697112e487faafc64134a04581d"
+        },
+        {
+          "path": "icons/icon-512.png",
+          "bytes": 220891,
+          "sha256": "828f7d97d641451c662b34408daf5a57dc73059a5dbfee9b183443949c2772c9"
+        },
+        {
+          "path": "index.html",
+          "bytes": 21296,
+          "sha256": "f5a51d62f432cd13331de76e89572b5537f0638285585c0da01a7e510153369c"
+        },
+        {
+          "path": "index.rsc",
+          "bytes": 6398,
+          "sha256": "342a26a34595419eb3a88be2241e311b225aca59aeb0440ad13531f155b2e482"
+        },
+        {
+          "path": "manifest.webmanifest",
+          "bytes": 652,
+          "sha256": "047191a75fe5276ec31bfb7226b4e940c89486660e7c635a4a082db501a43304"
+        },
+        {
+          "path": "menu-data/v2/catalog.json",
+          "bytes": 11129,
+          "sha256": "b2c003d5accf17703e12eba78cfc38e4033b0a3e88aca2711f07fb08e1dfaa81"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/11/breakfast.json",
+          "bytes": 93042,
+          "sha256": "8cda004fb455a2f0074c8576854e83384249cc22dee4685b5d02079100efea82"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/11/dinner.json",
+          "bytes": 187987,
+          "sha256": "5fd4ff81bba7c971f65d035e93317a86ea28ec501dad7376056a667d0ef2b8ad"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/11/late-night.json",
+          "bytes": 8403,
+          "sha256": "d4541737331d311e69becedb33414caa2dca465eff1911b0097cc163d28d7c5e"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/11/lunch.json",
+          "bytes": 221025,
+          "sha256": "b1dc60c071a44570ab2c5001273bc275cff287389c6cb5c9f03775549d26e202"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/13/breakfast.json",
+          "bytes": 100855,
+          "sha256": "8cfae342a49c2dc7dfbe5a3f2a1254bb75857051d2060bda09b995a0ef689065"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/13/dinner.json",
+          "bytes": 147307,
+          "sha256": "1c82428e8dfe44c43d8a4aebe9838826a0d66070ab075e633f4a4ec4ea9d3002"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/13/lunch.json",
+          "bytes": 178228,
+          "sha256": "2c01175f895c68720953747f93fe5b98d51d963c8f2698f917fdce91fa9d9dcb"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/14/breakfast.json",
+          "bytes": 51614,
+          "sha256": "c64996da6d95ea4299eed301522118f17c0b376587fa7b5965853ab3105af551"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/14/dinner.json",
+          "bytes": 126054,
+          "sha256": "2f1669b7f45518713794b3cf077f092f784e5384c14e346e3249b9a2106e518d"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/14/lunch.json",
+          "bytes": 141173,
+          "sha256": "3af68f6d65327d5e65ac89992559da275f244c58506501bc46328eb1187f3c25"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/16/breakfast.json",
+          "bytes": 58086,
+          "sha256": "a69690d5c8962106de04007750cb44304731820908c0b6187630d186dfdecd9f"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/16/dinner.json",
+          "bytes": 96971,
+          "sha256": "0d8a512fc6625e863fe12ed01e36b3152308a575cf2febe5b8e449ddab2dc96b"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/16/lunch.json",
+          "bytes": 113136,
+          "sha256": "ffe56fa72ed959d26a999e91c437f714da109ff5162b1095d7de49d4fd8cc8be"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/17/breakfast.json",
+          "bytes": 40392,
+          "sha256": "678252988f56286df1b3ea78ff269791ee7db8bcd3142b4e2ddeecf7a411efa8"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/17/dinner.json",
+          "bytes": 171594,
+          "sha256": "4d32a98af6efd60ac04e38c8307d94358578ab914dddab6886d54fe9fa2dbc25"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/17/lunch.json",
+          "bytes": 168983,
+          "sha256": "181bd8e192ccb369d8362ce051938c42fbb19f68b784d21c5fabf8f4f37136a0"
+        },
+        {
+          "path": "og.png",
+          "bytes": 2343765,
+          "sha256": "4137567520763b820a160f2ae0d3310f528e088e14f16e57e82c7f98f73fc359"
+        },
+        {
+          "path": "release.json",
+          "bytes": 456,
+          "sha256": "cbbb69b867c8d068f91364edb6a246eb1bb5aaeaff7108993c4577c562fa4cc4"
+        },
+        {
+          "path": "sw.js",
+          "bytes": 4738,
+          "sha256": "a6dd31d4f6eb8ea0272d6f6c5dca0939add5efb16003ddc2ec25daa40056c6d4"
+        },
+        {
+          "path": "vinext-client-entry-manifest.json",
+          "bytes": 73,
+          "sha256": "eb0c4e406f1431c61f2c1044af931839d9fb5c03c65acddf4603e13dc185146e"
+        }
+      ]
+    }
+  },
+  "preapproval": {
+    "summaryVersion": "lionlog.pages-preapproval.v1",
+    "operation": "promote",
+    "workflow": {
+      "sha": "5be205a42930f69424d0854443b4fa4f35c237bd",
+      "runId": 36900859358,
+      "runAttempt": 1
+    },
+    "candidate": {
+      "runId": 36860769514,
+      "sourceSha": "5be205a42930f69424d0854443b4fa4f35c237bd",
+      "artifactId": 11162276195,
+      "artifactName": "lionlog-live-2026-10-01-5be205a42930f69424d0854443b4fa4f35c237bd-36860769514-1",
+      "artifactDigest": "sha256:01c10298db0b2d44b32bc367f2378a57a77cb4a697b975af7f969e1b754f85f4",
+      "artifactExpiresAt": "2026-12-30T12:17:25Z",
+      "manifestSha256": "7d6aec0aa52660ce9eabe65745a179afba481692967b1706e073ac613061da99"
+    },
+    "ci": {
+      "runId": 36627487837
+    },
+    "release": {
+      "id": "770748e0015df71d0b6a4fc8d7a72086c2432c328cc571214139253db783147e",
+      "kind": "live",
+      "serviceDate": "2026-10-01",
+      "coverage": "partial",
+      "omissions": {
+        "invalid-name": 2
+      },
+      "earliestFreshUntil": "2026-10-02T06:19:23.562Z",
+      "earliestRetainUntil": "2026-10-03T12:19:23.562Z"
+    },
+    "site": {
+      "tarFile": "site.tar",
+      "tarSha256": "b9613a8f97ae7b5d7fa20d9f1aa22b0656bef46bb1af5feb94a280c798e9eb4e",
+      "bytes": 5314048,
+      "inventory": [
+        {
+          "path": ".nojekyll",
+          "bytes": 1,
+          "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+        },
+        {
+          "path": "404.html",
+          "bytes": 19387,
+          "sha256": "f11cbb6ed1f08bd3249fefcc42d1d5c4bbc6cddd197c6cd681eaa72adfe6174a"
+        },
+        {
+          "path": "_headers",
+          "bytes": 139,
+          "sha256": "97dc561be4fadd4f976a5a77dfc409f3fe88598241bb21e1d9b89709723094be"
+        },
+        {
+          "path": "_next/static/353bb4a6-8397-4dc3-a2c9-618dc95f4743/_buildManifest.js",
+          "bytes": 159,
+          "sha256": "47f02b34be6dc481257b6efce4c19e19111f37ef5c437f8ffed44f0da97fa9bb"
+        },
+        {
+          "path": "_next/static/353bb4a6-8397-4dc3-a2c9-618dc95f4743/_ssgManifest.js",
+          "bytes": 76,
+          "sha256": "653f3e53e89b4f8548ff86c19e92bb3c6b84b6be7485a320b1e00893ed877479"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-8ac0455e797f/geist-001175b1.woff2",
+          "bytes": 16540,
+          "sha256": "58a6b173d5ca1dec92166ea3c6cb1a84a4144556d10928ac14e8e6b40e4787bd"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-8ac0455e797f/geist-52306abf.woff2",
+          "bytes": 7968,
+          "sha256": "f689f638f29fff460a2d5749edb5d5c38d7bef0389f32032d871f23fc6ebb008"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-8ac0455e797f/geist-875ccdd4.woff2",
+          "bytes": 14900,
+          "sha256": "6129fc8571c3e0cb0a4c41f5160c974a843b055009dc4ad8858bd808e18a2d86"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-8ac0455e797f/geist-98bbbccb.woff2",
+          "bytes": 29288,
+          "sha256": "9b6f5ff45b278c744b5f379a2c4ecbaf858a842b8eaf82ac8d21b699ca16c608"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-8ac0455e797f/geist-ff2310f5.woff2",
+          "bytes": 7252,
+          "sha256": "b7a545bbb08256bd809f11cfe66d88da3e22d169ea4407737b1ef0ec1ed3d791"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-013b2f2f.woff2",
+          "bytes": 23108,
+          "sha256": "5f3d6ad60f29d6cb708414ec6887163d63bf197377ef5417d2483ff31ace6c3b"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-0638449e.woff2",
+          "bytes": 5892,
+          "sha256": "d67e4a94ba498635f764ddca7d1ec4271f5642f032eb24b426764480f66f8497"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-44745446.woff2",
+          "bytes": 14712,
+          "sha256": "745994b5cd950ec201b66526375f057d540847cccfc70f4f24f5f571d26d3923"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-44e03052.woff2",
+          "bytes": 12872,
+          "sha256": "75b3bedbebc35f347c0ae3b416aa871941555357e7b0f83767eb5987875589ed"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-971fb274.woff2",
+          "bytes": 7728,
+          "sha256": "16e1d48b6dd29eb240aec5db36184eb182933c082cd43de7f35af686d58087d2"
+        },
+        {
+          "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-f6b33328.woff2",
+          "bytes": 6204,
+          "sha256": "e27f657e38d52887baa3b6b2f812bef93dfdd356f0810e40edd4ee284cc7e9f6"
+        },
+        {
+          "path": "_next/static/chunks/framework-DTZGTDtF.js",
+          "bytes": 190109,
+          "sha256": "2a1edf81f32a49b1eacafc3546b371bca024c82a9191836e274d90890212e9df"
+        },
+        {
+          "path": "_next/static/chunks/index-C3XkaSFM.js",
+          "bytes": 109086,
+          "sha256": "51c59a5225359b644060eb7deb9a9866828e2b45bc7546c1d02edd6415f619ff"
+        },
+        {
+          "path": "_next/static/chunks/layout-segment-context-CyC9Xx5f.js",
+          "bytes": 496,
+          "sha256": "4e93a525b0eeec14b1c17869049b45d0db4df3a8cbd7bd8ebcddcf6320f880b6"
+        },
+        {
+          "path": "_next/static/chunks/meal-builder-BW_leR-x.js",
+          "bytes": 114889,
+          "sha256": "0bb3efa45163b8e17632c8c54366361d399c28dc585a25fe7d07cddbda16c0fb"
+        },
+        {
+          "path": "_next/static/chunks/pwa-register-DamRpdof.js",
+          "bytes": 1382,
+          "sha256": "56bec86be526e5ec92ca13454bf491269b7377007f17288b6f24e7d9e12f0054"
+        },
+        {
+          "path": "_next/static/chunks/rolldown-runtime-hePW80VL.js",
+          "bytes": 716,
+          "sha256": "580ad8c58061a4dde99bde0a56905e382f0568516ee2f5b84dbfb52085709021"
+        },
+        {
+          "path": "_next/static/chunks/vinext-CLS9mVi6.js",
+          "bytes": 110138,
+          "sha256": "c6f22faeaa450ba6c65c965d2f9b1cd0a2dbe43d0a03166a56fd543db89d2ddb"
+        },
+        {
+          "path": "_next/static/css/index.C_3LqAfq.css",
+          "bytes": 12546,
+          "sha256": "15bffdfff82d9882c3cea529678782ed9386868b06b04cd79eee31ac21cacb6e"
+        },
+        {
+          "path": "icons/apple-touch-icon.png",
+          "bytes": 24254,
+          "sha256": "355e2d17bfcdb9d5c96e86519caac31cd69b21debd8b8de8e16fc77a79a7b7dc"
+        },
+        {
+          "path": "icons/icon-192.png",
+          "bytes": 27695,
+          "sha256": "445d84d99ac26f7f698d10cb447935e00b81d697112e487faafc64134a04581d"
+        },
+        {
+          "path": "icons/icon-512.png",
+          "bytes": 220891,
+          "sha256": "828f7d97d641451c662b34408daf5a57dc73059a5dbfee9b183443949c2772c9"
+        },
+        {
+          "path": "index.html",
+          "bytes": 21296,
+          "sha256": "f5a51d62f432cd13331de76e89572b5537f0638285585c0da01a7e510153369c"
+        },
+        {
+          "path": "index.rsc",
+          "bytes": 6398,
+          "sha256": "342a26a34595419eb3a88be2241e311b225aca59aeb0440ad13531f155b2e482"
+        },
+        {
+          "path": "manifest.webmanifest",
+          "bytes": 652,
+          "sha256": "047191a75fe5276ec31bfb7226b4e940c89486660e7c635a4a082db501a43304"
+        },
+        {
+          "path": "menu-data/v2/catalog.json",
+          "bytes": 11129,
+          "sha256": "b2c003d5accf17703e12eba78cfc38e4033b0a3e88aca2711f07fb08e1dfaa81"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/11/breakfast.json",
+          "bytes": 93042,
+          "sha256": "8cda004fb455a2f0074c8576854e83384249cc22dee4685b5d02079100efea82"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/11/dinner.json",
+          "bytes": 187987,
+          "sha256": "5fd4ff81bba7c971f65d035e93317a86ea28ec501dad7376056a667d0ef2b8ad"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/11/late-night.json",
+          "bytes": 8403,
+          "sha256": "d4541737331d311e69becedb33414caa2dca465eff1911b0097cc163d28d7c5e"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/11/lunch.json",
+          "bytes": 221025,
+          "sha256": "b1dc60c071a44570ab2c5001273bc275cff287389c6cb5c9f03775549d26e202"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/13/breakfast.json",
+          "bytes": 100855,
+          "sha256": "8cfae342a49c2dc7dfbe5a3f2a1254bb75857051d2060bda09b995a0ef689065"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/13/dinner.json",
+          "bytes": 147307,
+          "sha256": "1c82428e8dfe44c43d8a4aebe9838826a0d66070ab075e633f4a4ec4ea9d3002"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/13/lunch.json",
+          "bytes": 178228,
+          "sha256": "2c01175f895c68720953747f93fe5b98d51d963c8f2698f917fdce91fa9d9dcb"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/14/breakfast.json",
+          "bytes": 51614,
+          "sha256": "c64996da6d95ea4299eed301522118f17c0b376587fa7b5965853ab3105af551"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/14/dinner.json",
+          "bytes": 126054,
+          "sha256": "2f1669b7f45518713794b3cf077f092f784e5384c14e346e3249b9a2106e518d"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/14/lunch.json",
+          "bytes": 141173,
+          "sha256": "3af68f6d65327d5e65ac89992559da275f244c58506501bc46328eb1187f3c25"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/16/breakfast.json",
+          "bytes": 58086,
+          "sha256": "a69690d5c8962106de04007750cb44304731820908c0b6187630d186dfdecd9f"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/16/dinner.json",
+          "bytes": 96971,
+          "sha256": "0d8a512fc6625e863fe12ed01e36b3152308a575cf2febe5b8e449ddab2dc96b"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/16/lunch.json",
+          "bytes": 113136,
+          "sha256": "ffe56fa72ed959d26a999e91c437f714da109ff5162b1095d7de49d4fd8cc8be"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/17/breakfast.json",
+          "bytes": 40392,
+          "sha256": "678252988f56286df1b3ea78ff269791ee7db8bcd3142b4e2ddeecf7a411efa8"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/17/dinner.json",
+          "bytes": 171594,
+          "sha256": "4d32a98af6efd60ac04e38c8307d94358578ab914dddab6886d54fe9fa2dbc25"
+        },
+        {
+          "path": "menu-data/v2/snapshots/2026-10-01/17/lunch.json",
+          "bytes": 168983,
+          "sha256": "181bd8e192ccb369d8362ce051938c42fbb19f68b784d21c5fabf8f4f37136a0"
+        },
+        {
+          "path": "og.png",
+          "bytes": 2343765,
+          "sha256": "4137567520763b820a160f2ae0d3310f528e088e14f16e57e82c7f98f73fc359"
+        },
+        {
+          "path": "release.json",
+          "bytes": 456,
+          "sha256": "cbbb69b867c8d068f91364edb6a246eb1bb5aaeaff7108993c4577c562fa4cc4"
+        },
+        {
+          "path": "sw.js",
+          "bytes": 4738,
+          "sha256": "a6dd31d4f6eb8ea0272d6f6c5dca0939add5efb16003ddc2ec25daa40056c6d4"
+        },
+        {
+          "path": "vinext-client-entry-manifest.json",
+          "bytes": 73,
+          "sha256": "eb0c4e406f1431c61f2c1044af931839d9fb5c03c65acddf4603e13dc185146e"
+        }
+      ]
+    },
+    "rollbackReceipt": null,
+    "authorization": {
+      "approvalExpiresAt": "2026-10-01T22:00:00.000Z",
+      "predecessorReleaseId": "NONE_FIRST_PUBLICATION"
+    },
+    "staged": {
+      "artifactId": 11181496634,
+      "artifactName": "lionlog-pages-36900859358-1",
+      "artifactDigest": "sha256:28e9db5d96b42f7337460dca8aae5bd59d8629a276ebf399deb5ebdbe4953f82",
+      "artifactExpiresAt": "2026-12-30T17:38:26Z",
+      "tarSha256": "b8c6c724b41373d6c34da4f702082380b2b4a6822bd4529a48139d9103d2e2ff"
+    }
+  },
+  "receipt": {
+    "receiptVersion": "lionlog.pages-flat-receipt.v1",
+    "recordedAt": "2026-10-01T17:46:57.092Z",
+    "operation": "promote",
+    "workflow": {
+      "sha": "5be205a42930f69424d0854443b4fa4f35c237bd",
+      "runId": 36900859358,
+      "runAttempt": 1
+    },
+    "candidate": {
+      "runId": 36860769514,
+      "sourceSha": "5be205a42930f69424d0854443b4fa4f35c237bd",
+      "artifactId": 11162276195,
+      "artifactName": "lionlog-live-2026-10-01-5be205a42930f69424d0854443b4fa4f35c237bd-36860769514-1",
+      "artifactDigest": "sha256:01c10298db0b2d44b32bc367f2378a57a77cb4a697b975af7f969e1b754f85f4",
+      "artifactExpiresAt": "2026-12-30T12:17:25Z",
+      "manifestSha256": "7d6aec0aa52660ce9eabe65745a179afba481692967b1706e073ac613061da99"
+    },
+    "ci": {
+      "runId": 36627487837
+    },
+    "release": {
+      "id": "770748e0015df71d0b6a4fc8d7a72086c2432c328cc571214139253db783147e",
+      "kind": "live",
+      "serviceDate": "2026-10-01",
+      "coverage": "partial",
+      "omissions": {
+        "invalid-name": 2
+      },
+      "earliestFreshUntil": "2026-10-02T06:19:23.562Z",
+      "earliestRetainUntil": "2026-10-03T12:19:23.562Z"
+    },
+    "staged": {
+      "artifactId": 11181496634,
+      "artifactName": "lionlog-pages-36900859358-1",
+      "artifactDigest": "sha256:28e9db5d96b42f7337460dca8aae5bd59d8629a276ebf399deb5ebdbe4953f82",
+      "artifactExpiresAt": "2026-12-30T17:38:26Z",
+      "tarSha256": "b8c6c724b41373d6c34da4f702082380b2b4a6822bd4529a48139d9103d2e2ff"
+    },
+    "rollbackSource": null,
+    "official": {
+      "submissionStarted": true,
+      "result": "success",
+      "pageUrl": "https://crunchybrunch.github.io/lionlog/",
+      "deploymentId": null
+    },
+    "public": {
+      "markerVerified": true,
+      "inventoryVerified": true,
+      "browserVerified": false
+    },
+    "knownGood": false,
+    "unresolved": true
+  }
+}

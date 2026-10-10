@@ -334,9 +334,6 @@ jobs:
           gh api "repos/${{ github.repository }}/actions/artifacts/$CANDIDATE_ARTIFACT_ID" > work/supported-pages-final/candidate-artifact.json
           gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?per_page=100" --jq .artifacts > work/supported-pages-final/staged-artifacts.json
           gh api "repos/${{ github.repository }}/actions/runs/$CI_RUN_ID" > work/supported-pages-final/ci-run.json
-          node --experimental-strip-types scripts/public-release-state.ts \
-            --expected="$(jq -er .authorization.predecessorReleaseId "$SUMMARY")" \
-            --output=work/supported-pages-final/public-predecessor.json
           if [[ "$(jq -r .operation "$SUMMARY")" == rollback ]]; then
             RECEIPT_ARTIFACT_ID="$(jq -er .rollbackReceipt.artifactId "$SUMMARY")"
             RECEIPT_RUN_ID="$(jq -er .rollbackReceipt.runId "$SUMMARY")"
@@ -349,6 +346,20 @@ jobs:
           node --experimental-strip-types scripts/collect-pages-attempt-history.ts \
             --output=work/supported-pages-final/prior-attempts.json \
             --incidents=infrastructure/publication/pages-incident-history.json
+          if [[ "$(jq '[.incidents[] | select(.outcome == "resolved-published-browser-unverified")] | length' infrastructure/publication/pages-incident-history.json)" == 1 ]]; then
+            node --experimental-strip-types scripts/published-final-predecessor.ts \
+              --incidents=infrastructure/publication/pages-incident-history.json \
+              --prior=work/supported-pages-final/prior-attempts.json \
+              --expected="$(jq -er .authorization.predecessorReleaseId "$SUMMARY")" \
+              --output=work/supported-pages-final/published-predecessor.json
+            jq .observation work/supported-pages-final/published-predecessor.json > work/supported-pages-final/public-predecessor.json
+            jq .check work/supported-pages-final/published-predecessor.json > work/supported-pages-final/published-predecessor-check.json
+          else
+            node --experimental-strip-types scripts/public-release-state.ts \
+              --expected="$(jq -er .authorization.predecessorReleaseId "$SUMMARY")" \
+              --output=work/supported-pages-final/public-predecessor.json
+            echo null > work/supported-pages-final/published-predecessor-check.json
+          fi
           jq -n --slurpfile repository work/supported-pages-final/repository.json --slurpfile main work/supported-pages-final/main.json \
             --slurpfile workflowRun work/supported-pages-final/workflow-run.json --slurpfile candidateRun work/supported-pages-final/candidate-run.json \
             --slurpfile candidateArtifact work/supported-pages-final/candidate-artifact.json --slurpfile stagedArtifacts work/supported-pages-final/staged-artifacts.json \
@@ -356,7 +367,8 @@ jobs:
             --slurpfile rollbackReceiptArtifact work/supported-pages-final/rollback-receipt-artifact.json \
             --slurpfile rollbackReceiptRun work/supported-pages-final/rollback-receipt-run.json \
             --slurpfile publicPredecessor work/supported-pages-final/public-predecessor.json \
-            '{repository:$repository[0],main:$main[0],workflowRun:$workflowRun[0],candidateRun:$candidateRun[0],candidateArtifact:$candidateArtifact[0],stagedArtifacts:$stagedArtifacts[0],ciRun:$ciRun[0],priorAttempts:$priorAttempts[0],rollbackReceiptArtifact:$rollbackReceiptArtifact[0],rollbackReceiptRun:$rollbackReceiptRun[0],publicPredecessor:$publicPredecessor[0]}' \
+            --slurpfile publishedPredecessorCheck work/supported-pages-final/published-predecessor-check.json \
+            '{repository:$repository[0],main:$main[0],workflowRun:$workflowRun[0],candidateRun:$candidateRun[0],candidateArtifact:$candidateArtifact[0],stagedArtifacts:$stagedArtifacts[0],ciRun:$ciRun[0],priorAttempts:$priorAttempts[0],rollbackReceiptArtifact:$rollbackReceiptArtifact[0],rollbackReceiptRun:$rollbackReceiptRun[0],publicPredecessor:$publicPredecessor[0],publishedPredecessorCheck:$publishedPredecessorCheck[0]}' \
             > work/supported-pages-final/state.json
           node --experimental-strip-types scripts/supported-pages-control.ts verify --summary="$SUMMARY" \
             --state=work/supported-pages-final/state.json --incidents=infrastructure/publication/pages-incident-history.json \
