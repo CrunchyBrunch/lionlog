@@ -1,0 +1,71 @@
+{
+  "mappingVersion": "lionlog.published-incident-job-log-mapping.v1",
+  "repository": "CrunchyBrunch/lionlog",
+  "repositoryId": 1346360244,
+  "workflowId": 347992874,
+  "workflowPath": ".github/workflows/deploy-github-pages.yml",
+  "runId": 36900859358,
+  "runAttempt": 1,
+  "workflowSha": "5be205a42930f69424d0854443b4fa4f35c237bd",
+  "archival": {
+    "source": "reviewed gh run view --log per-step ZIP export; no independent GitHub signature or fresh retrieval claim",
+    "firstReviewedOn": "2026-10-06",
+    "createdAt": "2026-10-01T17:45:47.4916331Z",
+    "exportSha256": "9402894d7f38c01c31c5a7f9f057d49b3b4a6b09a02979b6d781457752c4ee03",
+    "archiveSha256": "f25170168e2031fc8cb89b1c9301583e2280a70f96ec69c1e71aacd9e00c5937",
+    "members": [
+      {
+        "path": "deploy/8_Deploy with official Pages action.txt",
+        "bytes": 1497,
+        "sha256": "4c6da0f31ca3a1f37e4e0df491d5dc9629c43fa21a05e23163c7aeeaa636664e"
+      },
+      {
+        "path": "verify-public/6_Verify public inventory and mobile PWA behavior.txt",
+        "bytes": 3803,
+        "sha256": "c7ad2dba2a69a430e1065e4a2d57676d0ee011e40b237352bc2355782197eceb"
+      }
+    ]
+  },
+  "deploy": {
+    "jobId": 110499484593,
+    "jobName": "deploy",
+    "stepNumber": 8,
+    "stepName": "Deploy with official Pages action",
+    "stepConclusion": "success",
+    "stepStartedAt": "2026-10-01T17:45:45Z",
+    "stepCompletedAt": "2026-10-01T17:45:53Z",
+    "firstLine": "﻿2026-10-01T17:45:30.6807399Z Current runner version: '2.337.0'",
+    "lastLine": "2026-10-01T17:45:53.6446446Z Cleaning up orphan processes",
+    "start": "2026-10-01T17:45:45.8182145Z ##[group]Run actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346",
+    "artifactName": "2026-10-01T17:45:45.8182822Z   artifact_name: lionlog-pages-36900859358-1",
+    "preambleEnd": "2026-10-01T17:45:45.8186741Z ##[endgroup]",
+    "outputEnd": "2026-10-01T17:45:53.3102022Z Post job cleanup.",
+    "events": [
+      "2026-10-01T17:45:46.5455949Z \t\"artifact_id\": 11181496634,",
+      "2026-10-01T17:45:46.5456761Z \t\"pages_build_version\": \"5be205a42930f69424d0854443b4fa4f35c237bd\",",
+      "2026-10-01T17:45:47.4916379Z Created deployment for 5be205a42930f69424d0854443b4fa4f35c237bd, ID: 5be205a42930f69424d0854443b4fa4f35c237bd",
+      "2026-10-01T17:45:53.2872564Z Reported success!"
+    ]
+  },
+  "verify": {
+    "jobId": 110502480790,
+    "jobName": "verify-public",
+    "stepNumber": 6,
+    "stepName": "Verify public inventory and mobile PWA behavior",
+    "stepConclusion": "failure",
+    "stepStartedAt": "2026-10-01T17:46:07Z",
+    "stepCompletedAt": "2026-10-01T17:46:56Z",
+    "firstLine": "﻿2026-10-01T17:45:59.5262469Z Current runner version: '2.337.0'",
+    "lastLine": "2026-10-01T17:46:58.1368684Z Cleaning up orphan processes",
+    "start": "2026-10-01T17:46:07.1366969Z ##[group]Run set -euo pipefail",
+    "command": "2026-10-01T17:46:07.1370475Z \u001b[36;1mnode scripts/verify-public-pwa.mjs\u001b[0m",
+    "preambleEnd": "2026-10-01T17:46:07.1423592Z ##[endgroup]",
+    "outputEnd": "2026-10-01T17:46:56.9613718Z ##[error]Process completed with exit code 1.",
+    "nextStepStart": "2026-10-01T17:46:56.9648056Z ##[group]Run set -euo pipefail",
+    "nextStepCommand": "2026-10-01T17:46:56.9650121Z \u001b[36;1mnode --experimental-strip-types scripts/supported-pages-control.ts receipt \\\u001b[0m",
+    "events": [
+      "2026-10-01T17:46:10.0966663Z {\"verifiedFiles\":51,\"releaseId\":\"770748e0015df71d0b6a4fc8d7a72086c2432c328cc571214139253db783147e\"}",
+      "2026-10-01T17:46:56.9538633Z Error: Service worker did not activate: {\"status\":{\"controller\":null,\"installing\":null,\"waiting\":null,\"active\":null,\"scriptURL\":null},\"diagnostics\":[{\"kind\":\"service-worker\",\"text\":\"Failed to register a ServiceWorker for scope ('https://crunchybrunch.github.io/lionlog/') with script ('https://crunchybrunch.github.io/lionlog/sw.js'): ServiceWorker failed to install: ServiceWorker failed to handle event (event.waitUntil Promise rejected)\"},{\"kind\":\"service-worker\",\"text\":\"Uncaught (in promise) Error: LionLog shell asset was unavailable: https://crunchybrunch.github.io/lionlog\"}]}"
+    ]
+  }
+}

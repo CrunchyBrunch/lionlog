@@ -1,0 +1,289 @@
+{
+  "workflowId": 347992874,
+  "workflowPath": ".github/workflows/deploy-github-pages.yml",
+  "event": "workflow_dispatch",
+  "headBranch": "main",
+  "status": "completed",
+  "conclusion": "failure",
+  "jobs": [
+    {
+      "jobId": 110499371904,
+      "runId": 36900859358,
+      "runAttempt": 1,
+      "headSha": "5be205a42930f69424d0854443b4fa4f35c237bd",
+      "jobName": "validate-and-stage",
+      "jobStatus": "completed",
+      "jobConclusion": "success",
+      "steps": [
+        {
+          "stepNumber": 1,
+          "stepName": "Set up job",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 2,
+          "stepName": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 3,
+          "stepName": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 4,
+          "stepName": "Run npm ci --ignore-scripts --omit=dev",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 5,
+          "stepName": "Validate immutable input shapes",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 6,
+          "stepName": "Run echo \"staged=lionlog-pages-36900859358-1\" >> \"$GITHUB_OUTPUT\"",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 7,
+          "stepName": "Read exact GitHub provenance",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 8,
+          "stepName": "Bind the exact public predecessor before approval",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 9,
+          "stepName": "Download exact retained inputs",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 10,
+          "stepName": "Validate candidate and extract exact site bytes",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 11,
+          "stepName": "Stage exact bytes with official Pages artifact action",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 12,
+          "stepName": "Re-download and verify staged bytes",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 13,
+          "stepName": "Retain compact preapproval evidence",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 14,
+          "stepName": "Normalize retained preapproval wrapper digest",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 15,
+          "stepName": "Publish human review summary",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 29,
+          "stepName": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 30,
+          "stepName": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 31,
+          "stepName": "Complete job",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        }
+      ]
+    },
+    {
+      "jobId": 110499484593,
+      "runId": 36900859358,
+      "runAttempt": 1,
+      "headSha": "5be205a42930f69424d0854443b4fa4f35c237bd",
+      "jobName": "deploy",
+      "jobStatus": "completed",
+      "jobConclusion": "success",
+      "steps": [
+        {
+          "stepNumber": 1,
+          "stepName": "Set up job",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 2,
+          "stepName": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 3,
+          "stepName": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 4,
+          "stepName": "Run npm ci --ignore-scripts --omit=dev",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 5,
+          "stepName": "Download exact preapproval summary",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 6,
+          "stepName": "Recheck all authority immediately before submission",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 7,
+          "stepName": "Record official submission boundary",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 8,
+          "stepName": "Deploy with official Pages action",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 15,
+          "stepName": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 16,
+          "stepName": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 17,
+          "stepName": "Complete job",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        }
+      ]
+    },
+    {
+      "jobId": 110502480790,
+      "runId": 36900859358,
+      "runAttempt": 1,
+      "headSha": "5be205a42930f69424d0854443b4fa4f35c237bd",
+      "jobName": "verify-public",
+      "jobStatus": "completed",
+      "jobConclusion": "failure",
+      "steps": [
+        {
+          "stepNumber": 1,
+          "stepName": "Set up job",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 2,
+          "stepName": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 3,
+          "stepName": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 4,
+          "stepName": "Run npm ci --ignore-scripts --omit=dev",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 5,
+          "stepName": "Recover exact summary and manifest",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 6,
+          "stepName": "Verify public inventory and mobile PWA behavior",
+          "stepStatus": "completed",
+          "stepConclusion": "failure"
+        },
+        {
+          "stepNumber": 7,
+          "stepName": "Create one flat retained receipt",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 8,
+          "stepName": "Retain flat receipt",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 9,
+          "stepName": "Require fully verified known-good result",
+          "stepStatus": "completed",
+          "stepConclusion": "failure"
+        },
+        {
+          "stepNumber": 17,
+          "stepName": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+          "stepStatus": "completed",
+          "stepConclusion": "skipped"
+        },
+        {
+          "stepNumber": 18,
+          "stepName": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        },
+        {
+          "stepNumber": 19,
+          "stepName": "Complete job",
+          "stepStatus": "completed",
+          "stepConclusion": "success"
+        }
+      ]
+    }
+  ]
+}

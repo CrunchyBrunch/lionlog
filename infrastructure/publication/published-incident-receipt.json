@@ -1,0 +1,54 @@
+{
+  "receiptVersion": "lionlog.pages-flat-receipt.v1",
+  "recordedAt": "2026-10-01T17:46:57.092Z",
+  "operation": "promote",
+  "workflow": {
+    "sha": "5be205a42930f69424d0854443b4fa4f35c237bd",
+    "runId": 36900859358,
+    "runAttempt": 1
+  },
+  "candidate": {
+    "runId": 36860769514,
+    "sourceSha": "5be205a42930f69424d0854443b4fa4f35c237bd",
+    "artifactId": 11162276195,
+    "artifactName": "lionlog-live-2026-10-01-5be205a42930f69424d0854443b4fa4f35c237bd-36860769514-1",
+    "artifactDigest": "sha256:01c10298db0b2d44b32bc367f2378a57a77cb4a697b975af7f969e1b754f85f4",
+    "artifactExpiresAt": "2026-12-30T12:17:25Z",
+    "manifestSha256": "7d6aec0aa52660ce9eabe65745a179afba481692967b1706e073ac613061da99"
+  },
+  "ci": {
+    "runId": 36627487837
+  },
+  "release": {
+    "id": "770748e0015df71d0b6a4fc8d7a72086c2432c328cc571214139253db783147e",
+    "kind": "live",
+    "serviceDate": "2026-10-01",
+    "coverage": "partial",
+    "omissions": {
+      "invalid-name": 2
+    },
+    "earliestFreshUntil": "2026-10-02T06:19:23.562Z",
+    "earliestRetainUntil": "2026-10-03T12:19:23.562Z"
+  },
+  "staged": {
+    "artifactId": 11181496634,
+    "artifactName": "lionlog-pages-36900859358-1",
+    "artifactDigest": "sha256:28e9db5d96b42f7337460dca8aae5bd59d8629a276ebf399deb5ebdbe4953f82",
+    "artifactExpiresAt": "2026-12-30T17:38:26Z",
+    "tarSha256": "b8c6c724b41373d6c34da4f702082380b2b4a6822bd4529a48139d9103d2e2ff"
+  },
+  "rollbackSource": null,
+  "official": {
+    "submissionStarted": true,
+    "result": "success",
+    "pageUrl": "https://crunchybrunch.github.io/lionlog/",
+    "deploymentId": null
+  },
+  "public": {
+    "markerVerified": true,
+    "inventoryVerified": true,
+    "browserVerified": false
+  },
+  "knownGood": false,
+  "unresolved": true
+}

@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
+import reviewedPublishedReceipt from "../infrastructure/publication/published-incident-receipt.json" with { type: "json" };
 import {
   LIONLOG_REPOSITORY,
   LIONLOG_REPOSITORY_ID,
@@ -18,6 +20,10 @@ import type {
   LegacyAttemptEvidence,
   LegacyStepEvidence,
 } from "./collect-pages-attempt-history.ts";
+import { validatePublishedIncidentRecord, type PublishedIncident } from "./published-incident.ts";
+import { matchesPublishedJobLogEvidence } from "./published-incident-job-logs.ts";
+import type { PublishedResolution } from "./published-incident-collection.ts";
+import type { PublishedPredecessorCheck } from "./published-final-predecessor.ts";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const GIT_SHA = /^[a-f0-9]{40}$/;
@@ -60,7 +66,7 @@ export interface LegacyPreSubmissionIncident extends IncidentBase {
   };
 }
 
-export type Incident = UnknownPublicationIncident | LegacyPreSubmissionIncident;
+export type Incident = UnknownPublicationIncident | LegacyPreSubmissionIncident | PublishedIncident;
 
 export interface FinalState {
   repository: { id: number; full_name: string };
@@ -75,6 +81,7 @@ export interface FinalState {
   ciRun: { id: number; head_sha: string; status: string; conclusion: string; run_attempt: number };
   priorAttempts: PriorAttemptEvidence[];
   publicPredecessor: PublicReleaseObservation;
+  publishedPredecessorCheck?: PublishedPredecessorCheck | null;
   rollbackReceiptArtifact: null | { id: number; digest: string; expired: boolean; expires_at: string; workflow_run: { id: number; head_sha: string } };
   rollbackReceiptRun: null | { id: number; head_sha: string; status: string; conclusion: string; run_attempt: number };
 }
@@ -94,6 +101,7 @@ export interface PriorAttemptEvidence {
   submissionBoundaryConclusion: string | null;
   deploymentConclusion: string | null;
   incidentEvidence: IncidentCollectionEvidence | null;
+  publishedResolution?: PublishedResolution | null;
   legacyEvidence: LegacyAttemptEvidence;
   receipt: null | {
     artifactId: number;
@@ -243,7 +251,10 @@ export function verifyFinalState(options: {
     }
     const incident = incidentMap.get(priorKey);
     if (isKnownGoodAttempt(prior) || isProvenPreSubmissionFailure(prior)) {
-      if (prior.incidentEvidence !== null) throw new Error("Earlier Pages attempt carries unexpected incident evidence.");
+      if (prior.incidentEvidence !== null || prior.publishedResolution != null
+        || incident?.outcome === "resolved-published-browser-unverified") {
+        throw new Error("Earlier Pages attempt carries unexpected incident evidence.");
+      }
       continue;
     }
     if (
@@ -251,14 +262,68 @@ export function verifyFinalState(options: {
       || prior.status !== incident.collectorEvidence.status || prior.conclusion !== incident.collectorEvidence.conclusion
       || !exactIncidentEvidence(prior.incidentEvidence, incident.collectorEvidence)
       || (incident.outcome === "resolved-legacy-pre-submission-failure" && !matchesLegacyPreSubmissionFailure(prior, incident))
+      || (incident.outcome === "resolved-published-browser-unverified" && !matchesPublishedIncident(prior, incident))
+      || (incident.outcome !== "resolved-published-browser-unverified" && prior.publishedResolution != null)
     ) {
       throw new Error(`Earlier Pages submission attempt ${prior.runId}/${prior.runAttempt} is unknown or unresolved.`);
     }
   }
+  const published = options.incidents.incidents.filter((incident): incident is PublishedIncident =>
+    incident.outcome === "resolved-published-browser-unverified");
+  if (published.length > 1) throw new Error("Multiple published incident records are unsupported.");
+  if (published.length === 1) {
+    if (!priorKeys.has(`${published[0].runId}/${published[0].runAttempt}`)) {
+      throw new Error("Published incident attempt is absent from complete prior history.");
+    }
+    if (summary.candidate.runId === published[0].evidence.release.candidateProducerRunId
+      || summary.candidate.artifactId === published[0].evidence.artifacts.candidate.id
+      || summary.ci.runId === published[0].evidence.release.exactSourceCiRunId) {
+      throw new Error("Expired historical candidate or CI cannot be reused by reconciliation.");
+    }
+    verifyPublishedPredecessorCheck(published[0], state, options.now);
+  } else if (state.publishedPredecessorCheck != null) {
+    throw new Error("Unexpected published predecessor proof.");
+  }
   return summary;
 }
 
+function verifyPublishedPredecessorCheck(incident: PublishedIncident, state: FinalState, now: Date): void {
+  const check = state.publishedPredecessorCheck;
+  const observation = state.publicPredecessor;
+  if (!check || observation.state !== "present" || check.releaseId !== observation.releaseId
+    || check.evidenceDigest !== incident.decision.evidenceDigest
+    || !Number.isFinite(Date.parse(check.markerObservedAt))
+    || Date.parse(check.markerObservedAt) > now.getTime()
+    || now.getTime() - Date.parse(check.markerObservedAt) > 120_000) {
+    throw new Error("Published incident final predecessor proof is missing or stale.");
+  }
+  if (observation.releaseId === incident.evidence.release.id) {
+    if (check.phase !== "incident-release" || check.fileCount !== 51
+      || !check.inventoryStartedAt || !check.inventoryCompletedAt
+      || !Number.isFinite(Date.parse(check.inventoryStartedAt))
+      || !Number.isFinite(Date.parse(check.inventoryCompletedAt))
+      || Date.parse(check.inventoryStartedAt) > Date.parse(check.inventoryCompletedAt)
+      || Date.parse(check.inventoryCompletedAt) > Date.parse(check.markerObservedAt)) {
+      throw new Error("Published incident first corrective inventory/marker order is invalid.");
+    }
+    return;
+  }
+  if (check.phase !== "later-known-good" || check.fileCount !== 0
+    || check.inventoryStartedAt !== null || check.inventoryCompletedAt !== null) {
+    throw new Error("Published incident later predecessor phase is invalid.");
+  }
+  const qualifying = state.priorAttempts.filter((attempt) => {
+    const release = attempt.receipt?.content.release as { id?: unknown } | undefined;
+    return attempt.runId > incident.runId && release?.id === observation.releaseId && isKnownGoodAttempt(attempt);
+  });
+  if (qualifying.length !== 1) throw new Error("Later public predecessor lacks one independently known-good attempt.");
+}
+
 function validateIncident(incident: Incident, now: Date): void {
+  if (incident?.outcome === "resolved-published-browser-unverified") {
+    validatePublishedIncidentRecord(incident, now);
+    return;
+  }
   const commonValid = positive(incident?.runId) && positive(incident?.runAttempt) && GIT_SHA.test(incident?.workflowSha ?? "")
     && Number.isFinite(Date.parse(incident?.checkedAt ?? "")) && Date.parse(incident.checkedAt) <= now.getTime()
     && typeof incident?.note === "string" && incident.note.length >= 20
@@ -281,6 +346,47 @@ function validateIncident(incident: Incident, now: Date): void {
     || !isIncidentCollectionEvidence(incident.collectorEvidence) || !isLegacyFailureShape(incident.legacyEvidence)
     || !legacyEvidenceMatchesCollection(incident.legacyEvidence, incident.collectorEvidence)
   ) throw new Error("Pages incident history contains an invalid or duplicate record.");
+}
+
+function matchesPublishedIncident(prior: PriorAttemptEvidence, incident: PublishedIncident): boolean {
+  const proof = prior.publishedResolution;
+  const receipt = prior.receipt;
+  const content = receipt?.content as Record<string, unknown> | undefined;
+  const official = content?.official as Record<string, unknown> | undefined;
+  const publicChecks = content?.public as Record<string, unknown> | undefined;
+  const expectedDecision = incident.decision;
+  return proof != null && receipt != null && content != null
+    && prior.runId === incident.runId && prior.runAttempt === incident.runAttempt
+    && prior.workflowSha === incident.workflowSha && prior.status === "completed" && prior.conclusion === "failure"
+    && prior.finalGateConclusion === "success" && prior.submissionBoundaryConclusion === "success"
+    && prior.deploymentConclusion === "success"
+    && receipt.artifactId === incident.evidence.artifacts.receipt.id
+    && receipt.artifactDigest === incident.evidence.artifacts.receipt.wrapperDigest
+    && receipt.artifactExpiresAt === incident.evidence.artifacts.receipt.expiresAt
+    && proof.evidenceDigest === expectedDecision.evidenceDigest
+    && proof.runId === incident.runId && proof.runAttempt === incident.runAttempt
+    && proof.workflowSha === incident.workflowSha && proof.releaseId === incident.evidence.release.id
+    && proof.receiptArtifactId === receipt.artifactId && proof.receiptArtifactDigest === receipt.artifactDigest
+    && matchesPublishedJobLogEvidence(incident, proof.logEvidence)
+    && proof.decision.commentId === expectedDecision.commentId
+    && proof.decision.evidenceDigest === expectedDecision.evidenceDigest
+    && proof.decision.actorId === expectedDecision.actorId
+    && proof.decision.decidedAt === expectedDecision.decidedAt
+    && proof.decision.pullRequestNumber === expectedDecision.pullRequestNumber
+    && GIT_SHA.test(proof.decision.mergedCommitSha)
+    && isDeepStrictEqual(content, reviewedPublishedReceipt)
+    && content.receiptVersion === "lionlog.pages-flat-receipt.v1"
+    && content.knownGood === false && content.unresolved === true
+    && official?.submissionStarted === true && official.result === "success"
+    && official.pageUrl === incident.evidence.officialPages.targetUrl && official.deploymentId === null
+    && publicChecks?.markerVerified === true && publicChecks.inventoryVerified === true
+    && publicChecks.browserVerified === false
+    && isDeepStrictEqual(content.workflow, {
+      runId: incident.runId, runAttempt: incident.runAttempt, sha: incident.workflowSha,
+    })
+    && (content.release as { id?: unknown } | undefined)?.id === incident.evidence.release.id
+    && (content.candidate as { artifactId?: unknown } | undefined)?.artifactId === incident.evidence.artifacts.candidate.id
+    && (content.staged as { artifactId?: unknown } | undefined)?.artifactId === incident.evidence.artifacts.staged.id;
 }
 
 function legacyEvidenceMatchesCollection(legacy: LegacyAttemptEvidence, collection: IncidentCollectionEvidence): boolean {

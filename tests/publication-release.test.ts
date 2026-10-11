@@ -24,6 +24,8 @@ import { assertExpectedPredecessor, FIRST_PUBLICATION, observePublicRelease } fr
 import { collectLegacyEvidence, collectPagesAttemptHistory } from "../scripts/collect-pages-attempt-history.ts";
 import { selectBrowserVerificationContext } from "../scripts/select-browser-verification-context.ts";
 import { assertArtifactDigest, normalizeArtifactDigest } from "../scripts/artifact-digest.ts";
+import { canonicalEvidenceDigest, validatePublishedIncidentRecord } from "../scripts/published-incident.ts";
+import logMapping from "../infrastructure/publication/published-incident-job-log-mapping.json" with { type: "json" };
 
 const workflowSha = "a".repeat(40);
 const sourceSha = "b".repeat(40);
@@ -250,6 +252,125 @@ test("protected final check rejects main drift, artifact drift, expiration, and 
     }] },
     now,
   }));
+});
+
+test("published browser-unverified attempt needs exact proof, fresh full-inventory phase and leaves later failures blocking", async () => {
+  const raw = JSON.parse(await readFile(new URL("./fixtures/published-incident-record.json", import.meta.url), "utf8"));
+  raw.decision.evidenceDigest = canonicalEvidenceDigest(raw);
+  const gateNow = new Date("2026-10-07T19:00:00.000Z");
+  const incident = validatePublishedIncidentRecord(raw, gateNow);
+  const parsed = JSON.parse(await readFile(new URL("./fixtures/published-incident-parsed.json", import.meta.url), "utf8"));
+  const summary = summaryFixture();
+  const logEvidence = {
+    evidenceVersion: "lionlog.published-job-log-evidence.v1" as const,
+    archival: logMapping.archival,
+    deploy: {
+      jobId: logMapping.deploy.jobId, stepNumber: logMapping.deploy.stepNumber, stepName: logMapping.deploy.stepName,
+      stepStartedAt: logMapping.deploy.stepStartedAt, stepCompletedAt: logMapping.deploy.stepCompletedAt,
+      logSha256: "afc3177556dd20181dae622f49e93f42d89fd77a0e37b96be6578a798d53cca7",
+      firstLine: logMapping.deploy.firstLine, lastLine: logMapping.deploy.lastLine,
+      events: logMapping.deploy.events,
+      boundaries: [logMapping.deploy.start, logMapping.deploy.artifactName, logMapping.deploy.preambleEnd, logMapping.deploy.outputEnd],
+    },
+    verify: {
+      jobId: logMapping.verify.jobId, stepNumber: logMapping.verify.stepNumber, stepName: logMapping.verify.stepName,
+      stepStartedAt: logMapping.verify.stepStartedAt, stepCompletedAt: logMapping.verify.stepCompletedAt,
+      logSha256: "49efa274ab69743f1edf6912f138b207f5ac13d5b5888ee0fe20448a9a063818",
+      firstLine: logMapping.verify.firstLine, lastLine: logMapping.verify.lastLine,
+      events: logMapping.verify.events,
+      boundaries: [logMapping.verify.start, logMapping.verify.command, logMapping.verify.preambleEnd,
+        logMapping.verify.outputEnd, logMapping.verify.nextStepStart, logMapping.verify.nextStepCommand],
+    },
+  };
+  summary.authorization.approvalExpiresAt = "2026-10-08T19:00:00.000Z";
+  summary.authorization.predecessorReleaseId = incident.evidence.release.id;
+  summary.release.earliestFreshUntil = "2026-10-08T19:00:00.000Z";
+  summary.release.earliestRetainUntil = "2026-10-09T19:00:00.000Z";
+  const prior = priorAttempt({
+    runId: incident.runId, runAttempt: 1, workflowSha: incident.workflowSha,
+    status: "completed", conclusion: "failure", jobsComplete: true,
+    finalGateConclusion: "success", submissionBoundaryConclusion: "success", deploymentConclusion: "success",
+    incidentEvidence: incident.collectorEvidence,
+    receipt: {
+      artifactId: incident.evidence.artifacts.receipt.id,
+      artifactDigest: incident.evidence.artifacts.receipt.wrapperDigest,
+      artifactExpiresAt: incident.evidence.artifacts.receipt.expiresAt,
+      content: parsed.receipt,
+    },
+    publishedResolution: {
+      evidenceDigest: incident.decision.evidenceDigest, runId: incident.runId, runAttempt: 1,
+      workflowSha: incident.workflowSha, releaseId: incident.evidence.release.id,
+      receiptArtifactId: incident.evidence.artifacts.receipt.id,
+      receiptArtifactDigest: incident.evidence.artifacts.receipt.wrapperDigest,
+      logEvidence,
+      decision: {
+        commentId: incident.decision.commentId, evidenceDigest: incident.decision.evidenceDigest,
+        actorId: incident.decision.actorId, decidedAt: incident.decision.decidedAt,
+        pullRequestNumber: incident.decision.pullRequestNumber, mergedCommitSha: "b".repeat(40),
+      },
+    },
+  });
+  const check = {
+    phase: "incident-release" as const, evidenceDigest: incident.decision.evidenceDigest,
+    releaseId: incident.evidence.release.id, fileCount: 51,
+    inventoryStartedAt: "2026-10-07T18:59:30.000Z",
+    inventoryCompletedAt: "2026-10-07T18:59:50.000Z",
+    markerObservedAt: "2026-10-07T18:59:51.000Z",
+  };
+  const state = {
+    ...finalState(), priorAttempts: [prior],
+    publicPredecessor: { state: "present" as const, releaseId: incident.evidence.release.id },
+    publishedPredecessorCheck: check,
+  };
+  const incidents = { historyVersion: "lionlog.pages-incident-history.v1", incidents: [incident] };
+  assert.doesNotThrow(() => verifyFinalState({ summary, state, incidents, now: gateNow }));
+  const missingLog = structuredClone(state);
+  if (!missingLog.priorAttempts[0].publishedResolution) throw new Error("Test proof is missing.");
+  delete (missingLog.priorAttempts[0].publishedResolution as { logEvidence?: unknown }).logEvidence;
+  assert.throws(() => verifyFinalState({ summary, state: missingLog, incidents, now: gateNow }), /unknown or unresolved/);
+  const forgedLog = structuredClone(state);
+  forgedLog.priorAttempts[0].publishedResolution!.logEvidence.deploy.logSha256 = "0".repeat(64);
+  assert.throws(() => verifyFinalState({ summary, state: forgedLog, incidents, now: gateNow }), /unknown or unresolved/);
+  const rejectReceiptMutation = (change: (content: Record<string, unknown>) => void) => {
+    const mutated = structuredClone(state);
+    change(mutated.priorAttempts[0].receipt!.content);
+    assert.throws(() => verifyFinalState({ summary, state: mutated, incidents, now: gateNow }), /unknown or unresolved/);
+  };
+  rejectReceiptMutation((content) => { (content.candidate as { artifactDigest: string }).artifactDigest = `sha256:${"e".repeat(64)}`; });
+  rejectReceiptMutation((content) => { (content.ci as { runId: number }).runId += 1; });
+  rejectReceiptMutation((content) => { (content.staged as { artifactDigest: string }).artifactDigest = `sha256:${"e".repeat(64)}`; });
+  rejectReceiptMutation((content) => { content.extra = true; });
+  assert.throws(() => verifyFinalState({ summary, state: { ...state, publishedPredecessorCheck: { ...check, markerObservedAt: "2026-10-07T18:59:40.000Z" } }, incidents, now: gateNow }), /order/);
+  assert.throws(() => verifyFinalState({ summary, state: { ...state, priorAttempts: [{ ...prior, publishedResolution: null }] }, incidents, now: gateNow }), /unknown or unresolved/);
+  assert.throws(() => verifyFinalState({ summary, state: { ...state, priorAttempts: [prior, priorAttempt({ runId: incident.runId + 1, conclusion: "failure" })] }, incidents, now: gateNow }), /unknown or unresolved/);
+  const laterRelease = "e".repeat(64);
+  const laterRunId = incident.runId + 1;
+  const laterKnownGood = priorAttempt({
+    runId: laterRunId, conclusion: "success", finalGateConclusion: "success",
+    submissionBoundaryConclusion: "success", deploymentConclusion: "success",
+    receipt: {
+      artifactId: 900, artifactDigest: `sha256:${"e".repeat(64)}`,
+      artifactExpiresAt: "2026-12-01T00:00:00.000Z",
+      content: {
+        receiptVersion: "lionlog.pages-flat-receipt.v1", workflow: { runId: laterRunId, runAttempt: 1 },
+        release: { id: laterRelease }, official: { submissionStarted: true, result: "success" },
+        public: { markerVerified: true, inventoryVerified: true, browserVerified: true },
+        knownGood: true, unresolved: false,
+      },
+    },
+  });
+  const laterSummary = structuredClone(summary);
+  laterSummary.authorization.predecessorReleaseId = laterRelease;
+  const laterState = {
+    ...state, priorAttempts: [prior, laterKnownGood],
+    publicPredecessor: { state: "present" as const, releaseId: laterRelease },
+    publishedPredecessorCheck: {
+      ...check, phase: "later-known-good" as const, releaseId: laterRelease,
+      fileCount: 0, inventoryStartedAt: null, inventoryCompletedAt: null,
+    },
+  };
+  assert.doesNotThrow(() => verifyFinalState({ summary: laterSummary, state: laterState, incidents, now: gateNow }));
+  assert.throws(() => verifyFinalState({ summary: laterSummary, state: { ...laterState, priorAttempts: [prior] }, incidents, now: gateNow }), /known-good/);
 });
 
 test("flat receipt becomes known-good only after official success and all public checks", () => {
@@ -550,6 +671,33 @@ test("all three real historical attempts collect and reconcile only with exact i
       fetchImpl: historicalAttemptFetch(undefined, mutateAttempt),
     }), /invalid|terminal|match/);
   }
+});
+
+test("receipt artifact expiry is canonicalized only from a valid GitHub UTC timestamp", async () => {
+  const runId = 34609219734;
+  const receiptZip = createStoredZip([{ path: "pages-receipt.json", data: Buffer.from("{}") }]);
+  const artifact = {
+    id: 9001, name: `lionlog-pages-receipt-${runId}-1`, digest: `sha256:${sha256(receiptZip)}`,
+    expired: false, expires_at: "2026-12-30T17:38:26Z",
+    workflow_run: { id: runId, head_sha: "3d5181c962486aa25345f4f16fbdd75932e0d831", head_repository_id: 1_346_360_244 },
+  };
+  const collect = (expiry: string) => {
+    const baseFetch = historicalAttemptFetch();
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes(`/actions/runs/${runId}/artifacts?`)) return jsonResponse({ total_count: 1, artifacts: [{ ...artifact, expires_at: expiry }] });
+      if (url.endsWith(`/actions/artifacts/${artifact.id}/zip`)) return new Response(new Uint8Array(receiptZip));
+      return baseFetch(input, init);
+    };
+    return collectPagesAttemptHistory({
+      repository: "CrunchyBrunch/lionlog", currentRunId: 999, token: "fixture-token",
+      incidentHistory: historicalIncidentHistory, fetchImpl,
+    });
+  };
+  const evidence = await collect(artifact.expires_at);
+  assert.equal(evidence[0].receipt?.artifactExpiresAt, "2026-12-30T17:38:26.000Z");
+  await assert.rejects(() => collect("2026-12-30T17:38:26.1234Z"), /expiry/);
+  await assert.rejects(() => collect("2026-02-30T17:38:26Z"), /expiry/);
 });
 
 test("incident collection rejects every unknown or altered job and step before projection", async () => {
