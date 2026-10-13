@@ -36,6 +36,7 @@ export async function verifyBrowserSession({
   expected: expectedValue,
   chromeBin = process.env.CHROME_BIN ?? "google-chrome",
   browserNow,
+  onBeforeContextSelection,
   onOfflineStart,
   onBeforeOfflineReload,
   getOfflineServerRequestCount,
@@ -111,6 +112,12 @@ export async function verifyBrowserSession({
     await navigate(pageClient, expectedUrl);
     await waitForMenuControls(pageClient);
     await waitForServiceWorker(pageClient, diagnostics);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await waitForMenuControls(pageClient);
+    await onBeforeContextSelection?.({
+      evaluatePage: (expression) => evaluate(pageClient, expression, true),
+      waitForState: (ready) => waitForPageState(pageClient, ready),
+    });
     await selectMenuContext(pageClient, expected);
     const ready = (state) => state.selectedHall === expected.hallId && state.selectedPeriod === expected.mealPeriodId && state.selectedDate === expected.serviceDate && state.itemNames.length === expected.expectedItemCount && state.itemNames[0] === expected.expectedFirstFoodName;
     const online = await waitForPageState(pageClient, ready);
@@ -864,7 +871,7 @@ async function waitForServiceWorker(client, diagnostics) {
   let status = null;
   for (let attempt = 0; attempt < 450; attempt += 1) {
     status = await evaluate(client, `(async () => {const registration=await navigator.serviceWorker.getRegistration();return {controller:navigator.serviceWorker.controller?.scriptURL??null,installing:registration?.installing?.state??null,waiting:registration?.waiting?.state??null,active:registration?.active?.state??null,scriptURL:registration?.active?.scriptURL??registration?.installing?.scriptURL??null};})()`, true);
-    if (status?.active === "activated") return status;
+    if (status?.active === "activated" && status.controller) return status;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`Service worker did not activate: ${JSON.stringify({ status, diagnostics })}`);

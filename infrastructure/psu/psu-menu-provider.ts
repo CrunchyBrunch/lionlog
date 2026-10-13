@@ -109,6 +109,8 @@ export class PsuMenuProvider implements MenuProvider {
         mode,
         label: sourceLabel(mode),
         retrievedAt: selection.snapshot.retrievedAt,
+        freshUntil: selection.snapshot.freshUntil,
+        retainUntil: selection.snapshot.retainUntil,
         sourceUrl: selection.snapshot.query.sourceUrl,
         snapshotVersion: selection.snapshot.schemaVersion,
         completeness: selection.snapshot.coverage.status,

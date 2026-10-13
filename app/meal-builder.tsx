@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { liveMenuBrowser, sampleMenuBrowser } from "../application/browser-container.ts";
-import { todayInTimeZone } from "../application/service-date.ts";
+import { activeServiceDate, createCoalescedRevalidation, millisecondsUntilMenuRevalidation, millisecondsUntilNextServiceDate } from "../application/service-date.ts";
 import type { DiningHall, DiningVenue, MealPeriod, Menu } from "../domain/dining.ts";
 
 export interface MealBuilderInitialData {
@@ -19,6 +19,13 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
   const [hallId, setHallId] = useState(initial.menu.query.hallId);
   const [periodId, setPeriodId] = useState(initial.menu.query.mealPeriodId);
   const [serviceDate, setServiceDate] = useState(initial.menu.query.serviceDate);
+  const [dateExplicit, setDateExplicit] = useState(false);
+  const dateExplicitRef = useRef(false);
+  const [activated, setActivated] = useState(false);
+  const [contextLoading, setContextLoading] = useState(false);
+  const [reloadRevision, setReloadRevision] = useState(0);
+  const menuRequestId = useRef(0);
+  const contextRequestId = useRef(0);
   const [selectedVenueIds, setSelectedVenueIds] = useState<readonly string[]>([]);
   const [venues, setVenues] = useState(initial.venues);
   const [menu, setMenu] = useState(initial.menu);
@@ -35,67 +42,112 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
     [venues],
   );
   const periodName = periods.find((period) => period.id === periodId)?.displayName ?? "Meal";
+  const hallTimeZone = hallById.get(hallId)?.timeZone ?? "America/New_York";
   const isSample = menu.source.mode === "sample";
   const sourceStateLabel = menu.source.mode === "sample"
     ? "Sample"
     : menu.source.mode.charAt(0).toUpperCase() + menu.source.mode.slice(1);
 
   useEffect(() => {
-    let current = true;
-    menuBrowser.loadVenues(hallId).then((nextVenues) => {
-      if (current) setVenues(nextVenues);
-    });
-    return () => { current = false; };
-  }, [hallId, menuBrowser]);
+    setServiceDate((current) => activeServiceDate(current, dateExplicitRef.current, hallTimeZone));
+    setActivated(true);
+  }, [hallTimeZone]);
 
   useEffect(() => {
+    if (!activated) return;
+    const queue = createCoalescedRevalidation(
+      (callback) => window.setTimeout(callback, 120),
+      (id) => window.clearTimeout(id),
+      () => {
+        menuRequestId.current += 1;
+        setIsLoading(true);
+        setError(null);
+        setServiceDate((current) => activeServiceDate(current, dateExplicitRef.current, hallTimeZone));
+        setReloadRevision((current) => current + 1);
+      },
+    );
+    const onVisible = () => { if (document.visibilityState === "visible") queue.request(); };
+    const onPageShow = (event: PageTransitionEvent) => { if (event.persisted) queue.request(); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("pageshow", onPageShow);
+    window.addEventListener("online", queue.request);
+    const midnight = window.setTimeout(queue.request, millisecondsUntilNextServiceDate(hallTimeZone) + 1);
+    const menuDelay = millisecondsUntilMenuRevalidation(menu.source);
+    const deadline = dataMode === "live" && menuDelay !== null
+      ? window.setTimeout(queue.request, menuDelay)
+      : null;
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("pageshow", onPageShow);
+      window.removeEventListener("online", queue.request);
+      window.clearTimeout(midnight);
+      if (deadline !== null) window.clearTimeout(deadline);
+      queue.dispose();
+    };
+  }, [activated, dataMode, dateExplicit, hallTimeZone, menu.source, serviceDate]);
+
+  useEffect(() => {
+    if (!activated || contextLoading) return;
     let current = true;
+    const requestId = ++menuRequestId.current;
     menuBrowser.loadMenu({ hallId, mealPeriodId: periodId, serviceDate, venueIds: selectedVenueIds })
       .then(async (nextMenu) => {
         const nextVenues = await menuBrowser.loadVenues(hallId);
-        if (current) {
+        if (current && requestId === menuRequestId.current) {
           setMenu(nextMenu);
           setVenues(nextVenues);
         }
       })
       .catch(() => {
-        if (current) setError("The menu could not be loaded. Please try another selection.");
+        if (current && requestId === menuRequestId.current) setError("The menu could not be loaded. Please try another selection.");
       })
       .finally(() => {
-        if (current) setIsLoading(false);
+        if (current && requestId === menuRequestId.current) setIsLoading(false);
       });
     return () => { current = false; };
-  }, [hallId, menuBrowser, periodId, selectedVenueIds, serviceDate]);
+  }, [activated, contextLoading, hallId, menuBrowser, periodId, reloadRevision, selectedVenueIds, serviceDate]);
 
   async function chooseDataMode(nextMode: "live" | "sample") {
     if (nextMode === dataMode) return;
+    const requestId = ++contextRequestId.current;
+    menuRequestId.current += 1;
     setIsLoading(true);
     setError(null);
+    setContextLoading(true);
     setDataMode(nextMode);
     setSelectedVenueIds([]);
     const browser = nextMode === "live" ? liveMenuBrowser : sampleMenuBrowser;
-    const context = await browser.loadContext();
-    const nextHall = context.halls[0];
-    const nextPeriod = context.periods.find((period) => period.id === "dinner") ?? context.periods[0];
-    setHalls(context.halls);
-    setPeriods(context.periods);
-    if (nextHall && nextPeriod) {
-      setHallId(nextHall.id);
-      setPeriodId(nextPeriod.id);
-      setServiceDate(todayInTimeZone(nextHall.timeZone));
+    try {
+      const context = await browser.loadContext();
+      if (requestId !== contextRequestId.current) return;
+      const nextHall = context.halls[0];
+      const nextPeriod = context.periods.find((period) => period.id === "dinner") ?? context.periods[0];
+      setHalls(context.halls);
+      setPeriods(context.periods);
+      if (nextHall && nextPeriod) {
+        setHallId(nextHall.id);
+        setPeriodId(nextPeriod.id);
+        setServiceDate((current) => activeServiceDate(current, dateExplicitRef.current, nextHall.timeZone));
+      }
+    } catch {
+      if (requestId === contextRequestId.current) setError("The dining context could not be loaded.");
+    } finally {
+      if (requestId === contextRequestId.current) setContextLoading(false);
     }
   }
 
   function chooseHall(nextHallId: string) {
+    menuRequestId.current += 1;
     setIsLoading(true);
     setError(null);
     setHallId(nextHallId);
     setSelectedVenueIds([]);
     const hall = hallById.get(nextHallId);
-    if (hall) setServiceDate(todayInTimeZone(hall.timeZone));
+    if (hall) setServiceDate((current) => activeServiceDate(current, dateExplicitRef.current, hall.timeZone));
   }
 
   function toggleVenue(venueId: string) {
+    menuRequestId.current += 1;
     setIsLoading(true);
     setError(null);
     setSelectedVenueIds((current) =>
@@ -146,7 +198,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
         <div className="field-grid">
           <label>
             <span>Dining hall</span>
-            <select value={hallId} onChange={(event) => chooseHall(event.target.value)}>
+            <select value={hallId} disabled={contextLoading} onChange={(event) => chooseHall(event.target.value)}>
               {halls.map((hall) => (
                 <option value={hall.id} key={hall.id}>{hall.displayName}</option>
               ))}
@@ -154,7 +206,8 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
           </label>
           <label>
             <span>Meal period</span>
-            <select value={periodId} onChange={(event) => {
+            <select value={periodId} disabled={contextLoading} onChange={(event) => {
+              menuRequestId.current += 1;
               setIsLoading(true);
               setError(null);
               setPeriodId(event.target.value);
@@ -166,7 +219,10 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
           </label>
           <label>
             <span>Service date</span>
-            <input type="date" value={serviceDate} onChange={(event) => {
+            <input type="date" value={serviceDate} disabled={contextLoading} onChange={(event) => {
+              menuRequestId.current += 1;
+              dateExplicitRef.current = true;
+              setDateExplicit(true);
               setIsLoading(true);
               setError(null);
               setServiceDate(event.target.value);
@@ -179,8 +235,10 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
           <label className={`choice-card ${selectedVenueIds.length === 0 ? "selected" : ""}`}>
             <input
               type="checkbox"
+              disabled={contextLoading}
               checked={selectedVenueIds.length === 0}
               onChange={() => {
+                menuRequestId.current += 1;
                 setIsLoading(true);
                 setError(null);
                 setSelectedVenueIds([]);
@@ -199,6 +257,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
                 <label className={`venue-option ${selected ? "selected" : ""}`} key={venue.id}>
                   <input
                     type="checkbox"
+                    disabled={contextLoading}
                     checked={selected}
                     onChange={() => toggleVenue(venue.id)}
                   />

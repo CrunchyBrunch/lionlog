@@ -16,7 +16,7 @@ const projectRoot = path.resolve(import.meta.dirname, "..");
 const fixtureRoot = path.join(projectRoot, "tests", "fixtures", "psu");
 const shellRevision = "a".repeat(40);
 const releaseId = "b".repeat(64);
-const fixedBrowserNow = "2026-09-17T12:00:00.000Z";
+const fixedBrowserNow = "2026-09-16T12:00:00.000Z";
 const browserBasePath = process.env.LIONLOG_BROWSER_TEST_BASE_PATH ?? "";
 if (!/^(?:|\/[A-Za-z0-9][A-Za-z0-9._-]*)$/.test(browserBasePath)) throw new Error("Browser regression base path is invalid.");
 
@@ -26,6 +26,10 @@ test("React-controlled historical date and target-wide offline reload use only v
   let offlinePhase = false;
   let offlineRequests = 0;
   const requestPaths: string[] = [];
+  let holdNextSnapshot = false;
+  const snapshotGate = { release: () => {} };
+  let announceSnapshotHeld = () => {};
+  const snapshotHeld = new Promise<void>((resolve) => { announceSnapshotHeld = resolve; });
   try {
     await cp(path.join(projectRoot, "dist", "client"), site, { recursive: true });
     await replaceShellRevision(site);
@@ -77,6 +81,11 @@ test("React-controlled historical date and target-wide offline reload use only v
           ? pathname
           : pathname === `${browserBasePath}/` ? "/" : pathname.startsWith(`${browserBasePath}/`) ? pathname.slice(browserBasePath.length) : "__outside_scope__";
         const relative = scopedPath === "/" ? "index.html" : scopedPath.replace(/^\/+/, "");
+        if (holdNextSnapshot && relative === "menu-data/v2/snapshots/2026-08-31/11/lunch.json") {
+          holdNextSnapshot = false;
+          announceSnapshotHeld();
+          await new Promise<void>((resolve) => { snapshotGate.release = resolve; });
+        }
         const resolved = path.resolve(site, relative);
         if (resolved !== site && !resolved.startsWith(`${site}${path.sep}`)) throw new Error("path traversal");
         const bytes = await readFile(resolved);
@@ -101,6 +110,59 @@ test("React-controlled historical date and target-wide offline reload use only v
         targetUrl: `http://127.0.0.1:${address.port}${browserBasePath}/`,
         chromeBin: browserExecutable(),
         browserNow: fixedBrowserNow,
+        onBeforeContextSelection: async ({ evaluatePage, waitForState }: {
+          evaluatePage: (expression: string) => Promise<unknown>;
+          waitForState: (ready: (state: { selectedDate: string }) => boolean) => Promise<{ selectedDate: string }>;
+        }) => {
+          assert.equal((await waitForState((state) => state.selectedDate === "2026-09-16")).selectedDate, "2026-09-16");
+          const advance = async (instant: string) => {
+            const fixed = Date.parse(instant);
+            await evaluatePage(`(() => {
+              const PreviousDate = Date;
+              class AdvancedDate extends PreviousDate {
+                constructor(...args) { super(...(args.length === 0 ? [${fixed}] : args)); }
+                static now() { return ${fixed}; }
+              }
+              Object.setPrototypeOf(AdvancedDate, PreviousDate);
+              globalThis.Date = AdvancedDate;
+              document.dispatchEvent(new Event("visibilitychange"));
+              window.dispatchEvent(new Event("online"));
+            })()`);
+          };
+          await advance("2026-09-17T05:01:00.000Z");
+          assert.equal((await waitForState((state) => state.selectedDate === "2026-09-17")).selectedDate, "2026-09-17");
+          const chooseDate = async (date: string) => evaluatePage(`(() => {
+            const input = document.querySelector('input[type="date"]');
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+            setter.call(input, ${JSON.stringify(date)});
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+          })()`);
+          await evaluatePage(`(() => {
+            const select = document.querySelectorAll("select")[1];
+            const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set;
+            setter.call(select, "lunch");
+            select.dispatchEvent(new Event("input", { bubbles: true }));
+            select.dispatchEvent(new Event("change", { bubbles: true }));
+          })()`);
+          holdNextSnapshot = true;
+          await chooseDate("2026-08-31");
+          await Promise.race([
+            snapshotHeld,
+            new Promise<void>((_, reject) => setTimeout(() => reject(new Error("The delayed snapshot request did not start.")), 5_000)),
+          ]);
+          await chooseDate("2026-09-17");
+          snapshotGate.release();
+          await evaluatePage("new Promise((resolve) => setTimeout(resolve, 350))");
+          const newerChoice = await waitForState(() => true);
+          assert.equal(newerChoice.selectedDate, "2026-09-17");
+          assert.equal((newerChoice as { itemNames?: unknown[] }).itemNames?.length, 0);
+          await chooseDate("2026-08-31");
+          assert.equal((await waitForState((state) => state.selectedDate === "2026-08-31")).selectedDate, "2026-08-31");
+          await advance("2026-09-18T05:01:00.000Z");
+          await evaluatePage("new Promise((resolve) => setTimeout(resolve, 350))");
+          assert.equal((await waitForState(() => true)).selectedDate, "2026-08-31");
+        },
         expected: {
           contextVersion: "lionlog.pages-browser-context.v1",
           releaseId,
@@ -140,6 +202,7 @@ test("React-controlled historical date and target-wide offline reload use only v
       assert.equal(result.offline.shellRevision, shellRevision);
       assert.equal(result.approvedReleaseId, releaseId);
     } finally {
+      snapshotGate.release();
       if (!serverClosed) await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   } finally {

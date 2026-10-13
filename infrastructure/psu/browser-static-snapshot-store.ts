@@ -46,25 +46,30 @@ export class BrowserStaticPsuSnapshotStore implements PsuMenuDeliveryStore {
   }
 
   async readMenuSelection(query: MenuQuery): Promise<DeliveredPsuSnapshot | null> {
-    const catalog = await this.loadCatalog();
-    const entry = catalog?.snapshots.find((candidate) => sameQuery(candidate, query));
-    if (entry) {
-      try {
-        const catalogUrl = resolveSameOriginMenuUrl(PSU_MENU_DATA_PATH, this.baseUrl());
-        const snapshotUrl = resolveSameOriginMenuUrl(entry.snapshotUrl, catalogUrl);
-        const snapshot = await this.fetchSnapshot(snapshotUrl, entry);
-        if (!this.isRetained(snapshot)) return null;
+    let catalog = await this.loadCatalog();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const entry = catalog?.snapshots.find((candidate) => sameQuery(candidate, query));
+      if (entry) {
         try {
-          await this.applicationStore.writeSnapshot(snapshot);
+          const catalogUrl = resolveSameOriginMenuUrl(PSU_MENU_DATA_PATH, this.baseUrl());
+          const snapshotUrl = resolveSameOriginMenuUrl(entry.snapshotUrl, catalogUrl);
+          const snapshot = await this.fetchSnapshot(snapshotUrl, entry);
+          if (this.isRetained(snapshot)) {
+            try {
+              await this.applicationStore.writeSnapshot(snapshot);
+            } catch {
+              // Valid remote data remains usable when persistent browser storage is unavailable.
+            }
+            return { state: this.isFresh(snapshot) ? "live" : "stale", snapshot };
+          }
         } catch {
-          // Valid remote data remains usable when persistent browser storage is unavailable.
+          // A failed or invalid publication must not replace a previously validated snapshot.
         }
-        return { state: this.isFresh(snapshot) ? "live" : "stale", snapshot };
-      } catch {
-        // A failed or invalid publication must not replace a previously validated snapshot.
       }
+      if (attempt === 0) catalog = await this.loadCatalog();
     }
-    return this.readLastKnownGood(query, entry?.snapshotId);
+    const finalEntry = catalog?.snapshots.find((candidate) => sameQuery(candidate, query));
+    return this.readLastKnownGood(query, finalEntry?.snapshotId);
   }
 
   async listMenus(): Promise<readonly BrowserPsuMenuSnapshot[]> {
