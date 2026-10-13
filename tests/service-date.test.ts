@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as serviceDates from "../application/service-date.ts";
+import type { Menu } from "../domain/dining.ts";
 
 const { todayInTimeZone } = serviceDates;
 
@@ -55,4 +56,27 @@ test("open menus revalidate immediately after freshness and retention boundaries
   assert.equal(serviceDates.millisecondsUntilMenuRevalidation({ mode: "stale", freshUntil, retainUntil }, new Date("2026-09-02T16:00:00.002Z")), 0);
   assert.equal(serviceDates.millisecondsUntilMenuRevalidation({ mode: "unavailable" }, new Date(freshUntil)), null);
   assert.equal(serviceDates.millisecondsUntilMenuRevalidation({ mode: "sample" }, new Date(freshUntil)), null);
+});
+
+test("display ages a validated live menu at inclusive freshness and retention deadlines", () => {
+  const menu = {
+    query: { serviceDate: "2026-08-31", hallId: "psu:campus:11", mealPeriodId: "lunch", venueIds: [] },
+    items: [{ id: "fixture" }] as unknown as Menu["items"],
+    source: {
+      mode: "live",
+      label: "Penn State public menu — retrieved live",
+      retrievedAt: "2026-09-16T12:00:00.000Z",
+      freshUntil: "2026-09-17T06:00:00.000Z",
+      retainUntil: "2026-09-18T12:00:00.000Z",
+    },
+  } as Menu;
+  const display = serviceDates.menuForDisplay;
+  assert.equal(typeof display, "function");
+  assert.equal(display(menu, new Date(menu.source.freshUntil!)).source.mode, "live");
+  assert.equal(display(menu, new Date("2026-09-17T06:00:00.001Z")).source.mode, "stale");
+  assert.equal(display(menu, new Date(menu.source.retainUntil!)).items.length, 1);
+  const expired = display(menu, new Date("2026-09-18T12:00:00.001Z"));
+  assert.equal(expired.source.mode, "unavailable");
+  assert.equal(expired.items.length, 0);
+  assert.equal(menu.items.length, 1, "aging must not mutate the validated source menu");
 });

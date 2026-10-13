@@ -30,6 +30,18 @@ test("React-controlled historical date and target-wide offline reload use only v
   const snapshotGate = { release: () => {} };
   let announceSnapshotHeld = () => {};
   const snapshotHeld = new Promise<void>((resolve) => { announceSnapshotHeld = resolve; });
+  type HoldKind = "catalog" | "snapshot" | "venue";
+  let pendingHold: { kind: HoldKind; seenSnapshot: boolean; started: () => void; released: Promise<void> } | null = null;
+  const releases: Array<() => void> = [];
+  const holdNext = (kind: HoldKind) => {
+    let started = () => {};
+    let release = () => {};
+    const reached = new Promise<void>((resolve) => { started = resolve; });
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    pendingHold = { kind, seenSnapshot: false, started, released };
+    releases.push(release);
+    return { reached, release };
+  };
   try {
     await cp(path.join(projectRoot, "dist", "client"), site, { recursive: true });
     await replaceShellRevision(site);
@@ -86,6 +98,17 @@ test("React-controlled historical date and target-wide offline reload use only v
           announceSnapshotHeld();
           await new Promise<void>((resolve) => { snapshotGate.release = resolve; });
         }
+        const hold = pendingHold;
+        if (hold && relative.endsWith("/snapshots/2026-08-31/11/lunch.json")) hold.seenSnapshot = true;
+        if (hold && (
+          (hold.kind === "catalog" && relative.endsWith("/catalog.json"))
+          || (hold.kind === "snapshot" && relative.endsWith("/snapshots/2026-08-31/11/lunch.json"))
+          || (hold.kind === "venue" && hold.seenSnapshot && relative.endsWith("/catalog.json"))
+        )) {
+          pendingHold = null;
+          hold.started();
+          await hold.released;
+        }
         const resolved = path.resolve(site, relative);
         if (resolved !== site && !resolved.startsWith(`${site}${path.sep}`)) throw new Error("path traversal");
         const bytes = await readFile(resolved);
@@ -115,13 +138,14 @@ test("React-controlled historical date and target-wide offline reload use only v
           waitForState: (ready: (state: { selectedDate: string }) => boolean) => Promise<{ selectedDate: string }>;
         }) => {
           assert.equal((await waitForState((state) => state.selectedDate === "2026-09-16")).selectedDate, "2026-09-16");
-          const advance = async (instant: string) => {
+          const advance = async (instant: string, running = false) => {
             const fixed = Date.parse(instant);
             await evaluatePage(`(() => {
               const PreviousDate = Date;
+              const anchor = performance.now();
               class AdvancedDate extends PreviousDate {
-                constructor(...args) { super(...(args.length === 0 ? [${fixed}] : args)); }
-                static now() { return ${fixed}; }
+                constructor(...args) { super(...(args.length === 0 ? [${fixed} + (${running} ? performance.now() - anchor : 0)] : args)); }
+                static now() { return ${fixed} + (${running} ? performance.now() - anchor : 0); }
               }
               Object.setPrototypeOf(AdvancedDate, PreviousDate);
               globalThis.Date = AdvancedDate;
@@ -162,6 +186,39 @@ test("React-controlled historical date and target-wide offline reload use only v
           await advance("2026-09-18T05:01:00.000Z");
           await evaluatePage("new Promise((resolve) => setTimeout(resolve, 350))");
           assert.equal((await waitForState(() => true)).selectedDate, "2026-08-31");
+          const retained = await waitForState((state) => (state as { itemNames?: unknown[] }).itemNames?.length === itemNames.length);
+          assert.equal((retained as { sourceState?: string }).sourceState, "Source state: stale");
+
+          for (const kind of ["catalog", "snapshot"] as const) {
+            const hold = holdNext(kind);
+            await advance("2026-09-18T12:01:00.000Z");
+            await Promise.race([hold.reached, new Promise<void>((_, reject) => setTimeout(() => reject(new Error(`${kind} request did not start`)), 5_000))]);
+            await evaluatePage("new Promise((resolve) => setTimeout(resolve, 250))");
+            const expired = await waitForState(() => true) as { sourceState?: string; itemNames?: unknown[] };
+            assert.equal(expired.sourceState, "Source state: unavailable", `${kind} held past retention`);
+            assert.equal(expired.itemNames?.length, 0, `${kind} held past retention`);
+            hold.release();
+            await evaluatePage("new Promise((resolve) => setTimeout(resolve, 450))");
+            const afterRelease = await waitForState(() => true) as { sourceState?: string; itemNames?: unknown[] };
+            assert.equal(afterRelease.sourceState, "Source state: unavailable", `${kind} released after retention`);
+            assert.equal(afterRelease.itemNames?.length, 0, `${kind} released after retention`);
+            await advance("2026-09-18T05:01:00.000Z");
+            await waitForState((state) => (state as { itemNames?: unknown[] }).itemNames?.length === itemNames.length);
+          }
+
+          await advance("2026-09-17T05:59:55.000Z", true);
+          await waitForState((state) => (state as { sourceState?: string }).sourceState === "Source state: live");
+          const venueHold = holdNext("venue");
+          await Promise.race([venueHold.reached, new Promise<void>((_, reject) => setTimeout(() => reject(new Error("venue timer request did not start")), 8_000))]);
+          await evaluatePage("new Promise((resolve) => setTimeout(resolve, 250))");
+          const stale = await waitForState(() => true) as { sourceState?: string; itemNames?: unknown[] };
+          assert.equal(stale.sourceState, "Source state: stale", "venue catalog held past freshness");
+          assert.equal(stale.itemNames?.length, itemNames.length);
+          venueHold.release();
+          await evaluatePage("new Promise((resolve) => setTimeout(resolve, 450))");
+          assert.equal((await waitForState(() => true) as { sourceState?: string }).sourceState, "Source state: stale", "venue catalog released after freshness");
+          await advance("2026-09-18T05:01:00.000Z");
+          await waitForState((state) => (state as { itemNames?: unknown[] }).itemNames?.length === itemNames.length);
         },
         expected: {
           contextVersion: "lionlog.pages-browser-context.v1",
@@ -203,6 +260,7 @@ test("React-controlled historical date and target-wide offline reload use only v
       assert.equal(result.approvedReleaseId, releaseId);
     } finally {
       snapshotGate.release();
+      for (const release of releases) release();
       if (!serverClosed) await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   } finally {
@@ -220,12 +278,12 @@ async function historicalSnapshot() {
   for (const handle of ["900000001", "900000002", "900000003"]) {
     nutrition.set(handle, parsePsuNutritionHtml(await readFile(path.join(fixtureRoot, `nutrition-${handle}.sanitized.html`), "utf8")));
   }
-  const retrievedAt = new Date("2026-08-31T16:00:00.000Z");
+  const retrievedAt = new Date("2026-09-16T12:00:00.000Z");
   return buildPsuSnapshot({ serviceDate: "2026-08-31", hallId: "psu:campus:11", mealPeriodId: "lunch", venueIds: [] }, menu, nutrition, {
     retrievedAt,
     cachedAt: retrievedAt,
-    freshForMs: 60 * 60_000,
-    retainForMs: 18 * 24 * 60 * 60_000,
+    freshForMs: 18 * 60 * 60_000,
+    retainForMs: 48 * 60 * 60_000,
   });
 }
 

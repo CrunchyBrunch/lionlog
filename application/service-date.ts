@@ -1,4 +1,4 @@
-import type { MenuSource } from "../domain/dining.ts";
+import type { Menu, MenuSource } from "../domain/dining.ts";
 
 export function todayInTimeZone(timeZone: string, now = new Date()): string {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -21,6 +21,39 @@ export function millisecondsUntilMenuRevalidation(
     : source.mode === "stale" ? source.retainUntil : null;
   const time = Date.parse(boundary ?? "");
   return Number.isFinite(time) ? Math.max(0, time - now.getTime() + 1) : null;
+}
+
+export function menuForDisplay(menu: Menu, now = new Date()): Menu {
+  const source = menu.source;
+  if (source.mode === "sample" || source.mode === "unavailable") return menu;
+  const current = now.getTime();
+  const retainUntil = Date.parse(source.retainUntil ?? "");
+  if (Number.isFinite(retainUntil) && current > retainUntil) {
+    return {
+      ...menu,
+      items: [],
+      source: {
+        mode: "unavailable",
+        label: "Penn State menu unavailable",
+        retrievedAt: null,
+        sourceUrl: source.sourceUrl,
+        warning: "The saved menu passed its retention deadline. Sample data was not substituted.",
+      },
+    };
+  }
+  const freshUntil = Date.parse(source.freshUntil ?? "");
+  if ((source.mode === "live" || source.mode === "cached") && Number.isFinite(freshUntil) && current > freshUntil) {
+    return {
+      ...menu,
+      source: {
+        ...source,
+        mode: "stale",
+        label: "Penn State public menu — stale saved copy",
+        warning: "Live retrieval failed or the cached snapshot expired; items may have changed.",
+      },
+    };
+  }
+  return menu;
 }
 
 export function activeServiceDate(selectedDate: string, explicit: boolean, timeZone: string, now = new Date()): string {
