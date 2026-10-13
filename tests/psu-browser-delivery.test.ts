@@ -55,6 +55,8 @@ test("remote validated data is live and an offline reload uses the saved validat
   });
   const liveMenu = await new PsuMenuProvider(online, { now: () => new Date("2026-08-31T16:02:00.000Z") }).getMenu(query);
   assert.equal(liveMenu.source.mode, "live");
+  assert.equal(liveMenu.source.freshUntil, snapshot.freshUntil);
+  assert.equal(liveMenu.source.retainUntil, snapshot.retainUntil);
   assert.ok(liveMenu.items.length > 0);
 
   const offline = new BrowserStaticPsuSnapshotStore({
@@ -111,6 +113,36 @@ test("tampered remote data is rejected without replacing last-known-good", async
   assert.equal(result?.state, "cached");
   assert.equal(result?.snapshot.snapshotId, snapshot.snapshotId);
   assert.notEqual(result?.snapshot.stations[0].items[0].nutrition.calories, 9999);
+});
+
+test("catalog and snapshot publication transition gets one bounded catalog reload", async () => {
+  const snapshotA = await fixtureSnapshot();
+  const snapshotB = await fixtureSnapshot(new Date("2026-08-31T16:00:20.000Z"));
+  assert.notEqual(snapshotA.snapshotId, snapshotB.snapshotId);
+  const catalogA = fixtureCatalog(snapshotA);
+  const catalogB = fixtureCatalog(snapshotB);
+  let catalogReads = 0;
+  let snapshotReads = 0;
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/catalog.json")) return jsonResponse(++catalogReads === 1 ? catalogA : catalogB, url.href);
+    if (url.pathname.endsWith("/snapshots/2026-08-31/11/lunch.json")) {
+      snapshotReads += 1;
+      return jsonResponse(snapshotB, url.href);
+    }
+    throw new Error(`Unexpected fixture URL: ${url.href}`);
+  };
+  const store = new BrowserStaticPsuSnapshotStore({
+    baseUrl: () => "https://example.test/lionlog/",
+    fetchImpl,
+    applicationStore: new MemoryBrowserMenuApplicationStore(),
+    now: () => new Date("2026-08-31T16:01:00.000Z"),
+  });
+  const selected = await store.readMenuSelection(query);
+  assert.equal(selected?.state, "live");
+  assert.equal(selected?.snapshot.snapshotId, snapshotB.snapshotId);
+  assert.equal(catalogReads, 2);
+  assert.equal(snapshotReads, 2);
 });
 
 test("catalog coverage tampering and snapshot coverage tampering fail closed", async () => {
@@ -209,16 +241,16 @@ test("tampered browser storage is ignored during offline reload", async () => {
   assert.equal(await store.readMenuSelection(query), null);
 });
 
-async function fixtureSnapshot() {
+async function fixtureSnapshot(observedAt = fetchedAt) {
   const store = new MemoryPsuSnapshotStore();
-  const nowMs = fetchedAt.getTime();
+  const nowMs = observedAt.getTime();
   const retriever = new PsuHttpRetriever({
     fetchImpl: fixtureFetch,
     minimumIntervalMs: 0,
     maximumAttempts: 1,
     now: () => nowMs,
   });
-  const result = await new PsuIngestionPipeline(retriever, store, { now: () => fetchedAt }).run(query);
+  const result = await new PsuIngestionPipeline(retriever, store, { now: () => observedAt }).run(query);
   assert.equal(result.state, "live");
   return result.snapshot;
 }

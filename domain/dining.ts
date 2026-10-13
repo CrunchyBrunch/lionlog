@@ -38,6 +38,8 @@ export interface MenuSource {
   readonly mode: MenuDataState;
   readonly label: string;
   readonly retrievedAt?: string | null;
+  readonly freshUntil?: string | null;
+  readonly retainUntil?: string | null;
   readonly sourceUrl?: string | null;
   readonly snapshotVersion?: string;
   readonly warning?: string;

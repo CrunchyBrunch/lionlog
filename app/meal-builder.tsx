@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { liveMenuBrowser, sampleMenuBrowser } from "../application/browser-container.ts";
-import { todayInTimeZone } from "../application/service-date.ts";
+import { activeServiceDate, createCoalescedRevalidation, menuForDisplay, millisecondsUntilMenuRevalidation, millisecondsUntilNextServiceDate } from "../application/service-date.ts";
 import type { DiningHall, DiningVenue, MealPeriod, Menu } from "../domain/dining.ts";
 
 export interface MealBuilderInitialData {
@@ -19,12 +19,23 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
   const [hallId, setHallId] = useState(initial.menu.query.hallId);
   const [periodId, setPeriodId] = useState(initial.menu.query.mealPeriodId);
   const [serviceDate, setServiceDate] = useState(initial.menu.query.serviceDate);
+  const [dateExplicit, setDateExplicit] = useState(false);
+  const dateExplicitRef = useRef(false);
+  const [activated, setActivated] = useState(false);
+  const [contextLoading, setContextLoading] = useState(false);
+  const [reloadRevision, setReloadRevision] = useState(0);
+  const [, setDisplayRevision] = useState(0);
+  const menuRequestId = useRef(0);
+  const contextRequestId = useRef(0);
+  const revalidationQueue = useRef<ReturnType<typeof createCoalescedRevalidation> | null>(null);
   const [selectedVenueIds, setSelectedVenueIds] = useState<readonly string[]>([]);
   const [venues, setVenues] = useState(initial.venues);
   const [menu, setMenu] = useState(initial.menu);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const menuBrowser = dataMode === "live" ? liveMenuBrowser : sampleMenuBrowser;
+  const displayMenu = menuForDisplay(menu);
+  const displayMenuDelay = millisecondsUntilMenuRevalidation(displayMenu.source);
 
   const hallById = useMemo(
     () => new Map(halls.map((hall) => [hall.id, hall])),
@@ -35,67 +46,123 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
     [venues],
   );
   const periodName = periods.find((period) => period.id === periodId)?.displayName ?? "Meal";
-  const isSample = menu.source.mode === "sample";
-  const sourceStateLabel = menu.source.mode === "sample"
+  const hallTimeZone = hallById.get(hallId)?.timeZone ?? "America/New_York";
+  const isSample = displayMenu.source.mode === "sample";
+  const sourceStateLabel = displayMenu.source.mode === "sample"
     ? "Sample"
-    : menu.source.mode.charAt(0).toUpperCase() + menu.source.mode.slice(1);
+    : displayMenu.source.mode.charAt(0).toUpperCase() + displayMenu.source.mode.slice(1);
 
   useEffect(() => {
-    let current = true;
-    menuBrowser.loadVenues(hallId).then((nextVenues) => {
-      if (current) setVenues(nextVenues);
-    });
-    return () => { current = false; };
-  }, [hallId, menuBrowser]);
+    setServiceDate((current) => activeServiceDate(current, dateExplicitRef.current, hallTimeZone));
+    setActivated(true);
+  }, [hallTimeZone]);
 
   useEffect(() => {
+    if (!activated) return;
+    const queue = createCoalescedRevalidation(
+      (callback) => window.setTimeout(callback, 120),
+      (id) => window.clearTimeout(id),
+      () => {
+        menuRequestId.current += 1;
+        setIsLoading(true);
+        setError(null);
+        setServiceDate((current) => activeServiceDate(current, dateExplicitRef.current, hallTimeZone));
+        setReloadRevision((current) => current + 1);
+      },
+    );
+    revalidationQueue.current = queue;
+    const request = () => {
+      setDisplayRevision((current) => current + 1);
+      queue.request();
+    };
+    const onVisible = () => { if (document.visibilityState === "visible") request(); };
+    const onPageShow = (event: PageTransitionEvent) => { if (event.persisted) request(); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("pageshow", onPageShow);
+    window.addEventListener("online", request);
+    const midnight = window.setTimeout(request, millisecondsUntilNextServiceDate(hallTimeZone) + 1);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("pageshow", onPageShow);
+      window.removeEventListener("online", request);
+      window.clearTimeout(midnight);
+      if (revalidationQueue.current === queue) revalidationQueue.current = null;
+      queue.dispose();
+    };
+  }, [activated, dataMode, dateExplicit, hallTimeZone, serviceDate]);
+
+  useEffect(() => {
+    if (!activated || dataMode !== "live") return;
+    if (displayMenuDelay === null) return;
+    const deadline = window.setTimeout(() => {
+      setDisplayRevision((current) => current + 1);
+      revalidationQueue.current?.request();
+    }, displayMenuDelay);
+    return () => window.clearTimeout(deadline);
+  }, [activated, dataMode, displayMenuDelay]);
+
+  useEffect(() => {
+    if (!activated || contextLoading) return;
     let current = true;
+    const requestId = ++menuRequestId.current;
     menuBrowser.loadMenu({ hallId, mealPeriodId: periodId, serviceDate, venueIds: selectedVenueIds })
       .then(async (nextMenu) => {
         const nextVenues = await menuBrowser.loadVenues(hallId);
-        if (current) {
+        if (current && requestId === menuRequestId.current) {
           setMenu(nextMenu);
           setVenues(nextVenues);
         }
       })
       .catch(() => {
-        if (current) setError("The menu could not be loaded. Please try another selection.");
+        if (current && requestId === menuRequestId.current) setError("The menu could not be loaded. Please try another selection.");
       })
       .finally(() => {
-        if (current) setIsLoading(false);
+        if (current && requestId === menuRequestId.current) setIsLoading(false);
       });
     return () => { current = false; };
-  }, [hallId, menuBrowser, periodId, selectedVenueIds, serviceDate]);
+  }, [activated, contextLoading, hallId, menuBrowser, periodId, reloadRevision, selectedVenueIds, serviceDate]);
 
   async function chooseDataMode(nextMode: "live" | "sample") {
     if (nextMode === dataMode) return;
+    const requestId = ++contextRequestId.current;
+    menuRequestId.current += 1;
     setIsLoading(true);
     setError(null);
+    setContextLoading(true);
     setDataMode(nextMode);
     setSelectedVenueIds([]);
     const browser = nextMode === "live" ? liveMenuBrowser : sampleMenuBrowser;
-    const context = await browser.loadContext();
-    const nextHall = context.halls[0];
-    const nextPeriod = context.periods.find((period) => period.id === "dinner") ?? context.periods[0];
-    setHalls(context.halls);
-    setPeriods(context.periods);
-    if (nextHall && nextPeriod) {
-      setHallId(nextHall.id);
-      setPeriodId(nextPeriod.id);
-      setServiceDate(todayInTimeZone(nextHall.timeZone));
+    try {
+      const context = await browser.loadContext();
+      if (requestId !== contextRequestId.current) return;
+      const nextHall = context.halls[0];
+      const nextPeriod = context.periods.find((period) => period.id === "dinner") ?? context.periods[0];
+      setHalls(context.halls);
+      setPeriods(context.periods);
+      if (nextHall && nextPeriod) {
+        setHallId(nextHall.id);
+        setPeriodId(nextPeriod.id);
+        setServiceDate((current) => activeServiceDate(current, dateExplicitRef.current, nextHall.timeZone));
+      }
+    } catch {
+      if (requestId === contextRequestId.current) setError("The dining context could not be loaded.");
+    } finally {
+      if (requestId === contextRequestId.current) setContextLoading(false);
     }
   }
 
   function chooseHall(nextHallId: string) {
+    menuRequestId.current += 1;
     setIsLoading(true);
     setError(null);
     setHallId(nextHallId);
     setSelectedVenueIds([]);
     const hall = hallById.get(nextHallId);
-    if (hall) setServiceDate(todayInTimeZone(hall.timeZone));
+    if (hall) setServiceDate((current) => activeServiceDate(current, dateExplicitRef.current, hall.timeZone));
   }
 
   function toggleVenue(venueId: string) {
+    menuRequestId.current += 1;
     setIsLoading(true);
     setError(null);
     setSelectedVenueIds((current) =>
@@ -146,7 +213,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
         <div className="field-grid">
           <label>
             <span>Dining hall</span>
-            <select value={hallId} onChange={(event) => chooseHall(event.target.value)}>
+            <select value={hallId} disabled={contextLoading} onChange={(event) => chooseHall(event.target.value)}>
               {halls.map((hall) => (
                 <option value={hall.id} key={hall.id}>{hall.displayName}</option>
               ))}
@@ -154,7 +221,8 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
           </label>
           <label>
             <span>Meal period</span>
-            <select value={periodId} onChange={(event) => {
+            <select value={periodId} disabled={contextLoading} onChange={(event) => {
+              menuRequestId.current += 1;
               setIsLoading(true);
               setError(null);
               setPeriodId(event.target.value);
@@ -166,7 +234,10 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
           </label>
           <label>
             <span>Service date</span>
-            <input type="date" value={serviceDate} onChange={(event) => {
+            <input type="date" value={serviceDate} disabled={contextLoading} onChange={(event) => {
+              menuRequestId.current += 1;
+              dateExplicitRef.current = true;
+              setDateExplicit(true);
               setIsLoading(true);
               setError(null);
               setServiceDate(event.target.value);
@@ -179,8 +250,10 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
           <label className={`choice-card ${selectedVenueIds.length === 0 ? "selected" : ""}`}>
             <input
               type="checkbox"
+              disabled={contextLoading}
               checked={selectedVenueIds.length === 0}
               onChange={() => {
+                menuRequestId.current += 1;
                 setIsLoading(true);
                 setError(null);
                 setSelectedVenueIds([]);
@@ -199,6 +272,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
                 <label className={`venue-option ${selected ? "selected" : ""}`} key={venue.id}>
                   <input
                     type="checkbox"
+                    disabled={contextLoading}
                     checked={selected}
                     onChange={() => toggleVenue(venue.id)}
                   />
@@ -213,17 +287,17 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
       <section className="menu-section" aria-labelledby="menu-heading" aria-busy={isLoading}>
         <div className="section-heading menu-heading-row">
           <div>
-            <p className="section-kicker">{isSample ? "Available in this sample" : `Source state: ${menu.source.mode}`}</p>
+            <p className="section-kicker">{isSample ? "Available in this sample" : `Source state: ${displayMenu.source.mode}`}</p>
             <h2 id="menu-heading">{periodName} menu</h2>
           </div>
-          <span className="item-count">{isLoading ? "Loading" : `${menu.items.length} foods`}</span>
+          <span className="item-count">{isLoading ? "Loading" : `${displayMenu.items.length} foods`}</span>
         </div>
 
         {error ? (
           <div className="empty-state" role="alert">{error}</div>
-        ) : menu.items.length === 0 && !isLoading ? (
+        ) : displayMenu.items.length === 0 && (!isLoading || displayMenu.source.mode === "unavailable") ? (
           <div className="empty-state">
-            {menu.source.mode === "unavailable"
+            {displayMenu.source.mode === "unavailable"
               ? "No validated live or saved menu is available for this context."
               : isSample
                 ? "No sample foods match this context."
@@ -231,7 +305,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
           </div>
         ) : (
           <div className={`menu-list ${isLoading ? "is-loading" : ""}`}>
-            {menu.items.map((item) => {
+            {displayMenu.items.map((item) => {
               const serving = item.food.servings[0];
               return (
                 <article className="food-row" key={item.id}>
@@ -257,19 +331,19 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
         <div className="sample-note">
           <span aria-hidden="true">●</span>
           {isSample ? (
-            <p><strong>{menu.source.label}.</strong> Names and nutrition are illustrative and do not represent today’s Penn State menu.</p>
+            <p><strong>{displayMenu.source.label}.</strong> Names and nutrition are illustrative and do not represent today’s Penn State menu.</p>
           ) : (
             <p>
-              <strong>{menu.source.label}.</strong>{" "}
-              {menu.source.retrievedAt && `Retrieved ${formatRetrievedAt(menu.source.retrievedAt)} (${formatAge(menu.source.retrievedAt)}). `}
-              {menu.source.warning && `${menu.source.warning} `}
-              {menu.source.completeness === "partial" && (
+              <strong>{displayMenu.source.label}.</strong>{" "}
+              {displayMenu.source.retrievedAt && `Retrieved ${formatRetrievedAt(displayMenu.source.retrievedAt)} (${formatAge(displayMenu.source.retrievedAt)}). `}
+              {displayMenu.source.warning && `${displayMenu.source.warning} `}
+              {displayMenu.source.completeness === "partial" && (
                 <strong>
-                  This snapshot is partial: {menu.source.omittedObservationCount} source item was omitted because PSU did not provide a trustworthy display name.{" "}
+                  This snapshot is partial: {displayMenu.source.omittedObservationCount} source item was omitted because PSU did not provide a trustworthy display name.{" "}
                 </strong>
               )}
-              {menu.source.sourceUrl && (
-                <a href={menu.source.sourceUrl} target="_blank" rel="noreferrer">View the public source.</a>
+              {displayMenu.source.sourceUrl && (
+                <a href={displayMenu.source.sourceUrl} target="_blank" rel="noreferrer">View the public source.</a>
               )}{" "}
               LionLog is independent and is not affiliated with or endorsed by Penn State.
             </p>
