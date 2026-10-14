@@ -484,7 +484,7 @@ function validateCheckpointJobGraph(attemptRun: Record<string, unknown>, jobs: u
     for (const step of steps) {
       const stepName = step.name as string;
       if ((step.number as number) <= lastNumber || stepNames.has(stepName)
-        || (!allowed.has(stepName) && !(name === "validate-and-stage" && isStageNamesStep(stepName)))) {
+        || (!allowed.has(stepName) && !(name === "validate-and-stage" && isStageNamesStep(stepName, attemptRun)))) {
         throw new Error("Checkpoint attempt has an unknown, relocated, duplicate or out-of-order step.");
       }
       stepNames.add(stepName);
@@ -543,8 +543,8 @@ function validateCheckpointJobGraph(attemptRun: Record<string, unknown>, jobs: u
   return createHash("sha256").update(JSON.stringify({ attemptRun, jobs })).digest("hex");
 }
 
-function isStageNamesStep(value: string): boolean {
-  return /^Run echo "staged=lionlog-pages-(?:[1-9]\d*-[1-9]\d*|\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\})"$/.test(value);
+function isStageNamesStep(value: string, attemptRun: Record<string, unknown>): boolean {
+  return value === `Run echo "staged=lionlog-pages-${attemptRun.id}-${attemptRun.run_attempt}" >> "$GITHUB_OUTPUT"`;
 }
 
 function validateAttemptJobs(jobs: unknown[], runId: number, runAttempt: number, headSha: unknown): void {

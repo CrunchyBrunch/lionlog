@@ -192,6 +192,30 @@ test("state append checks public bytes, writes two data files, and rereads the n
   /no completed publication attempt|newer distinct|boundary/i);
 });
 
+test("append rejects a parent changed during the final ref read without posting a mutation", async () => {
+  const fixture = publicationFixture({ runId: 11, releaseIdValue: "f".repeat(64) });
+  let tip = state.commitSha;
+  let refReads = 0;
+  let posts = 0;
+  const options = { incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
+    manifestBytes: fixture.manifestBytes, expectedParentSha: state.commitSha,
+    token: "fixture", authorizedWriterId: 123, fetchImpl: undefined as unknown as typeof fetch };
+  const stateApi = stateFetch({ commitSha: () => tip, checkpointValue: checkpoint, receiptBytes,
+    onGraphql() { posts += 1; tip = "7".repeat(40);
+      return json({ data: { createCommitOnBranch: { commit: { oid: tip } } } }); } });
+  options.fetchImpl = (input, init) => {
+    const url = String(input);
+    if (url.includes("/git/ref/heads/lionlog-publication-state") && ++refReads === 3) {
+      tip = "9".repeat(40);
+      options.expectedParentSha = tip;
+    }
+    return url.startsWith("https://crunchybrunch.github.io/") || url.includes("/actions/")
+      ? fixture.fetchImpl(input, init) : stateApi(input, init);
+  };
+  await assert.rejects(appendPublicationCheckpoint(options), /parent|state branch|drift|moved/i);
+  assert.equal(posts, 0);
+});
+
 test("append refuses a caller-edited history digest before any state mutation", async () => {
   const fixture = publicationFixture();
   const proposal = await preparePublicationCheckpoint({
@@ -305,6 +329,78 @@ test("public proof is fresh, complete, and bound to the authenticated state comm
       checkpointValue: proposal.checkpoint, receiptBytes: proposal.receiptBytes }) }), /commit drifted/);
 });
 
+test("public proof age starts with observation and includes slow overlapping inventory reads", async () => {
+  const fixture = publicationFixture({ runId: 11, releaseIdValue: "f".repeat(64) });
+  const proposal = await preparePublicationCheckpoint({ token: "fixture", authorizedWriterId: 123,
+    expectedParentSha: state.commitSha, previous: validated(),
+    incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
+    manifestBytes: fixture.manifestBytes, fetchImpl: fixture.fetchImpl });
+  const stateApi = stateFetch({ commitSha: "7".repeat(40), parentSha: state.commitSha,
+    checkpointValue: proposal.checkpoint, receiptBytes: proposal.receiptBytes });
+  const loaded = await loadPublicationCheckpoint({ token: "fixture", authorizedWriterId: 123, fetchImpl: stateApi });
+  const actualNow = Date.now;
+  let clock = actualNow();
+  let indexObserved = 0;
+  let requests = 0;
+  Date.now = () => clock;
+  try {
+    const slowFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const started = clock;
+      requests += 1;
+      const response = await (url.startsWith("https://crunchybrunch.github.io/")
+        ? fixture.fetchImpl(input, init) : stateApi(input, init));
+      await Promise.resolve();
+      clock = Math.max(clock, started + 14_000);
+      if (url.endsWith("/index.html")) indexObserved = clock;
+      return response;
+    };
+    await assert.rejects(observeCheckpointPublicProof({ checkpoint: loaded.checkpoint,
+      manifestBytes: fixture.manifestBytes, token: "fixture", authorizedWriterId: 123, fetchImpl: slowFetch }),
+    /fresh|stale|expired/i);
+    assert(requests > 10);
+    assert(clock - indexObserved > 120_000);
+  } finally { Date.now = actualNow; }
+});
+
+test("public proof accepts the exact freshness limit and rejects one millisecond beyond it", async () => {
+  const fixture = publicationFixture({ runId: 11, releaseIdValue: "f".repeat(64) });
+  const proposal = await preparePublicationCheckpoint({ token: "fixture", authorizedWriterId: 123,
+    expectedParentSha: state.commitSha, previous: validated(),
+    incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
+    manifestBytes: fixture.manifestBytes, fetchImpl: fixture.fetchImpl });
+  const stateApi = stateFetch({ commitSha: "7".repeat(40), parentSha: state.commitSha,
+    checkpointValue: proposal.checkpoint, receiptBytes: proposal.receiptBytes });
+  const loaded = await loadPublicationCheckpoint({ token: "fixture", authorizedWriterId: 123, fetchImpl: stateApi });
+  const actualNow = Date.now;
+  const started = actualNow();
+  let clock = started;
+  Date.now = () => clock;
+  try {
+    const observeAt = (elapsedMs: number) => {
+      clock = started;
+      let refReads = 0;
+      const fetchImpl: typeof fetch = async (input, init) => {
+        const url = String(input);
+        const response = await (url.startsWith("https://crunchybrunch.github.io/")
+          ? fixture.fetchImpl(input, init) : stateApi(input, init));
+        if (url.includes("/git/ref/heads/lionlog-publication-state") && ++refReads === 4) {
+          clock = started + elapsedMs;
+        }
+        return response;
+      };
+      return observeCheckpointPublicProof({ checkpoint: loaded.checkpoint, manifestBytes: fixture.manifestBytes,
+        token: "fixture", authorizedWriterId: 123, fetchImpl });
+    };
+    const proof = await observeAt(120_000);
+    assert.equal(proof.observedAtMs, started);
+    assert.doesNotThrow(() => assertCheckpointPublicProof(loaded.checkpoint, proof));
+    clock += 1;
+    assert.throws(() => assertCheckpointPublicProof(loaded.checkpoint, proof), /fresh.*public inventory/i);
+    await assert.rejects(observeAt(120_001), /expired during observation/i);
+  } finally { Date.now = actualNow; }
+});
+
 test("checkpoint preparation rejects hidden or contradictory submission graph evidence", async () => {
   const changes: Array<[string, (record: { total_count: number; jobs: Array<Record<string, unknown>> }) => void]> = [
     ["alternate deployment step", (record) => {
@@ -340,6 +436,41 @@ test("checkpoint preparation rejects hidden or contradictory submission graph ev
     }), { name: "Error" }, label);
   }
 });
+
+test("checkpoint accepts GitHub's complete staging name for its own run and rejects another run's name", async () => {
+  const fixture = publicationFixture();
+  const prepareWithName = (stagedRunId: number, stagedAttempt = 1) => preparePublicationCheckpoint({
+    token: "fixture", authorizedWriterId: 123, expectedParentSha: state.commitSha,
+    incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
+    manifestBytes: fixture.manifestBytes,
+    fetchImpl: async (input, init) => {
+      const response = await fixture.fetchImpl(input, init);
+      if (!String(input).includes("/attempts/1/jobs?")) return response;
+      const record = await response.json() as { jobs: Array<Record<string, unknown>> };
+      addGitHubDisplaySteps(record.jobs, stagedRunId, stagedAttempt);
+      return json(record);
+    },
+  });
+  assert.equal((await prepareWithName(10)).checkpoint.boundary.runId, 10);
+  await assert.rejects(prepareWithName(11), /unknown|stage|step/i);
+  await assert.rejects(prepareWithName(10, 2), /unknown|stage|step/i);
+});
+
+function addGitHubDisplaySteps(jobs: Array<Record<string, unknown>>, stagedRunId: number, stagedAttempt = 1): void {
+  const checkout = "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
+  const setup = "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020";
+  for (const job of jobs) {
+    const original = job.steps as Array<{ name: string; conclusion: string }>;
+    const names = original.map((step) => step.name);
+    if (job.name === "validate-and-stage") {
+      names.splice(1, 0, `Run echo "staged=lionlog-pages-${stagedRunId}-${stagedAttempt}" >> "$GITHUB_OUTPUT"`);
+    }
+    job.steps = ["Set up job", checkout, setup, "Run npm ci --ignore-scripts --omit=dev", ...names,
+      `Post ${setup}`, `Post ${checkout}`, "Complete job"]
+      .map((name, index) => ({ number: index + 1, name, status: "completed",
+        conclusion: original.find((step) => step.name === name)?.conclusion ?? "success" }));
+  }
+}
 
 test("checkpoint accepts an affirmative pre-submission failure before the next publication but rejects its hidden job", async () => {
   const failed = publicationFixture({ runId: 11, releaseIdValue: "e".repeat(64) });
@@ -381,10 +512,15 @@ test("checkpoint accepts an affirmative pre-submission failure before the next p
               status: "completed", conclusion: "success" }] });
           data.total_count = 4;
         }
+        addGitHubDisplaySteps(jobs, 11);
       }
       return json(data);
     }
-    return published.fetchImpl(input, init);
+    const response = await published.fetchImpl(input, init);
+    if (!url.includes("/actions/runs/12/attempts/1/jobs?")) return response;
+    const data = await response.json() as { jobs: Array<Record<string, unknown>> };
+    addGitHubDisplaySteps(data.jobs, 12);
+    return json(data);
   };
   const options = { token: "fixture", authorizedWriterId: 123, expectedParentSha: state.commitSha,
     previous: validated(), incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },

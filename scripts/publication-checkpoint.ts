@@ -36,6 +36,7 @@ export type VerifiedPublicationCheckpoint = PublicationCheckpoint & { readonly [
 
 const publicProofBrand: unique symbol = Symbol("verified checkpoint public inventory");
 const issuedPublicProofs = new WeakSet<object>();
+const PUBLIC_PROOF_FRESHNESS_MS = 120_000;
 export interface CheckpointPublicProof {
   readonly stateCommitSha: string;
   readonly releaseId: string;
@@ -47,12 +48,13 @@ export interface CheckpointPublicProof {
 export function assertCheckpointPublicProof(checkpoint: VerifiedPublicationCheckpoint, value: unknown): asserts value is CheckpointPublicProof {
   assertVerifiedPublicationCheckpoint(checkpoint);
   const proof = value as CheckpointPublicProof;
+  const checkedAtMs = Date.now();
   if (!proof || !issuedPublicProofs.has(proof) || !Object.isFrozen(proof)
     || proof.stateCommitSha !== checkpoint[checkpointBrand]
     || proof.releaseId !== checkpoint.publication.releaseId
     || proof.manifestSha256 !== checkpoint.publication.manifestSha256
-    || !Number.isFinite(proof.observedAtMs) || proof.observedAtMs > Date.now()
-    || Date.now() - proof.observedAtMs > 120_000) {
+    || !Number.isFinite(proof.observedAtMs) || proof.observedAtMs > checkedAtMs
+    || checkedAtMs - proof.observedAtMs > PUBLIC_PROOF_FRESHNESS_MS) {
     throw new Error("Checkpoint requires a fresh, bound public inventory proof.");
   }
 }
@@ -65,6 +67,7 @@ export async function observeCheckpointPublicProof(options: {
   fetchImpl?: typeof fetch;
 }): Promise<CheckpointPublicProof> {
   assertVerifiedPublicationCheckpoint(options.checkpoint);
+  const observedAtMs = Date.now();
   const fetchImpl = options.fetchImpl ?? fetch;
   const current = await loadPublicationCheckpoint({ token: options.token,
     authorizedWriterId: options.authorizedWriterId, fetchImpl });
@@ -79,10 +82,15 @@ export async function observeCheckpointPublicProof(options: {
     || JSON.stringify(after.checkpoint) !== JSON.stringify(current.checkpoint)) {
     throw new Error("Checkpoint state commit drifted during public inventory verification.");
   }
+  const completedAtMs = Date.now();
+  if (!Number.isFinite(observedAtMs) || !Number.isFinite(completedAtMs)
+    || completedAtMs < observedAtMs || completedAtMs - observedAtMs > PUBLIC_PROOF_FRESHNESS_MS) {
+    throw new Error("Checkpoint public inventory proof expired during observation.");
+  }
   const proof = { stateCommitSha: current.commitSha,
     releaseId: current.checkpoint.publication.releaseId,
     manifestSha256: current.checkpoint.publication.manifestSha256,
-    observedAtMs: Date.now() } as CheckpointPublicProof;
+    observedAtMs } as CheckpointPublicProof;
   Object.freeze(proof);
   issuedPublicProofs.add(proof);
   return proof;
@@ -267,37 +275,48 @@ export async function appendPublicationCheckpoint(options: {
   if ("checkpoint" in options || "receiptBytes" in options || "previous" in options) {
     throw new Error("Checkpoint append rejects caller-supplied proposal or receipt authority.");
   }
-  if (!SHA.test(options.expectedParentSha) || !positive(options.authorizedWriterId)) {
+  const expectedParentSha = options.expectedParentSha;
+  const authorizedWriterId = options.authorizedWriterId;
+  const token = options.token;
+  const now = options.now === undefined ? undefined : new Date(options.now.getTime());
+  const incidentHistory = structuredClone(options.incidentHistory);
+  if (!Buffer.isBuffer(options.manifestBytes)) throw new Error("Checkpoint manifest bytes are invalid.");
+  const manifestBytes = Buffer.from(options.manifestBytes);
+  if (!SHA.test(expectedParentSha) || !positive(authorizedWriterId)) {
     throw new Error("Checkpoint expected parent or writer is invalid.");
   }
-  const actor = await githubJson(fetchImpl, options.token, `${API}/user`) as Record<string, unknown>;
-  if (actor.id !== options.authorizedWriterId) throw new Error("Checkpoint writer token is unauthorized.");
+  const actor = await githubJson(fetchImpl, token, `${API}/user`) as Record<string, unknown>;
+  if (actor.id !== authorizedWriterId) throw new Error("Checkpoint writer token is unauthorized.");
   // A first checkpoint needs a separately reviewed bootstrap authority. This append path only advances an authenticated one.
-  const current = await loadPublicationCheckpoint({ token: options.token, authorizedWriterId: options.authorizedWriterId, fetchImpl });
-  if (current.commitSha !== options.expectedParentSha) throw new Error("Checkpoint expected parent is stale.");
-  const prepared = await preparePublicationCheckpoint({ ...options, previous: current.checkpoint, fetchImpl });
-  const ref = await githubJson(fetchImpl, options.token, STATE_REF_API) as Record<string, unknown>;
-  if (ref.ref !== PUBLICATION_STATE_BRANCH || (ref.object as Record<string, unknown> | undefined)?.sha !== options.expectedParentSha) {
+  const current = await loadPublicationCheckpoint({ token, authorizedWriterId, fetchImpl });
+  if (current.commitSha !== expectedParentSha) throw new Error("Checkpoint expected parent is stale.");
+  const prepared = await preparePublicationCheckpoint({ token, authorizedWriterId, expectedParentSha,
+    manifestBytes, incidentHistory, now, previous: current.checkpoint, fetchImpl });
+  if (prepared.checkpoint.stateParentSha !== expectedParentSha || prepared.checkpoint.writerId !== authorizedWriterId) {
+    throw new Error("Checkpoint prepared authority differs from the authenticated parent.");
+  }
+  const ref = await githubJson(fetchImpl, token, STATE_REF_API) as Record<string, unknown>;
+  if (ref.ref !== PUBLICATION_STATE_BRANCH || (ref.object as Record<string, unknown> | undefined)?.sha !== expectedParentSha) {
     throw new Error("Checkpoint expected parent is stale or state branch is absent.");
   }
   const query = `mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }`;
   const variables = { input: {
     branch: { repositoryNameWithOwner: LIONLOG_REPOSITORY, refName: PUBLICATION_STATE_BRANCH },
-    expectedHeadOid: options.expectedParentSha,
+    expectedHeadOid: expectedParentSha,
     message: { headline: `Record verified Pages checkpoint ${prepared.checkpoint.boundary.runId}/${prepared.checkpoint.boundary.runAttempt}` },
     fileChanges: { additions: [
       { path: "checkpoint.json", contents: Buffer.from(`${JSON.stringify(prepared.checkpoint, null, 2)}\n`).toString("base64") },
       { path: "receipt.json", contents: prepared.receiptBytes.toString("base64") },
     ] },
   } };
-  const result = await githubJson(fetchImpl, options.token, `${API}/graphql`, { query, variables }) as Record<string, unknown>;
+  const result = await githubJson(fetchImpl, token, `${API}/graphql`, { query, variables }) as Record<string, unknown>;
   const data = result.data as Record<string, unknown> | undefined;
   const mutation = data?.createCommitOnBranch as Record<string, unknown> | undefined;
   const commit = mutation?.commit as Record<string, unknown> | undefined;
   if (result.errors || typeof commit?.oid !== "string" || !SHA.test(commit.oid)) {
     throw new Error("Checkpoint expected-parent state update failed.");
   }
-  const loaded = await loadPublicationCheckpoint({ ...options, fetchImpl });
+  const loaded = await loadPublicationCheckpoint({ token, authorizedWriterId, fetchImpl });
   if (loaded.commitSha !== commit.oid
     || JSON.stringify(loaded.checkpoint) !== JSON.stringify(prepared.checkpoint)
     || !loaded.receiptBytes.equals(prepared.receiptBytes)) {
