@@ -519,7 +519,7 @@ test("inactive checkpoint final gate requires its exact public predecessor and c
     authorization: { ...summaryFixture().authorization, predecessorReleaseId: hash } };
   const state = { ...finalState(), publicPredecessor: { state: "present" as const, releaseId: hash } };
   const incidents = emptyIncidentHistory();
-  assert.doesNotThrow(() => verifyFinalState({ summary, state, incidents, now, checkpoint }));
+  assert.throws(() => verifyFinalState({ summary, state, incidents, now, checkpoint }), /fresh.*public inventory/i);
   assert.throws(() => verifyFinalState({ summary, state, incidents, now,
     checkpoint: structuredClone(checkpoint) }), /independently validated/);
   assert.throws(() => verifyFinalState({ summary, state: { ...state, publicPredecessor: { state: "present", releaseId: "f".repeat(64) } },

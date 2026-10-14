@@ -24,7 +24,7 @@ import { validatePublishedIncidentRecord, type PublishedIncident } from "./publi
 import { matchesPublishedJobLogEvidence } from "./published-incident-job-logs.ts";
 import type { PublishedResolution } from "./published-incident-collection.ts";
 import type { PublishedPredecessorCheck } from "./published-final-predecessor.ts";
-import { assertVerifiedPublicationCheckpoint, type VerifiedPublicationCheckpoint } from "./publication-checkpoint.ts";
+import { assertVerifiedPublicationCheckpoint, assertCheckpointPublicProof, type CheckpointPublicProof, type VerifiedPublicationCheckpoint } from "./publication-checkpoint.ts";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const GIT_SHA = /^[a-f0-9]{40}$/;
@@ -161,6 +161,7 @@ export function verifyFinalState(options: {
   incidents: { historyVersion: string; incidents: Incident[] };
   now: Date;
   checkpoint?: VerifiedPublicationCheckpoint;
+  checkpointPublicProof?: CheckpointPublicProof;
 }): PreapprovalSummary {
   if (options.checkpoint) assertVerifiedPublicationCheckpoint(options.checkpoint);
   const summary = validatePreapprovalSummary(options.summary);
@@ -295,6 +296,7 @@ export function verifyFinalState(options: {
   } else if (state.publishedPredecessorCheck != null) {
     throw new Error("Unexpected published predecessor proof.");
   }
+  if (options.checkpoint) assertCheckpointPublicProof(options.checkpoint, options.checkpointPublicProof);
   return summary;
 }
 

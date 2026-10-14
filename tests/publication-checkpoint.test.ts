@@ -7,6 +7,8 @@ import {
   loadPublicationCheckpoint,
   appendPublicationCheckpoint,
   preparePublicationCheckpoint,
+  observeCheckpointPublicProof,
+  assertCheckpointPublicProof,
 } from "../scripts/publication-checkpoint.ts";
 import { collectPagesAttemptHistory } from "../scripts/collect-pages-attempt-history.ts";
 
@@ -70,7 +72,7 @@ test("checkpoint boundary detects later reruns of covered runs and missing bound
   assert.throws(() => assertCheckpointRunBoundary(accepted, [{ id: 9, run_attempt: 2 }, { id: 10, run_attempt: 1 }]), /rerun/i);
 });
 
-test("collector skips expired covered artifacts but still collects later missing or cancelled attempts", async () => {
+test("collector skips expired covered artifacts but blocks a later cancelled attempt", async () => {
   const requested: string[] = [];
   const fetchImpl: typeof fetch = async (input) => {
     const url = String(input);
@@ -96,36 +98,20 @@ test("collector skips expired covered artifacts but still collects later missing
     }
     return new Response("missing", { status: 404 });
   };
-  const attempts = await collectPagesAttemptHistory({
+  await assert.rejects(collectPagesAttemptHistory({
     repository: "CrunchyBrunch/lionlog", currentRunId: 12, token: "fixture",
     incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
     checkpoint: validated(), fetchImpl,
-  });
-  assert.deepEqual(attempts.map((attempt) => [attempt.runId, attempt.conclusion, attempt.receipt]), [[11, "cancelled", null]]);
+  }), /job graph|unsupported terminal/);
   assert.ok(!requested.some((url) => url.includes("/actions/runs/10/artifacts")));
 });
 
 test("checkpoint collector fails on later ambiguous receipts and incomplete run pagination", async () => {
-  const base: typeof fetch = async (input) => {
-    const url = String(input);
-    if (url.includes("/actions/workflows/347992874/runs?")) {
-      return json({ total_count: 2, workflow_runs: [{ id: 10, run_attempt: 1 }, { id: 11, run_attempt: 1 }] });
-    }
-    if (url.includes("/actions/runs/10/attempts/1")) return json({ id: 10, workflow_id: 347_992_874,
-      run_attempt: 1, path: ".github/workflows/deploy-github-pages.yml", event: "workflow_dispatch",
-      head_branch: "main", head_sha: sha, status: "completed", conclusion: "success" });
-    if (url.includes("/actions/runs/11/artifacts?")) return json({ total_count: 2, artifacts: [
+  const fixture = publicationFixture({ runId: 11, releaseIdValue: "f".repeat(64) });
+  const base: typeof fetch = async (input, init) => String(input).includes("/actions/runs/11/artifacts?")
+    ? json({ total_count: 2, artifacts: [
       { id: 31, name: "lionlog-pages-receipt-11-1" }, { id: 32, name: "lionlog-pages-receipt-11-1" },
-    ] });
-    if (url.includes("/actions/runs/11/attempts/1/jobs?")) return json({ total_count: 1, jobs: [{
-      id: 110, name: "deploy", run_id: 11, run_attempt: 1, head_sha: sha,
-      status: "completed", conclusion: "failure", steps: [],
-    }] });
-    if (url.includes("/actions/runs/11/attempts/1")) return json({ id: 11, workflow_id: 347_992_874,
-      run_attempt: 1, path: ".github/workflows/deploy-github-pages.yml", event: "workflow_dispatch",
-      head_branch: "main", head_sha: sha, status: "completed", conclusion: "failure" });
-    return new Response("missing", { status: 404 });
-  };
+    ] }) : fixture.fetchImpl(input, init);
   const options = { repository: "CrunchyBrunch/lionlog", currentRunId: 12, token: "fixture",
     incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] }, checkpoint: validated() };
   await assert.rejects(collectPagesAttemptHistory({ ...options, fetchImpl: base }), /ambiguous flat receipt/);
@@ -155,66 +141,93 @@ test("state reader verifies committed data-only tree, signed writer, and exact r
 
 test("state append requires the expected parent and rejects an atomic update race", async () => {
   let updateBody: Record<string, unknown> | null = null;
-  const fixture = publicationFixture();
-  const proposal = await preparePublicationCheckpoint({
-    token: "fixture", authorizedWriterId: 123, expectedParentSha: state.commitSha,
-    incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
-    manifestBytes: fixture.manifestBytes, fetchImpl: fixture.fetchImpl,
-  });
+  const fixture = publicationFixture({ runId: 11, releaseIdValue: "f".repeat(64) });
   const stateApi = stateFetch({ onGraphql(body) { updateBody = body; return json({ errors: [{ message: "expectedHeadOid no longer matches" }] }); } });
-  const fetchImpl: typeof fetch = (input, init) => String(input).startsWith("https://crunchybrunch.github.io/")
+  const fetchImpl: typeof fetch = (input, init) => String(input).startsWith("https://crunchybrunch.github.io/") || String(input).includes("/actions/")
     ? fixture.fetchImpl(input, init) : stateApi(input, init);
   await assert.rejects(appendPublicationCheckpoint({
-    ...proposal, manifestBytes: fixture.manifestBytes, expectedParentSha: state.commitSha,
+    incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
+    manifestBytes: fixture.manifestBytes, expectedParentSha: state.commitSha,
     token: "fixture", authorizedWriterId: 123, fetchImpl,
   }), /expected-parent/i);
   assert.equal(((updateBody! as { variables: { input: { expectedHeadOid: string } } }).variables.input).expectedHeadOid, state.commitSha);
   await assert.rejects(appendPublicationCheckpoint({
-    ...proposal, manifestBytes: fixture.manifestBytes, expectedParentSha: "9".repeat(40),
+    incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
+    manifestBytes: fixture.manifestBytes, expectedParentSha: "9".repeat(40),
     token: "fixture", authorizedWriterId: 123, fetchImpl,
   }), /parent/i);
 });
 
 test("state append checks public bytes, writes two data files, and rereads the new signed commit", async () => {
+  const fixture = publicationFixture({ runId: 11, releaseIdValue: "f".repeat(64) });
+  let tip = state.commitSha;
+  let parent = state.parentSha;
+  let storedCheckpoint: unknown = checkpoint;
+  let storedReceipt = receiptBytes;
+  let additions: Array<{ path: string; contents: string }> = [];
+  const stateApi = stateFetch({ commitSha: () => tip, parentSha: () => parent,
+    checkpointValue: () => storedCheckpoint, receiptBytes: () => storedReceipt,
+    onGraphql(body) {
+      const input = (body.variables as { input: { expectedHeadOid: string; fileChanges: { additions: Array<{ path: string; contents: string }> } } }).input;
+      assert.equal(input.expectedHeadOid, state.commitSha);
+      additions = input.fileChanges.additions;
+      storedCheckpoint = JSON.parse(Buffer.from(additions[0].contents, "base64").toString("utf8"));
+      storedReceipt = Buffer.from(additions[1].contents, "base64");
+      parent = tip;
+      tip = "7".repeat(40);
+      return json({ data: { createCommitOnBranch: { commit: { oid: tip } } } });
+    },
+  });
+  const fetchImpl: typeof fetch = (input, init) => String(input).startsWith("https://crunchybrunch.github.io/") || String(input).includes("/actions/")
+    ? fixture.fetchImpl(input, init) : stateApi(input, init);
+  const committed = await appendPublicationCheckpoint({ incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
+    manifestBytes: fixture.manifestBytes,
+    expectedParentSha: state.commitSha, token: "fixture", authorizedWriterId: 123, fetchImpl });
+  assert.equal(committed, "7".repeat(40));
+  assert.deepEqual(additions.map((entry) => entry.path), ["checkpoint.json", "receipt.json"]);
+  assert.equal((storedCheckpoint as { boundary: { runId: number } }).boundary.runId, 11);
+  assert.deepEqual(Buffer.from(additions[1].contents, "base64"), storedReceipt);
+  await assert.rejects(appendPublicationCheckpoint({ incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
+    manifestBytes: fixture.manifestBytes, expectedParentSha: tip, token: "fixture", authorizedWriterId: 123, fetchImpl }),
+  /no completed publication attempt|newer distinct|boundary/i);
+});
+
+test("append refuses a caller-edited history digest before any state mutation", async () => {
   const fixture = publicationFixture();
   const proposal = await preparePublicationCheckpoint({
     token: "fixture", authorizedWriterId: 123, expectedParentSha: state.commitSha,
     incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
     manifestBytes: fixture.manifestBytes, fetchImpl: fixture.fetchImpl,
   });
+  proposal.checkpoint.history.sha256 = "0".repeat(64);
   let tip = state.commitSha;
-  let additions: Array<{ path: string; contents: string }> = [];
+  let mutations = 0;
   const stateApi = stateFetch({ commitSha: () => tip, parentSha: state.commitSha,
     checkpointValue: proposal.checkpoint, receiptBytes: proposal.receiptBytes,
-    onGraphql(body) {
-      const input = (body.variables as { input: { expectedHeadOid: string; fileChanges: { additions: Array<{ path: string; contents: string }> } } }).input;
-      assert.equal(input.expectedHeadOid, state.commitSha);
-      additions = input.fileChanges.additions;
-      tip = "7".repeat(40);
-      return json({ data: { createCommitOnBranch: { commit: { oid: tip } } } });
-    },
+    onGraphql() { mutations += 1; tip = "7".repeat(40);
+      return json({ data: { createCommitOnBranch: { commit: { oid: tip } } } }); },
   });
   const fetchImpl: typeof fetch = (input, init) => String(input).startsWith("https://crunchybrunch.github.io/")
     ? fixture.fetchImpl(input, init) : stateApi(input, init);
-  const committed = await appendPublicationCheckpoint({ ...proposal, manifestBytes: fixture.manifestBytes,
-    expectedParentSha: state.commitSha, token: "fixture", authorizedWriterId: 123, fetchImpl });
-  assert.equal(committed, "7".repeat(40));
-  assert.deepEqual(additions.map((entry) => entry.path), ["checkpoint.json", "receipt.json"]);
-  assert.deepEqual(Buffer.from(additions[1].contents, "base64"), proposal.receiptBytes);
+  await assert.rejects(appendPublicationCheckpoint({ ...proposal, manifestBytes: fixture.manifestBytes,
+    incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
+    expectedParentSha: state.commitSha, token: "fixture", authorizedWriterId: 123, fetchImpl }), /history|checkpoint|proposal/i);
+  assert.equal(mutations, 0);
 });
 
 function stateFetch(options: {
-  writerId?: number; repositoryId?: number; receiptBytes?: Buffer;
-  commitSha?: string | (() => string); parentSha?: string; checkpointValue?: unknown;
+  writerId?: number; repositoryId?: number; receiptBytes?: Buffer | (() => Buffer);
+  commitSha?: string | (() => string); parentSha?: string | (() => string); checkpointValue?: unknown | (() => unknown);
   onGraphql?: (body: Record<string, unknown>) => Response;
 } = {}): typeof fetch {
-  const checkpointBytes = Buffer.from(`${JSON.stringify(options.checkpointValue ?? checkpoint)}\n`);
-  const storedReceipt = options.receiptBytes ?? receiptBytes;
-  const files = new Map([["checkpoint.json", checkpointBytes], ["receipt.json", storedReceipt]]);
   const gitBlobSha = (bytes: Buffer) => createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
   return async (input, init) => {
     const url = String(input);
     const commitSha = typeof options.commitSha === "function" ? options.commitSha() : options.commitSha ?? state.commitSha;
+    const parentSha = typeof options.parentSha === "function" ? options.parentSha() : options.parentSha ?? state.parentSha;
+    const storedCheckpoint = typeof options.checkpointValue === "function" ? (options.checkpointValue as () => unknown)() : options.checkpointValue ?? checkpoint;
+    const storedReceipt = typeof options.receiptBytes === "function" ? options.receiptBytes() : options.receiptBytes ?? receiptBytes;
+    const files = new Map([["checkpoint.json", Buffer.from(`${JSON.stringify(storedCheckpoint)}\n`)], ["receipt.json", storedReceipt]]);
     if (url.endsWith("/graphql")) return options.onGraphql?.(JSON.parse(String(init?.body))) ?? json({ errors: [{ message: "race" }] });
     if (url.endsWith("/user")) return json({ id: options.writerId ?? 123 });
     if (url.endsWith("/repos/CrunchyBrunch/lionlog")) return json({ id: options.repositoryId ?? 1_346_360_244, full_name: "CrunchyBrunch/lionlog" });
@@ -223,7 +236,7 @@ function stateFetch(options: {
     }
     if (url.endsWith(`/commits/${commitSha}`)) {
       return json({ sha: commitSha, author: { id: options.writerId ?? 123 }, committer: { id: options.writerId ?? 123 },
-        parents: [{ sha: options.parentSha ?? state.parentSha }], commit: { verification: { verified: true }, tree: { sha: "6".repeat(40) } } });
+        parents: [{ sha: parentSha }], commit: { verification: { verified: true }, tree: { sha: "6".repeat(40) } } });
     }
     if (url.endsWith(`/git/trees/${"6".repeat(40)}`)) {
       return json({ sha: "6".repeat(40), truncated: false, tree: [...files].map(([name, bytes]) =>
@@ -254,6 +267,131 @@ test("synthetic bootstrap advances only after terminal receipt and full public i
     incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
     manifestBytes: fixture.manifestBytes, fetchImpl: publicationFixture({ driftPublic: true }).fetchImpl,
   }), /drifted|identity mismatch/);
+});
+
+test("public proof is fresh, complete, and bound to the authenticated state commit", async () => {
+  const fixture = publicationFixture({ runId: 11, releaseIdValue: "f".repeat(64) });
+  const proposal = await preparePublicationCheckpoint({
+    token: "fixture", authorizedWriterId: 123, expectedParentSha: state.commitSha,
+    previous: validated(), incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
+    manifestBytes: fixture.manifestBytes, fetchImpl: fixture.fetchImpl,
+  });
+  const commitSha = "7".repeat(40);
+  const stateApi = stateFetch({ commitSha, parentSha: state.commitSha,
+    checkpointValue: proposal.checkpoint, receiptBytes: proposal.receiptBytes });
+  const combined = (publicFetch: typeof fetch): typeof fetch => (input, init) =>
+    String(input).startsWith("https://crunchybrunch.github.io/") ? publicFetch(input, init) : stateApi(input, init);
+  const loaded = await loadPublicationCheckpoint({ token: "fixture", authorizedWriterId: 123, fetchImpl: stateApi });
+  assert.throws(() => assertCheckpointPublicProof(loaded.checkpoint, undefined), /fresh.*public inventory/i);
+  const proof = await observeCheckpointPublicProof({ checkpoint: loaded.checkpoint, manifestBytes: fixture.manifestBytes,
+    token: "fixture", authorizedWriterId: 123, fetchImpl: combined(fixture.fetchImpl) });
+  assert.doesNotThrow(() => assertCheckpointPublicProof(loaded.checkpoint, proof));
+  assert.throws(() => assertCheckpointPublicProof(loaded.checkpoint, Object.freeze({ ...proof })), /fresh.*public inventory/i);
+  await assert.rejects(observeCheckpointPublicProof({ checkpoint: loaded.checkpoint, manifestBytes: fixture.manifestBytes,
+    token: "fixture", authorizedWriterId: 123, fetchImpl: combined(publicationFixture({ runId: 11, releaseIdValue: "f".repeat(64), driftPublic: true }).fetchImpl) }),
+  /drifted|identity mismatch/);
+  const driftedIndex: typeof fetch = async (input, init) => {
+    if (String(input).endsWith("/lionlog/index.html")) {
+      const response = new Response("changed", { status: 200 });
+      Object.defineProperty(response, "url", { value: String(input) });
+      return response;
+    }
+    return fixture.fetchImpl(input, init);
+  };
+  await assert.rejects(observeCheckpointPublicProof({ checkpoint: loaded.checkpoint, manifestBytes: fixture.manifestBytes,
+    token: "fixture", authorizedWriterId: 123, fetchImpl: combined(driftedIndex) }), /drifted|mismatch|sha256|inventory/i);
+  await assert.rejects(observeCheckpointPublicProof({ checkpoint: loaded.checkpoint, manifestBytes: fixture.manifestBytes,
+    token: "fixture", authorizedWriterId: 123, fetchImpl: stateFetch({ commitSha: "8".repeat(40), parentSha: state.commitSha,
+      checkpointValue: proposal.checkpoint, receiptBytes: proposal.receiptBytes }) }), /commit drifted/);
+});
+
+test("checkpoint preparation rejects hidden or contradictory submission graph evidence", async () => {
+  const changes: Array<[string, (record: { total_count: number; jobs: Array<Record<string, unknown>> }) => void]> = [
+    ["alternate deployment step", (record) => {
+      (record.jobs[1].steps as Array<Record<string, unknown>>).push({ number: 5, name: "Deploy exact staged artifact", status: "completed", conclusion: "success" });
+    }],
+    ["alternate deployment job", (record) => {
+      record.jobs.push({ id: 102, name: "alternate-deploy", run_id: 10, run_attempt: 1, head_sha: sha,
+        status: "completed", conclusion: "success", steps: [{ number: 1, name: "Deploy exact staged artifact", status: "completed", conclusion: "success" }] });
+      record.total_count += 1;
+    }],
+    ["renamed submission", (record) => {
+      (record.jobs[1].steps as Array<Record<string, unknown>>).push({ number: 5, name: "Record official submission boundary (retry)", status: "completed", conclusion: "success" });
+    }],
+    ["relocated steps", (record) => { record.jobs[1].name = "alternate-deploy"; }],
+    ["job outcome contradicts attempt", (record) => { record.jobs[1].conclusion = "failure"; }],
+    ["successful staging job skipped a required step", (record) => {
+      ((record.jobs[0].steps as Array<Record<string, unknown>>)[5]).conclusion = "skipped";
+    }],
+  ];
+  for (const [label, change] of changes) {
+    const fixture = publicationFixture();
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const response = await fixture.fetchImpl(input, init);
+      if (!String(input).includes("/attempts/1/jobs?")) return response;
+      const record = await response.json() as { total_count: number; jobs: Array<Record<string, unknown>> };
+      change(record);
+      return json(record);
+    };
+    await assert.rejects(preparePublicationCheckpoint({
+      token: "fixture", authorizedWriterId: 123, expectedParentSha: state.commitSha,
+      incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
+      manifestBytes: fixture.manifestBytes, fetchImpl,
+    }), { name: "Error" }, label);
+  }
+});
+
+test("checkpoint accepts an affirmative pre-submission failure before the next publication but rejects its hidden job", async () => {
+  const failed = publicationFixture({ runId: 11, releaseIdValue: "e".repeat(64) });
+  const published = publicationFixture({ runId: 12, releaseIdValue: "f".repeat(64) });
+  const failedReceipt = { ...receipt,
+    workflow: { ...receipt.workflow, runId: 11 }, release: { id: "e".repeat(64) },
+    official: { submissionStarted: false, result: "failure", pageUrl: "https://crunchybrunch.github.io/lionlog/" },
+    public: { markerVerified: false, inventoryVerified: false, browserVerified: false },
+    knownGood: false, unresolved: false };
+  const failedZip = storedZip("pages-receipt.json", Buffer.from(JSON.stringify(failedReceipt)));
+  const failedDigest = `sha256:${createHash("sha256").update(failedZip).digest("hex")}`;
+  const fetchFor = (hiddenJob: boolean): typeof fetch => async (input, init) => {
+    const url = String(input);
+    if (url.includes("/actions/workflows/347992874/runs?")) return json({ total_count: 3,
+      workflow_runs: [10, 11, 12].map((id) => ({ id, run_attempt: 1 })) });
+    if (url.includes("/actions/artifacts/31/zip")) return new Response(Uint8Array.from(failedZip), { status: 200 });
+    if (url.includes("/actions/runs/11/") && !url.includes("/actions/artifacts/")) {
+      const response = await failed.fetchImpl(input, init);
+      const data = await response.json() as Record<string, unknown>;
+      if (url.includes("/artifacts?")) {
+        ((data.artifacts as Array<Record<string, unknown>>)[0]).digest = failedDigest;
+      } else if (url.endsWith("/attempts/1")) {
+        data.conclusion = "failure";
+      } else if (url.includes("/jobs?")) {
+        const jobs = data.jobs as Array<Record<string, unknown>>;
+        const deploy = jobs[1];
+        const verify = jobs[2];
+        deploy.conclusion = "failure";
+        (deploy.steps as Array<Record<string, unknown>>).forEach((step, index) => {
+          step.conclusion = index === 1 ? "failure" : index > 1 ? "skipped" : "success";
+        });
+        verify.conclusion = "failure";
+        (verify.steps as Array<Record<string, unknown>>).forEach((step, index) => {
+          step.conclusion = index === 4 ? "failure" : index === 1 ? "skipped" : "success";
+        });
+        if (hiddenJob) {
+          jobs.push({ id: 111, name: "alternate-deploy", run_id: 11, run_attempt: 1, head_sha: sha,
+            status: "completed", conclusion: "success", steps: [{ number: 1, name: "Deploy exact staged artifact",
+              status: "completed", conclusion: "success" }] });
+          data.total_count = 4;
+        }
+      }
+      return json(data);
+    }
+    return published.fetchImpl(input, init);
+  };
+  const options = { token: "fixture", authorizedWriterId: 123, expectedParentSha: state.commitSha,
+    previous: validated(), incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
+    manifestBytes: published.manifestBytes };
+  const accepted = await preparePublicationCheckpoint({ ...options, fetchImpl: fetchFor(false) });
+  assert.equal(accepted.checkpoint.boundary.runId, 12);
+  await assert.rejects(preparePublicationCheckpoint({ ...options, fetchImpl: fetchFor(true) }), /graph|unknown|extra job/i);
 });
 
 test("synthetic migration carries the covered boundary and rejects a stale parent", async () => {
@@ -322,14 +460,25 @@ function publicationFixture(options: { driftPublic?: boolean; runId?: number; re
       expires_at: "2027-01-01T00:00:00.000Z", expired: false,
       workflow_run: { id: runId, head_sha: sha, head_repository_id: 1_346_360_244 },
     }] });
-    if (url.includes(`/actions/runs/${runId}/attempts/1/jobs?`)) return json({ total_count: 1, jobs: [{
-      id: 100, name: "deploy", run_id: runId, run_attempt: 1, head_sha: sha,
-      status: "completed", conclusion: "success", steps: [
-        { number: 1, name: "Recheck all authority immediately before submission", status: "completed", conclusion: "success" },
-        { number: 2, name: "Record official submission boundary", status: "completed", conclusion: "success" },
-        { number: 3, name: "Deploy with official Pages action", status: "completed", conclusion: "success" },
-      ],
-    }] });
+    if (url.includes(`/actions/runs/${runId}/attempts/1/jobs?`)) return json({ total_count: 3, jobs: [
+      { id: 99, name: "validate-and-stage", run_id: runId, run_attempt: 1, head_sha: sha,
+        status: "completed", conclusion: "success", steps: [
+          "Validate immutable input shapes", "Read exact GitHub provenance", "Bind the exact public predecessor before approval",
+          "Download exact retained inputs", "Validate candidate and extract exact site bytes",
+          "Stage exact bytes with official Pages artifact action", "Re-download and verify staged bytes",
+          "Retain compact preapproval evidence", "Normalize retained preapproval wrapper digest", "Publish human review summary",
+        ].map((name, index) => ({ number: index + 1, name, status: "completed", conclusion: "success" })) },
+      { id: 100, name: "deploy", run_id: runId, run_attempt: 1, head_sha: sha,
+        status: "completed", conclusion: "success", steps: [
+          "Download exact preapproval summary", "Recheck all authority immediately before submission",
+          "Record official submission boundary", "Deploy with official Pages action",
+        ].map((name, index) => ({ number: index + 1, name, status: "completed", conclusion: "success" })) },
+      { id: 101, name: "verify-public", run_id: runId, run_attempt: 1, head_sha: sha,
+        status: "completed", conclusion: "success", steps: [
+          "Recover exact summary and manifest", "Verify public inventory and mobile PWA behavior",
+          "Create one flat retained receipt", "Retain flat receipt", "Require fully verified known-good result",
+        ].map((name, index) => ({ number: index + 1, name, status: "completed", conclusion: "success" })) },
+    ] });
     if (url.includes(`/actions/runs/${runId}/attempts/1`)) return json({
       id: runId, workflow_id: 347_992_874, run_attempt: 1,
       path: ".github/workflows/deploy-github-pages.yml", event: "workflow_dispatch", head_branch: "main",
@@ -340,7 +489,7 @@ function publicationFixture(options: { driftPublic?: boolean; runId?: number; re
       const path = url.slice("https://crunchybrunch.github.io/lionlog/".length);
       if (path === "release.json") markerCalls += 1;
       const bytes = options.driftPublic && path === "release.json" && markerCalls >= 2
-        ? Buffer.from(JSON.stringify({ ...marker, releaseId: "f".repeat(64) })) : publicFiles.get(path);
+        ? Buffer.from(JSON.stringify({ ...marker, releaseId: publishedReleaseId === "f".repeat(64) ? releaseId : "f".repeat(64) })) : publicFiles.get(path);
       if (!bytes) return new Response("missing", { status: 404 });
       const response = new Response(Uint8Array.from(bytes), { status: 200, headers: { "content-type": path === "release.json" ? "application/json" : "text/plain" } });
       Object.defineProperty(response, "url", { value: url });

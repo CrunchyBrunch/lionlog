@@ -38,6 +38,7 @@ export interface CollectedAttemptEvidence {
     artifactExpiresAt: string;
     content: Record<string, unknown>;
   };
+  checkpointGraphSha256?: string;
 }
 
 export interface LegacyStepEvidence {
@@ -103,6 +104,7 @@ export async function collectPagesAttemptHistory(options: {
   fetchImpl?: typeof fetch;
   now?: Date;
   checkpoint?: VerifiedPublicationCheckpoint;
+  strictCheckpointEvidence?: boolean;
 }): Promise<CollectedAttemptEvidence[]> {
   if (options.repository !== "CrunchyBrunch/lionlog" || !positive(options.currentRunId) || options.token.length < 1) {
     throw new Error("Attempt-history authority is invalid.");
@@ -154,6 +156,8 @@ export async function collectPagesAttemptHistory(options: {
         `/repos/${options.repository}/actions/runs/${runId}/attempts/${attempt}/jobs`, "jobs");
       assertUniqueRecords(jobs, "id", "Attempt-specific job history");
       validateAttemptJobs(jobs, runId, attempt, attemptRun.head_sha);
+      const checkpointGraphSha256 = options.checkpoint || options.strictCheckpointEvidence
+        ? validateCheckpointJobGraph(attemptRun, jobs) : null;
       const key = `${runId}/${attempt}`;
       const contract = incidentContracts.get(key) ?? null;
       const steps = jobs.flatMap((jobValue) => {
@@ -207,6 +211,7 @@ export async function collectPagesAttemptHistory(options: {
         publishedResolution,
         legacyEvidence,
         receipt,
+        ...(checkpointGraphSha256 === null ? {} : { checkpointGraphSha256 }),
       });
     }
   }
@@ -434,6 +439,112 @@ function legacyEvidenceMatchesCollection(legacy: LegacyAttemptEvidence, collecti
     return job.steps.some((candidate) => candidate.stepNumber === step.stepNumber && candidate.stepName === step.stepName
       && candidate.stepStatus === step.stepStatus && candidate.stepConclusion === step.stepConclusion);
   });
+}
+
+const CHECKOUT_STEP = "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
+const NODE_STEP = "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020";
+const COMMON_CHECKPOINT_STEPS = new Set([
+  "Set up job", "Complete job", CHECKOUT_STEP, NODE_STEP,
+  `Post ${CHECKOUT_STEP}`, `Post ${NODE_STEP}`, "Run npm ci --ignore-scripts --omit=dev",
+]);
+const CHECKPOINT_JOB_STEPS = {
+  "validate-and-stage": [
+    "Validate immutable input shapes", "Read exact GitHub provenance",
+    "Bind the exact public predecessor before approval", "Download exact retained inputs",
+    "Validate candidate and extract exact site bytes", "Stage exact bytes with official Pages artifact action",
+    "Re-download and verify staged bytes", "Retain compact preapproval evidence",
+    "Normalize retained preapproval wrapper digest", "Publish human review summary",
+  ],
+  deploy: [
+    "Download exact preapproval summary", "Recheck all authority immediately before submission",
+    "Record official submission boundary", "Deploy with official Pages action",
+  ],
+  "verify-public": [
+    "Recover exact summary and manifest", "Verify public inventory and mobile PWA behavior",
+    "Create one flat retained receipt", "Retain flat receipt", "Require fully verified known-good result",
+  ],
+} as const;
+
+function validateCheckpointJobGraph(attemptRun: Record<string, unknown>, jobs: unknown[]): string {
+  const expectedNames = Object.keys(CHECKPOINT_JOB_STEPS);
+  if (jobs.length !== expectedNames.length) throw new Error("Checkpoint attempt job graph is incomplete or has an extra job.");
+  const byName = new Map<string, Record<string, unknown>>();
+  for (const value of jobs) {
+    const job = value as Record<string, unknown>;
+    const name = job.name;
+    if (typeof name !== "string" || !expectedNames.includes(name) || byName.has(name)) {
+      throw new Error("Checkpoint attempt has an unknown or duplicate job identity.");
+    }
+    byName.set(name, job);
+    const required = CHECKPOINT_JOB_STEPS[name as keyof typeof CHECKPOINT_JOB_STEPS] as readonly string[];
+    const allowed = new Set([...COMMON_CHECKPOINT_STEPS, ...required]);
+    const steps = job.steps as Array<Record<string, unknown>>;
+    const stepNames = new Set<string>();
+    let lastNumber = 0;
+    for (const step of steps) {
+      const stepName = step.name as string;
+      if ((step.number as number) <= lastNumber || stepNames.has(stepName)
+        || (!allowed.has(stepName) && !(name === "validate-and-stage" && isStageNamesStep(stepName)))) {
+        throw new Error("Checkpoint attempt has an unknown, relocated, duplicate or out-of-order step.");
+      }
+      stepNames.add(stepName);
+      lastNumber = step.number as number;
+      if (job.conclusion === "success" && !["success", "skipped"].includes(step.conclusion as string)) {
+        throw new Error("Checkpoint successful job contradicts a failed step.");
+      }
+    }
+    let lastRequiredNumber = 0;
+    for (const requiredName of required) {
+      const step = steps.find((candidate) => candidate.name === requiredName);
+      if (!step || (step.number as number) <= lastRequiredNumber) {
+        throw new Error("Checkpoint attempt is missing an ordered required workflow step.");
+      }
+      lastRequiredNumber = step.number as number;
+    }
+  }
+  const stage = byName.get("validate-and-stage");
+  const deploy = byName.get("deploy");
+  const verify = byName.get("verify-public");
+  if (!stage || !deploy || !verify || stage.conclusion !== "success") {
+    throw new Error("Checkpoint staging job did not complete successfully.");
+  }
+  const stepConclusion = (job: Record<string, unknown>, name: string) =>
+    (job.steps as Array<Record<string, unknown>>).find((step) => step.name === name)?.conclusion;
+  const stageComplete = CHECKPOINT_JOB_STEPS["validate-and-stage"]
+    .every((name) => stepConclusion(stage, name) === "success");
+  if (!stageComplete) throw new Error("Checkpoint staging steps did not all succeed.");
+  const deployDownload = stepConclusion(deploy, "Download exact preapproval summary");
+  const verifyRecovery = stepConclusion(verify, "Recover exact summary and manifest");
+  const finalGate = stepConclusion(deploy, "Recheck all authority immediately before submission");
+  const submission = stepConclusion(deploy, "Record official submission boundary");
+  const deployment = stepConclusion(deploy, "Deploy with official Pages action");
+  const publicInventory = stepConclusion(verify, "Verify public inventory and mobile PWA behavior");
+  const receiptCreation = stepConclusion(verify, "Create one flat retained receipt");
+  const receiptRetention = stepConclusion(verify, "Retain flat receipt");
+  const knownGoodGate = stepConclusion(verify, "Require fully verified known-good result");
+  if (attemptRun.conclusion === "success") {
+    if (deploy.conclusion !== "success" || verify.conclusion !== "success"
+      || deployDownload !== "success" || verifyRecovery !== "success"
+      || [finalGate, submission, deployment, publicInventory, receiptCreation, receiptRetention, knownGoodGate]
+        .some((value) => value !== "success")) {
+      throw new Error("Checkpoint known-good job outcomes contradict the successful attempt.");
+    }
+  } else if (attemptRun.conclusion === "failure") {
+    if (deploy.conclusion !== "failure" || verify.conclusion !== "failure"
+      || deployDownload !== "success" || verifyRecovery !== "success"
+      || finalGate !== "failure" || submission !== "skipped" || deployment !== "skipped"
+      || publicInventory !== "skipped" || receiptCreation !== "success" || receiptRetention !== "success"
+      || knownGoodGate !== "failure") {
+      throw new Error("Checkpoint pre-submission failure has contradictory job outcomes.");
+    }
+  } else {
+    throw new Error("Checkpoint attempt has an unsupported terminal outcome.");
+  }
+  return createHash("sha256").update(JSON.stringify({ attemptRun, jobs })).digest("hex");
+}
+
+function isStageNamesStep(value: string): boolean {
+  return /^Run echo "staged=lionlog-pages-(?:[1-9]\d*-[1-9]\d*|\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\})"$/.test(value);
 }
 
 function validateAttemptJobs(jobs: unknown[], runId: number, runAttempt: number, headSha: unknown): void {
