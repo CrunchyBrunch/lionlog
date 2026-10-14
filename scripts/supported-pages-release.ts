@@ -378,7 +378,7 @@ function validateTrustedMetadata(metadata: Metadata, options: Parameters<typeof 
   ) throw new Error("Exact source commit lacks a successful CI verification job.");
 }
 
-interface KnownGoodReceipt {
+export interface KnownGoodReceipt {
   receiptVersion: "lionlog.pages-flat-receipt.v1";
   knownGood: true;
   unresolved: false;
@@ -389,7 +389,7 @@ interface KnownGoodReceipt {
   public: { markerVerified: true; inventoryVerified: true; browserVerified: true };
 }
 
-function validateKnownGoodReceipt(value: unknown): KnownGoodReceipt {
+export function validateKnownGoodReceipt(value: unknown): KnownGoodReceipt {
   const receipt = value as Partial<KnownGoodReceipt>;
   if (
     receipt?.receiptVersion !== "lionlog.pages-flat-receipt.v1"

@@ -7,6 +7,7 @@ import { assertArtifactDigest } from "./artifact-digest.ts";
 import { LIONLOG_REPOSITORY_ID, PROMOTION_WORKFLOW_ID } from "../infrastructure/publication/release-contract.ts";
 import { validatePublishedIncidentRecord, type PublishedIncident } from "./published-incident.ts";
 import { collectPublishedResolution, type PublishedResolution } from "./published-incident-collection.ts";
+import { assertCheckpointRunBoundary, type VerifiedPublicationCheckpoint } from "./publication-checkpoint.ts";
 
 const API_ROOT = "https://api.github.com";
 const PER_PAGE = 100;
@@ -101,6 +102,7 @@ export async function collectPagesAttemptHistory(options: {
   incidentHistory: unknown;
   fetchImpl?: typeof fetch;
   now?: Date;
+  checkpoint?: VerifiedPublicationCheckpoint;
 }): Promise<CollectedAttemptEvidence[]> {
   if (options.repository !== "CrunchyBrunch/lionlog" || !positive(options.currentRunId) || options.token.length < 1) {
     throw new Error("Attempt-history authority is invalid.");
@@ -110,12 +112,27 @@ export async function collectPagesAttemptHistory(options: {
   const runs = await paginated(fetchImpl, options.token,
     `/repos/${options.repository}/actions/workflows/${PROMOTION_WORKFLOW_ID}/runs`, "workflow_runs");
   assertUniqueRecords(runs, "id", "Workflow-run history");
+  if (options.checkpoint) {
+    if (options.currentRunId <= options.checkpoint.boundary.runId) throw new Error("Current run is not after the checkpoint boundary.");
+    assertCheckpointRunBoundary(options.checkpoint, runs as Array<{ id: number; run_attempt: number }>);
+    const boundary = options.checkpoint.boundary;
+    const attempt = await apiJson(fetchImpl, options.token,
+      `/repos/${options.repository}/actions/runs/${boundary.runId}/attempts/${boundary.runAttempt}`) as Record<string, unknown>;
+    if (attempt.id !== boundary.runId || attempt.workflow_id !== PROMOTION_WORKFLOW_ID
+      || attempt.run_attempt !== boundary.runAttempt || attempt.head_sha !== boundary.workflowSha
+      || attempt.path !== ".github/workflows/deploy-github-pages.yml"
+      || attempt.event !== "workflow_dispatch" || attempt.head_branch !== "main"
+      || attempt.status !== "completed" || attempt.conclusion !== "success") {
+      throw new Error("Checkpoint boundary attempt identity drifted.");
+    }
+  }
   const evidence: CollectedAttemptEvidence[] = [];
   const evidenceKeys = new Set<string>();
   for (const runValue of runs) {
     const run = runValue as Record<string, unknown>;
     const runId = number(run.id, "Workflow run ID");
     if (runId === options.currentRunId) continue;
+    if (options.checkpoint && runId <= options.checkpoint.boundary.runId) continue;
     const latestAttempt = number(run.run_attempt, "Workflow run attempt");
     if (latestAttempt > MAX_ATTEMPTS_PER_RUN) throw new Error("Workflow run has too many attempts for bounded reconciliation.");
     const artifacts = await paginated(fetchImpl, options.token, `/repos/${options.repository}/actions/runs/${runId}/artifacts`, "artifacts");
