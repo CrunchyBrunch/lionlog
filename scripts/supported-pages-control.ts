@@ -24,6 +24,7 @@ import { validatePublishedIncidentRecord, type PublishedIncident } from "./publi
 import { matchesPublishedJobLogEvidence } from "./published-incident-job-logs.ts";
 import type { PublishedResolution } from "./published-incident-collection.ts";
 import type { PublishedPredecessorCheck } from "./published-final-predecessor.ts";
+import { assertVerifiedPublicationCheckpoint, assertCheckpointPublicProof, type CheckpointPublicProof, type VerifiedPublicationCheckpoint } from "./publication-checkpoint.ts";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const GIT_SHA = /^[a-f0-9]{40}$/;
@@ -159,7 +160,10 @@ export function verifyFinalState(options: {
   state: FinalState;
   incidents: { historyVersion: string; incidents: Incident[] };
   now: Date;
+  checkpoint?: VerifiedPublicationCheckpoint;
+  checkpointPublicProof?: CheckpointPublicProof;
 }): PreapprovalSummary {
+  if (options.checkpoint) assertVerifiedPublicationCheckpoint(options.checkpoint);
   const summary = validatePreapprovalSummary(options.summary);
   const { state } = options;
   if (!Number.isFinite(options.now.getTime())) throw new Error("Final verification time is invalid.");
@@ -198,6 +202,12 @@ export function verifyFinalState(options: {
     throw new Error("Candidate freshness fell below the promotion floor while awaiting approval.");
   }
   assertExpectedPredecessor(summary.authorization.predecessorReleaseId, state.publicPredecessor);
+  if (options.checkpoint && (
+    state.publicPredecessor.state !== "present"
+    || state.publicPredecessor.releaseId !== options.checkpoint.publication.releaseId
+    || summary.workflow.runId <= options.checkpoint.boundary.runId
+    || state.priorAttempts.some((attempt) => attempt.runId <= options.checkpoint!.boundary.runId)
+  )) throw new Error("Checkpoint boundary or public predecessor drifted before submission.");
   if (summary.operation === "rollback") {
     const approved = summary.rollbackReceipt;
     if (
@@ -272,7 +282,8 @@ export function verifyFinalState(options: {
     incident.outcome === "resolved-published-browser-unverified");
   if (published.length > 1) throw new Error("Multiple published incident records are unsupported.");
   if (published.length === 1) {
-    if (!priorKeys.has(`${published[0].runId}/${published[0].runAttempt}`)) {
+    const coveredByCheckpoint = options.checkpoint && published[0].runId <= options.checkpoint.boundary.runId;
+    if (!coveredByCheckpoint && !priorKeys.has(`${published[0].runId}/${published[0].runAttempt}`)) {
       throw new Error("Published incident attempt is absent from complete prior history.");
     }
     if (summary.candidate.runId === published[0].evidence.release.candidateProducerRunId
@@ -280,10 +291,12 @@ export function verifyFinalState(options: {
       || summary.ci.runId === published[0].evidence.release.exactSourceCiRunId) {
       throw new Error("Expired historical candidate or CI cannot be reused by reconciliation.");
     }
-    verifyPublishedPredecessorCheck(published[0], state, options.now);
+    if (!coveredByCheckpoint) verifyPublishedPredecessorCheck(published[0], state, options.now);
+    else if (state.publishedPredecessorCheck != null) throw new Error("Covered published incident carries an unnecessary predecessor proof.");
   } else if (state.publishedPredecessorCheck != null) {
     throw new Error("Unexpected published predecessor proof.");
   }
+  if (options.checkpoint) assertCheckpointPublicProof(options.checkpoint, options.checkpointPublicProof);
   return summary;
 }
 
@@ -516,7 +529,7 @@ function hasExactKeys(value: unknown, expected: string[]): boolean {
     && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort());
 }
 
-function isKnownGoodAttempt(attempt: PriorAttemptEvidence): boolean {
+export function isKnownGoodAttempt(attempt: PriorAttemptEvidence): boolean {
   const receipt = attempt.receipt?.content as AttemptReceipt | undefined;
   return attempt.status === "completed" && attempt.conclusion === "success"
     && attempt.finalGateConclusion === "success"
@@ -528,7 +541,7 @@ function isKnownGoodAttempt(attempt: PriorAttemptEvidence): boolean {
     && receipt.knownGood === true && receipt.unresolved === false;
 }
 
-function isProvenPreSubmissionFailure(attempt: PriorAttemptEvidence): boolean {
+export function isProvenPreSubmissionFailure(attempt: PriorAttemptEvidence): boolean {
   const receipt = attempt.receipt?.content as AttemptReceipt | undefined;
   return attempt.status === "completed" && attempt.conclusion === "failure"
     && attempt.finalGateConclusion === "failure"

@@ -25,6 +25,7 @@ import { collectLegacyEvidence, collectPagesAttemptHistory } from "../scripts/co
 import { selectBrowserVerificationContext } from "../scripts/select-browser-verification-context.ts";
 import { assertArtifactDigest, normalizeArtifactDigest } from "../scripts/artifact-digest.ts";
 import { canonicalEvidenceDigest, validatePublishedIncidentRecord } from "../scripts/published-incident.ts";
+import { validatePublicationCheckpoint } from "../scripts/publication-checkpoint.ts";
 import logMapping from "../infrastructure/publication/published-incident-job-log-mapping.json" with { type: "json" };
 
 const workflowSha = "a".repeat(40);
@@ -490,6 +491,48 @@ test("only known-good or affirmative pre-submission failures clear attempt histo
   for (const attempt of unsafe) {
     assert.throws(() => verifyFinalState({ summary, state: { ...finalState(), priorAttempts: [attempt] }, incidents, now }), /incomplete|unknown or unresolved/);
   }
+});
+
+test("inactive checkpoint final gate requires its exact public predecessor and checks later attempts", () => {
+  const oldSummary = summaryFixture();
+  const oldReceiptSummary = { ...oldSummary,
+    workflow: { ...oldSummary.workflow, runId: 98 },
+    staged: { ...oldSummary.staged, artifactName: "lionlog-pages-98-1" } };
+  const oldReceipt = createFlatReceipt({ summary: oldReceiptSummary, recordedAt: "2026-09-17T11:50:00.000Z",
+    official: { submissionStarted: true, result: "success", pageUrl: "https://crunchybrunch.github.io/lionlog/", deploymentId: "1" },
+    publicChecks: { markerVerified: true, inventoryVerified: true, browserVerified: true } });
+  const receiptBytes = Buffer.from(`${JSON.stringify(oldReceipt)}\n`);
+  const checkpoint = validatePublicationCheckpoint({
+    checkpoint: {
+      checkpointVersion: "lionlog.pages-publication-checkpoint.v1",
+      repository: { id: 1_346_360_244, name: "CrunchyBrunch/lionlog" },
+      branch: "refs/heads/lionlog-publication-state", writerId: 123, stateParentSha: workflowSha,
+      boundary: { runId: 98, runAttempt: 1, workflowSha },
+      publication: { releaseId: hash, sourceSha, candidateArtifactId: 300, candidateArtifactDigest: digest,
+        manifestSha256: hash, receiptArtifactId: 600, receiptArtifactDigest: digest,
+        receiptSha256: sha256(receiptBytes) },
+      history: { sha256: hash, coveredReruns: [] },
+    }, receiptBytes, state: { commitSha: sourceSha, parentSha: workflowSha, writerId: 123, verified: true },
+    authorizedWriterId: 123,
+  });
+  const summary = { ...summaryFixture(), release: { ...summaryFixture().release, id: "e".repeat(64) },
+    authorization: { ...summaryFixture().authorization, predecessorReleaseId: hash } };
+  const state = { ...finalState(), publicPredecessor: { state: "present" as const, releaseId: hash } };
+  const incidents = emptyIncidentHistory();
+  assert.throws(() => verifyFinalState({ summary, state, incidents, now, checkpoint }), /fresh.*public inventory/i);
+  assert.throws(() => verifyFinalState({ summary, state, incidents, now,
+    checkpoint: structuredClone(checkpoint) }), /independently validated/);
+  assert.throws(() => verifyFinalState({ summary, state: { ...state, publicPredecessor: { state: "present", releaseId: "f".repeat(64) } },
+    incidents, now, checkpoint }), /predecessor|drifted/);
+  // A completed deploy with interrupted checkpoint persistence cannot authorize a repeat submission.
+  assert.throws(() => verifyFinalState({ summary, state: { ...state, publicPredecessor: { state: "present", releaseId: summary.release.id } },
+    incidents, now, checkpoint }), /already exists|predecessor|drifted/);
+  assert.throws(() => verifyFinalState({ summary, state: { ...state, priorAttempts: [priorAttempt({ runId: 98 })] },
+    incidents, now, checkpoint }), /checkpoint boundary/i);
+  assert.throws(() => verifyFinalState({ summary, state: { ...state, priorAttempts: [priorAttempt({ runId: 99, conclusion: "cancelled" })] },
+    incidents, now, checkpoint }), /unknown or unresolved/);
+  assert.throws(() => verifyFinalState({ summary, state: { ...state, priorAttempts: [priorAttempt({ runId: 99, receipt: null })] },
+    incidents, now, checkpoint }), /unknown or unresolved/);
 });
 
 test("real legacy pre-submission identities reconcile only against exact affirmative evidence", async () => {
