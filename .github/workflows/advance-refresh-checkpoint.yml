@@ -1,0 +1,97 @@
+name: Advance verified LionLog publication checkpoint
+
+on:
+  workflow_run:
+    workflows: [Promote exact LionLog release to GitHub Pages]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: github-pages-production
+  cancel-in-progress: false
+
+jobs:
+  advance:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.run_attempt == 1 &&
+      vars.LIONLOG_REFRESH_ACTIVATION == 'ENABLE_AUTOMATIC_LIONLOG_REFRESH' &&
+      vars.LIONLOG_PRODUCTION_REF != '' &&
+      vars.LIONLOG_PRODUCTION_SHA != '' &&
+      vars.LIONLOG_PUBLICATION_WRITER_ID != '' &&
+      github.event.workflow_run.head_sha == vars.LIONLOG_PRODUCTION_SHA
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+        with:
+          ref: ${{ vars.LIONLOG_PRODUCTION_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts --omit=dev
+      - name: Recover the exact terminal receipt and candidate manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
+          PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/refresh-checkpoint
+          gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID" > work/refresh-checkpoint/run.json
+          [[ "$PRODUCTION_REF" == refs/heads/* && "$PRODUCTION_REF" != refs/heads/main ]]
+          jq -e --argjson id "$RUN_ID" --arg sha "$RUN_SHA" --arg branch "${PRODUCTION_REF#refs/heads/}" \
+            '.id == $id and .run_attempt == 1 and .status == "completed" and .conclusion == "success" and .head_sha == $sha and .head_branch == $branch and .event == "workflow_dispatch" and .path == ".github/workflows/deploy-github-pages.yml"' \
+            work/refresh-checkpoint/run.json > /dev/null
+          gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts?per_page=100" > work/refresh-checkpoint/artifacts.json
+          jq -e '.total_count == (.artifacts | length)' work/refresh-checkpoint/artifacts.json > /dev/null
+          RECEIPT_ID="$(jq -er --arg name "lionlog-pages-receipt-$RUN_ID-1" \
+            '[.artifacts[] | select(.name == $name and .expired == false)] | if length == 1 then .[0].id else error("receipt artifact missing or ambiguous") end' \
+            work/refresh-checkpoint/artifacts.json)"
+          RECEIPT_DIGEST="$(jq -er --argjson id "$RECEIPT_ID" '.artifacts[] | select(.id == $id) | .digest' work/refresh-checkpoint/artifacts.json)"
+          gh api "repos/${{ github.repository }}/actions/artifacts/$RECEIPT_ID/zip" > work/refresh-checkpoint/receipt.zip
+          node --experimental-strip-types scripts/artifact-digest.ts --expected="$RECEIPT_DIGEST" --file=work/refresh-checkpoint/receipt.zip > /dev/null
+          node --experimental-strip-types scripts/artifact-zip.ts --zip=work/refresh-checkpoint/receipt.zip \
+            --output=work/refresh-checkpoint/receipt --expected=pages-receipt.json
+          RECEIPT=work/refresh-checkpoint/receipt/pages-receipt.json
+          jq -e --argjson id "$RUN_ID" --arg sha "$RUN_SHA" \
+            '.knownGood == true and .unresolved == false and .workflow.runId == $id and .workflow.runAttempt == 1 and .workflow.sha == $sha and .candidate.sourceSha == $sha and .official.submissionStarted == true and .official.result == "success" and .public.markerVerified == true and .public.inventoryVerified == true and .public.browserVerified == true' \
+            "$RECEIPT" > /dev/null
+          CANDIDATE_ID="$(jq -er .candidate.artifactId "$RECEIPT")"
+          CANDIDATE_DIGEST="$(jq -er .candidate.artifactDigest "$RECEIPT")"
+          gh api "repos/${{ github.repository }}/actions/artifacts/$CANDIDATE_ID" > work/refresh-checkpoint/candidate-metadata.json
+          jq -e --argjson id "$CANDIDATE_ID" --arg digest "$CANDIDATE_DIGEST" --arg sha "$RUN_SHA" \
+            '.id == $id and .digest == $digest and .expired == false and .workflow_run.head_sha == $sha' \
+            work/refresh-checkpoint/candidate-metadata.json > /dev/null
+          gh api "repos/${{ github.repository }}/actions/artifacts/$CANDIDATE_ID/zip" > work/refresh-checkpoint/candidate.zip
+          node --experimental-strip-types scripts/artifact-digest.ts --expected="$CANDIDATE_DIGEST" --file=work/refresh-checkpoint/candidate.zip > /dev/null
+          node --experimental-strip-types scripts/artifact-zip.ts --zip=work/refresh-checkpoint/candidate.zip \
+            --output=work/refresh-checkpoint/candidate --expected=release-manifest.json,site.tar
+          node --experimental-strip-types scripts/artifact-digest.ts \
+            --expected="$(jq -er .candidate.manifestSha256 "$RECEIPT")" \
+            --file=work/refresh-checkpoint/candidate/release-manifest.json > /dev/null
+      - name: Append authenticated checkpoint after terminal success
+        shell: bash
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          LIONLOG_PUBLICATION_WRITER_TOKEN: ${{ secrets.LIONLOG_PUBLICATION_WRITER_TOKEN }}
+          LIONLOG_PUBLICATION_WRITER_ID: ${{ vars.LIONLOG_PUBLICATION_WRITER_ID }}
+          LIONLOG_PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
+          LIONLOG_PRODUCTION_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          test -n "$LIONLOG_PUBLICATION_WRITER_TOKEN"
+          node --experimental-strip-types scripts/advance-refresh-checkpoint.ts \
+            --expected-run-id="$RUN_ID" \
+            --manifest=work/refresh-checkpoint/candidate/release-manifest.json \
+            --incidents=infrastructure/publication/pages-incident-history.json

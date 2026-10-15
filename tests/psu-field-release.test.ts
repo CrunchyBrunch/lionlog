@@ -44,6 +44,32 @@ test("trusted release guard requires the exact workflow, repository, ref, event,
   }
 });
 
+test("automatic producer guard is inactive unless the exact approved production source is configured", () => {
+  const automatic = {
+    ...authorizedEnvironment,
+    LIONLOG_REFRESH_MODE: "automatic",
+    GITHUB_REF: "refs/heads/lionlog-production",
+    GITHUB_WORKFLOW_REF: "CrunchyBrunch/lionlog/.github/workflows/build-live-menu-artifact.yml@refs/heads/lionlog-production",
+    LIONLOG_REFRESH_ACTIVATION: "ENABLE_AUTOMATIC_LIONLOG_REFRESH",
+    LIONLOG_REFRESH_SOURCE_AUTHORIZATION: "I_APPROVE_AUTOMATIC_PSU_REQUESTS",
+    LIONLOG_PRODUCTION_REF: "refs/heads/lionlog-production",
+    LIONLOG_PRODUCTION_SHA: "a".repeat(40),
+    LIONLOG_REMAINING_REQUESTS: "1",
+  };
+  assert.doesNotThrow(() => assertTrustedReleaseIngestionEnvironment(automatic));
+  for (const changed of [
+    { LIONLOG_REFRESH_ACTIVATION: "" },
+    { LIONLOG_REFRESH_SOURCE_AUTHORIZATION: "" },
+    { LIONLOG_PRODUCTION_SHA: "b".repeat(40) },
+    { GITHUB_SHA: "b".repeat(40) },
+    { GITHUB_WORKFLOW_REF: authorizedEnvironment.GITHUB_WORKFLOW_REF },
+    { GITHUB_REF: "refs/heads/main" },
+    { LIONLOG_REMAINING_REQUESTS: "0" },
+    { GITHUB_RUN_ATTEMPT: "2" },
+  ]) assert.throws(() => assertTrustedReleaseIngestionEnvironment({ ...automatic, ...changed }));
+  assert.doesNotThrow(() => assertTrustedReleaseIngestionEnvironment(authorizedEnvironment));
+});
+
 test("source-driven meal option parser validates context and rejects unknown expansion", async () => {
   const html = await readFile(fixturePath, "utf8");
   assert.deepEqual(parsePsuMealOptionsHtml(html, {

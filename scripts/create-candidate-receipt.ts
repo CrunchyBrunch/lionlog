@@ -30,11 +30,17 @@ const metadata = JSON.parse(await readFile(required("--artifact-metadata"), "utf
   expired?: unknown;
   workflow_run?: { id?: unknown; head_sha?: unknown; head_branch?: unknown; head_repository_id?: unknown };
 };
+const productionRef = args.get("--production-ref");
+const branch = productionRef === undefined ? "main" : productionRef.replace(/^refs\/heads\//, "");
+if (productionRef !== undefined && (!/^refs\/heads\/[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(productionRef)
+  || branch === "main" || manifest.source.commitSha !== args.get("--production-sha"))) {
+  throw new Error("Candidate receipt production pin is invalid.");
+}
 if (
   metadata.expired !== false
   || metadata.workflow_run?.id !== manifest.source.workflowRunId
   || metadata.workflow_run?.head_sha !== manifest.source.commitSha
-  || metadata.workflow_run?.head_branch !== "main"
+  || metadata.workflow_run?.head_branch !== branch
   || metadata.workflow_run?.head_repository_id !== LIONLOG_REPOSITORY_ID
 ) throw new Error("Candidate artifact metadata does not match its trusted producer.");
 const expectedArtifactName = manifest.releaseKind === "live"

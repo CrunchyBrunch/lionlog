@@ -7,7 +7,8 @@ import { assertArtifactDigest } from "./artifact-digest.ts";
 import { LIONLOG_REPOSITORY_ID, PROMOTION_WORKFLOW_ID } from "../infrastructure/publication/release-contract.ts";
 import { validatePublishedIncidentRecord, type PublishedIncident } from "./published-incident.ts";
 import { collectPublishedResolution, type PublishedResolution } from "./published-incident-collection.ts";
-import { assertCheckpointRunBoundary, type VerifiedPublicationCheckpoint } from "./publication-checkpoint.ts";
+import { assertCheckpointRunBoundary, loadPublicationCheckpoint, type VerifiedPublicationCheckpoint } from "./publication-checkpoint.ts";
+import { branchFromProductionRef } from "./supported-pages-release.ts";
 
 const API_ROOT = "https://api.github.com";
 const PER_PAGE = 100;
@@ -105,7 +106,9 @@ export async function collectPagesAttemptHistory(options: {
   now?: Date;
   checkpoint?: VerifiedPublicationCheckpoint;
   strictCheckpointEvidence?: boolean;
+  productionRef?: string;
 }): Promise<CollectedAttemptEvidence[]> {
+  const productionBranch = options.productionRef ? branchFromProductionRef(options.productionRef) : "main";
   if (options.repository !== "CrunchyBrunch/lionlog" || !positive(options.currentRunId) || options.token.length < 1) {
     throw new Error("Attempt-history authority is invalid.");
   }
@@ -123,7 +126,7 @@ export async function collectPagesAttemptHistory(options: {
     if (attempt.id !== boundary.runId || attempt.workflow_id !== PROMOTION_WORKFLOW_ID
       || attempt.run_attempt !== boundary.runAttempt || attempt.head_sha !== boundary.workflowSha
       || attempt.path !== ".github/workflows/deploy-github-pages.yml"
-      || attempt.event !== "workflow_dispatch" || attempt.head_branch !== "main"
+      || attempt.event !== "workflow_dispatch" || (attempt.head_branch !== "main" && attempt.head_branch !== productionBranch)
       || attempt.status !== "completed" || attempt.conclusion !== "success") {
       throw new Error("Checkpoint boundary attempt identity drifted.");
     }
@@ -146,7 +149,7 @@ export async function collectPagesAttemptHistory(options: {
         || number(attemptRun.run_attempt, "Attempt number") !== attempt
         || attemptRun.path !== ".github/workflows/deploy-github-pages.yml"
         || attemptRun.event !== "workflow_dispatch"
-        || attemptRun.head_branch !== "main"
+        || (attemptRun.head_branch !== "main" && attemptRun.head_branch !== productionBranch)
         || typeof attemptRun.head_sha !== "string" || !GIT_SHA.test(attemptRun.head_sha)
       ) throw new Error("Attempt-specific workflow identity is invalid.");
       if (attemptRun.status !== "completed" || !terminalConclusion(attemptRun.conclusion)) {
@@ -640,6 +643,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const incidentPath = process.argv.find((argument) => argument.startsWith("--incidents="))?.slice("--incidents=".length);
   if (!output || !incidentPath) throw new Error("Attempt-history output or incident-history path is missing.");
   const incidentHistory = JSON.parse(await readFile(incidentPath, "utf8"));
-  const evidence = await collectPagesAttemptHistory({ repository, currentRunId, token, incidentHistory });
+  const productionRef = process.argv.find((argument) => argument.startsWith("--production-ref="))?.slice("--production-ref=".length);
+  const writerId = Number(process.argv.find((argument) => argument.startsWith("--checkpoint-writer-id="))?.slice("--checkpoint-writer-id=".length));
+  const loaded = productionRef ? await loadPublicationCheckpoint({ token, authorizedWriterId: writerId }) : undefined;
+  const evidence = await collectPagesAttemptHistory({ repository, currentRunId, token, incidentHistory,
+    productionRef, checkpoint: loaded?.checkpoint, strictCheckpointEvidence: Boolean(productionRef) });
   await writeFile(output, `${JSON.stringify(evidence, null, 2)}\n`, { flag: "wx" });
 }
