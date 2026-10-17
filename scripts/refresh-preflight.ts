@@ -11,7 +11,7 @@ const REPOSITORY = "CrunchyBrunch/lionlog";
 const PRODUCER = ".github/workflows/build-live-menu-artifact.yml";
 const DEPLOYER = ".github/workflows/deploy-github-pages.yml";
 interface Run { id: number; head_sha: string; head_branch: string; event: string; run_attempt: number;
-  status: string; conclusion: string | null; created_at: string; updated_at?: string; run_started_at?: string; path: string }
+  status: string; conclusion: string | null; created_at: unknown; updated_at?: unknown; run_started_at?: unknown; path: string }
 interface Artifact { id: number; name: string; digest: string; expired: boolean; workflow_run: { id: number; head_sha: string } }
 interface Api { getJson(path: string): Promise<unknown>; getBytes(path: string): Promise<Buffer> }
 
@@ -88,7 +88,7 @@ export async function assertNoAutomaticCandidateConflict(options: {
 
 async function completeRuns(api: Api, workflow: string, serviceDate: string, currentRunId: number): Promise<Run[]> {
   const workflowId = workflow === PRODUCER ? LIVE_CANDIDATE_WORKFLOW_ID : PROMOTION_WORKFLOW_ID;
-  const all: Run[] = [];
+  const all: Array<{ run: Run; updatedMs: number | undefined }> = [];
   const seen = new Set<number>();
   let lastCreatedMs = Number.POSITIVE_INFINITY;
   let expectedTotal: number | undefined;
@@ -108,29 +108,45 @@ async function completeRuns(api: Api, workflow: string, serviceDate: string, cur
         throw new Error("Refresh run history contains a duplicate or invalid run ID.");
       }
       seen.add(run.id);
-      const created = new Date(run.created_at);
-      if (!Number.isFinite(created.getTime())) throw new Error("Refresh run creation time is invalid.");
-      if (created.getTime() > lastCreatedMs) throw new Error("Refresh run history ordering is incomplete.");
-      lastCreatedMs = created.getTime();
-      all.push(run);
+      const createdMs = runTime(run.created_at, "creation");
+      const startedMs = optionalRunTime(run.run_started_at, "start");
+      const updatedMs = optionalRunTime(run.updated_at, "update");
+      if ((startedMs !== undefined && startedMs < createdMs)
+        || (updatedMs !== undefined && (updatedMs < createdMs || (startedMs !== undefined && updatedMs < startedMs)))) {
+        throw new Error("Refresh run activity times are inconsistent.");
+      }
+      if (createdMs > lastCreatedMs) throw new Error("Refresh run history ordering is incomplete.");
+      lastCreatedMs = createdMs;
+      all.push({ run, updatedMs });
     }
     if (all.length === expectedTotal) break;
   }
   if (expectedTotal === undefined || all.length !== expectedTotal) {
     throw new Error("Refresh run history exceeded the bounded enumeration window.");
   }
-  return all.filter((run) => {
+  return all.filter(({ run, updatedMs }) => {
     if (run.id === currentRunId) return false;
-    const activity = [run.created_at, run.run_started_at, run.updated_at].filter((value): value is string => typeof value === "string");
-    if (activity.some((value) => {
-      const instant = new Date(value);
-      if (!Number.isFinite(instant.getTime())) throw new Error("Refresh run activity time is invalid.");
-      const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(instant);
-      const field = (name: string) => parts.find((part) => part.type === name)?.value ?? "";
-      return `${field("year")}-${field("month")}-${field("day")}` >= serviceDate;
-    }) || run.status !== "completed") return true;
-    return false;
-  });
+    // A completed run can be excluded only when its terminal update proves the entire activity interval is older.
+    if (run.status !== "completed" || updatedMs === undefined) return true;
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(updatedMs));
+    const field = (name: string) => parts.find((part) => part.type === name)?.value ?? "";
+    return `${field("year")}-${field("month")}-${field("day")}` >= serviceDate;
+  }).map(({ run }) => run);
+}
+
+function runTime(value: unknown, field: string): number {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value)) {
+    throw new Error(`Refresh run ${field} time is invalid.`);
+  }
+  const epoch = Date.parse(value);
+  if (!Number.isFinite(epoch) || new Date(epoch).toISOString().slice(0, 19) !== value.slice(0, 19)) {
+    throw new Error(`Refresh run ${field} time is invalid.`);
+  }
+  return epoch;
+}
+
+function optionalRunTime(value: unknown, field: string): number | undefined {
+  return value === undefined || value === null ? undefined : runTime(value, field);
 }
 
 async function githubApi(token: string): Promise<Api> {

@@ -183,6 +183,7 @@ test("producer and manual conflict preflights reject incomplete run counts", asy
 test("run history requires every unique page before service-date filtering", async () => {
   const prior = { id: 800, head_sha: sourceSha, head_branch: "lionlog-production", event: "workflow_dispatch",
     run_attempt: 1, status: "completed", conclusion: "failure", created_at: "2026-10-13T09:17:00.000Z",
+    updated_at: "2026-10-13T09:18:00.000Z",
     path: ".github/workflows/build-live-menu-artifact.yml" };
   const first = Array.from({ length: 100 }, (_, index) => ({ ...prior, id: 800 - index }));
   const options = { configuration: config, repository: invocation.repository, workflowRef: invocation.workflowRef,
@@ -196,6 +197,66 @@ test("run history requires every unique page before service-date filtering", asy
   await assert.rejects(preflightAutomaticRefresh({ ...options, api: api([]) }), /history|pagination|count|incomplete/i);
   await assert.rejects(preflightAutomaticRefresh({ ...options, api: api([first[0]]) }), /duplicate|history/i);
   assert.equal(await preflightAutomaticRefresh({ ...options, api: api([{ ...prior, id: 700 }]) }), 1_680);
+});
+
+test("unknown or malformed old-run activity cannot restore the daily budget", async () => {
+  const old = { id: 899, head_sha: sourceSha, head_branch: "lionlog-production", event: "workflow_dispatch",
+    run_attempt: 1, status: "completed", conclusion: "failure", created_at: "2026-10-13T09:17:00.000Z",
+    path: ".github/workflows/build-live-menu-artifact.yml" };
+  const options = { configuration: config, repository: invocation.repository, workflowRef: invocation.workflowRef,
+    workflowSha: sourceSha, runId: 900, runAttempt: 1, serviceDate: invocation.serviceDate,
+    trigger: "primary" as const, now: day };
+  const api = (run: Record<string, unknown>) => ({ getJson: async (url: string) =>
+    url.includes("/347992874/runs") ? { total_count: 0, workflow_runs: [] }
+      : url.includes("/artifacts?") ? { total_count: 0, artifacts: [] }
+        : { total_count: 1, workflow_runs: [run] },
+  getBytes: async () => { throw new Error("unexpected artifact download"); } });
+  await assert.rejects(preflightAutomaticRefresh({ ...options, api: api(old) }), /history|activity|time|accounting/i);
+  for (const value of [undefined, null, 7, "malformed"]) {
+    await assert.rejects(preflightAutomaticRefresh({ ...options, api: api({ ...old,
+      run_started_at: value, updated_at: value }) }), /history|activity|time|accounting/i);
+  }
+  await assert.rejects(preflightAutomaticRefresh({ ...options, api: api({ ...old,
+    created_at: null, run_started_at: null, updated_at: null }) }), /history|activity|time|accounting/i);
+  for (const created_at of [7, "2026-02-30T09:17:00Z"]) {
+    await assert.rejects(preflightAutomaticRefresh({ ...options, api: api({ ...old, created_at,
+      updated_at: "2026-10-13T09:18:00.000Z" }) }), /history|activity|time|accounting/i);
+  }
+  assert.equal(await preflightAutomaticRefresh({ ...options, api: api({ ...old,
+    updated_at: "2026-10-13T09:18:00.000Z" }) }), 1_680,
+  "a valid terminal update establishes that an old completed run cannot affect today");
+  assert.equal(await preflightAutomaticRefresh({ ...options, api: api({ ...old,
+    run_started_at: null, updated_at: "2026-10-13T09:18:00.000Z" }) }), 1_680);
+  await assert.rejects(preflightAutomaticRefresh({ ...options, api: api({ ...old,
+    run_started_at: "2026-10-15T09:17:00.000Z", updated_at: "2026-10-13T09:18:00.000Z" }) }),
+  /history|activity|time|accounting/i);
+});
+
+test("unknown old-run activity still blocks manual candidate and automatic publication", async () => {
+  const old = { id: 899, head_sha: sourceSha, head_branch: "lionlog-production", event: "workflow_dispatch",
+    run_attempt: 1, status: "completed", conclusion: "failure", created_at: "2026-10-13T09:17:00.000Z" };
+  const api = (workflow: "producer" | "deploy", activity: Record<string, unknown>) => ({
+    getJson: async (url: string) => {
+      const isProducer = url.includes("/347085467/runs");
+      const selected = workflow === "producer" ? isProducer : url.includes("/347992874/runs");
+      return selected ? { total_count: 1, workflow_runs: [{ ...old, ...activity }] }
+        : { total_count: 0, workflow_runs: [] };
+    }, getBytes: async () => { throw new Error("unexpected artifact download"); },
+  });
+  const unknown = { run_started_at: null, updated_at: null };
+  await assert.rejects(assertNoAutomaticCandidateConflict({ api: api("producer", unknown),
+    activation: config.activation, productionRef, serviceDate: invocation.serviceDate, currentRunId: 900 }),
+  /candidate|history|activity|time/i);
+  await assert.rejects(preflightAutomaticRefresh({ api: api("deploy", unknown), configuration: config,
+    repository: invocation.repository, workflowRef: invocation.workflowRef, workflowSha: sourceSha,
+    runId: 900, runAttempt: 1, serviceDate: invocation.serviceDate, trigger: "primary", now: day }),
+  /publication|history|activity|time/i);
+  const validOld = { run_started_at: "2026-10-13T09:17:30.000Z", updated_at: "2026-10-13T09:18:00.000Z" };
+  await assert.doesNotReject(assertNoAutomaticCandidateConflict({ api: api("producer", validOld),
+    activation: config.activation, productionRef, serviceDate: invocation.serviceDate, currentRunId: 900 }));
+  assert.equal(await preflightAutomaticRefresh({ api: api("deploy", validOld), configuration: config,
+    repository: invocation.repository, workflowRef: invocation.workflowRef, workflowSha: sourceSha,
+    runId: 900, runAttempt: 1, serviceDate: invocation.serviceDate, trigger: "primary", now: day }), 1_680);
 });
 
 test("retained primary accounting permits one bounded recovery while retained recovery blocks another", async () => {
