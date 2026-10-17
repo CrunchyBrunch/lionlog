@@ -29,6 +29,10 @@ const cacheDirectory = path.resolve(argumentsByName.get("cache-dir") ?? "work/ps
 const reportPath = path.resolve(argumentsByName.get("report") ?? "work/psu-field-release/report.json");
 const startedAt = new Date();
 const automatic = process.env.LIONLOG_REFRESH_MODE === "automatic";
+if (automatic && process.env.LIONLOG_REFRESH_OPPORTUNITY !== "primary"
+  && process.env.LIONLOG_REFRESH_OPPORTUNITY !== "recovery") {
+  throw new Error("Verified automatic refresh opportunity is missing.");
+}
 const maximumRequests = automatic ? Number(process.env.LIONLOG_REMAINING_REQUESTS) : PSU_RELEASE_MAXIMUM_REQUESTS;
 const retriever = new PsuHttpRetriever({
   allowNetwork: true,
@@ -147,6 +151,7 @@ async function writeRefreshAccounting(outcome: "candidate-ready" | "transient-pr
     completedAt: new Date().toISOString(),
     upstreamAttempts: retriever.requestCount,
     outcome,
+    opportunity: process.env.LIONLOG_REFRESH_OPPORTUNITY,
   });
   await writeJsonAtomically(path.resolve(accountingPath), record);
 }

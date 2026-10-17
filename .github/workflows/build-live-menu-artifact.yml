@@ -145,6 +145,7 @@ jobs:
           LIONLOG_PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
           LIONLOG_PRODUCTION_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
           LIONLOG_REMAINING_REQUESTS: ${{ steps.refresh-preflight.outputs.remaining_requests }}
+          LIONLOG_REFRESH_OPPORTUNITY: ${{ steps.refresh-preflight.outputs.opportunity }}
           LIONLOG_REFRESH_ACCOUNTING_PATH: work/psu-field-release/refresh-accounting.json
         run: >-
           npm run prepare:psu-field-release --

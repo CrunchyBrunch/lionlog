@@ -9,7 +9,7 @@ const SHA = /^[a-f0-9]{40}$/;
 const BRANCH_REF = /^refs\/heads\/[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const ACCOUNTING_KEYS = ["accountingVersion", "completedAt", "outcome", "repository", "runAttempt", "runId",
-  "serviceDate", "startedAt", "upstreamAttempts", "workflowRef", "workflowSha"];
+  "opportunity", "serviceDate", "startedAt", "upstreamAttempts", "workflowRef", "workflowSha"];
 
 export interface RefreshAttempt {
   runId: number;
@@ -20,6 +20,7 @@ export interface RefreshAttempt {
   startedAt: string;
   upstreamAttempts: number;
   outcome: string;
+  opportunity: "primary" | "recovery";
 }
 
 export type RefreshAccounting = RefreshAttempt & {
@@ -63,6 +64,7 @@ export function validateRefreshAccounting(value: unknown): RefreshAccounting {
     || Date.parse(record.completedAt) < Date.parse(record.startedAt)
     || !Number.isSafeInteger(record.upstreamAttempts) || record.upstreamAttempts < 0
     || record.upstreamAttempts > REFRESH_DAILY_UPSTREAM_LIMIT
+    || !["primary", "recovery"].includes(record.opportunity)
     || !["candidate-ready", "transient-prepublication-failure", "structural-failure"].includes(record.outcome)) {
     throw new Error("Refresh accounting schema or request budget is invalid.");
   }
@@ -104,6 +106,7 @@ export function evaluateRefreshPolicy(options: {
       || entry.runAttempt !== 1 || entry.workflowSha !== config.productionSha
       || entry.workflowRef !== config.productionRef || entry.serviceDate !== run.serviceDate
       || !canonicalTime(entry.startedAt) || newYorkParts(new Date(entry.startedAt)).date !== run.serviceDate
+      || !["primary", "recovery"].includes(entry.opportunity)
       || !Number.isSafeInteger(entry.upstreamAttempts) || entry.upstreamAttempts < 0
       || entry.upstreamAttempts > REFRESH_DAILY_UPSTREAM_LIMIT) {
       throw new Error("Refresh history accounting, production pin, or request budget is invalid.");
@@ -120,6 +123,7 @@ export function evaluateRefreshPolicy(options: {
   const remainingRequests = REFRESH_DAILY_UPSTREAM_LIMIT - spent;
   if (remainingRequests < 1) throw new Error("The shared daily upstream request budget is exhausted.");
   if (options.attempts.length > 1) throw new Error("The one recovery opportunity was already used.");
+  if (options.attempts[0]?.opportunity === "recovery") throw new Error("The one recovery opportunity was already used.");
   const missedPrimary = minute >= PROPOSED_PRIMARY_MINUTE + PROPOSED_PRIMARY_WINDOW_MINUTES;
   const kind = options.attempts.length === 0 && !missedPrimary ? "primary" : "recovery";
   if (options.trigger !== kind) throw new Error(`A duplicate ${options.trigger} trigger cannot replace the ${kind} opportunity.`);

@@ -276,6 +276,8 @@ export async function appendPublicationCheckpoint(options: {
   manifestBytes: Buffer; incidentHistory: unknown; expectedParentSha: string;
   token: string; authorizedWriterId: number; fetchImpl?: typeof fetch; now?: Date;
   productionRef?: string;
+  expectedPublication?: { runId: number; runAttempt: number; workflowSha: string; sourceSha: string;
+    manifestSha256: string; releaseId: string; candidateArtifactId: number; candidateArtifactDigest: string };
 }): Promise<string> {
   const fetchImpl = options.fetchImpl ?? fetch;
   if ("checkpoint" in options || "receiptBytes" in options || "previous" in options) {
@@ -286,11 +288,19 @@ export async function appendPublicationCheckpoint(options: {
   const token = options.token;
   const now = options.now === undefined ? undefined : new Date(options.now.getTime());
   const incidentHistory = structuredClone(options.incidentHistory);
+  const expectedPublication = options.expectedPublication === undefined
+    ? undefined : structuredClone(options.expectedPublication);
   if (!Buffer.isBuffer(options.manifestBytes) || options.manifestBytes.length === 0
     || options.manifestBytes.length > CHECKPOINT_MANIFEST_MAX_BYTES) throw new Error("Checkpoint manifest bytes are invalid.");
   const manifestBytes = Buffer.from(options.manifestBytes);
   if (!SHA.test(expectedParentSha) || !positive(authorizedWriterId)) {
     throw new Error("Checkpoint expected parent or writer is invalid.");
+  }
+  if (expectedPublication && (!positive(expectedPublication.runId) || expectedPublication.runAttempt !== 1
+    || !SHA.test(expectedPublication.workflowSha) || !SHA.test(expectedPublication.sourceSha)
+    || !HASH.test(expectedPublication.manifestSha256) || !HASH.test(expectedPublication.releaseId)
+    || !positive(expectedPublication.candidateArtifactId) || !DIGEST.test(expectedPublication.candidateArtifactDigest))) {
+    throw new Error("Checkpoint expected publication identity is invalid.");
   }
   const actor = await githubJson(fetchImpl, token, `${API}/user`) as Record<string, unknown>;
   if (actor.id !== authorizedWriterId) throw new Error("Checkpoint writer token is unauthorized.");
@@ -302,6 +312,16 @@ export async function appendPublicationCheckpoint(options: {
     productionRef: options.productionRef });
   if (prepared.checkpoint.stateParentSha !== expectedParentSha || prepared.checkpoint.writerId !== authorizedWriterId) {
     throw new Error("Checkpoint prepared authority differs from the authenticated parent.");
+  }
+  if (expectedPublication && (prepared.checkpoint.boundary.runId !== expectedPublication.runId
+    || prepared.checkpoint.boundary.runAttempt !== expectedPublication.runAttempt
+    || prepared.checkpoint.boundary.workflowSha !== expectedPublication.workflowSha
+    || prepared.checkpoint.publication.sourceSha !== expectedPublication.sourceSha
+    || prepared.checkpoint.publication.manifestSha256 !== expectedPublication.manifestSha256
+    || prepared.checkpoint.publication.releaseId !== expectedPublication.releaseId
+    || prepared.checkpoint.publication.candidateArtifactId !== expectedPublication.candidateArtifactId
+    || prepared.checkpoint.publication.candidateArtifactDigest !== expectedPublication.candidateArtifactDigest)) {
+    throw new Error("Checkpoint recollected publication differs from the expected terminal run.");
   }
   const ref = await githubJson(fetchImpl, token, STATE_REF_API) as Record<string, unknown>;
   if (ref.ref !== PUBLICATION_STATE_BRANCH || (ref.object as Record<string, unknown> | undefined)?.sha !== expectedParentSha) {

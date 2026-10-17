@@ -11,7 +11,7 @@ import {
   assertCheckpointPublicProof,
 } from "../scripts/publication-checkpoint.ts";
 import { collectPagesAttemptHistory } from "../scripts/collect-pages-attempt-history.ts";
-import { advanceRefreshCheckpoint } from "../scripts/advance-refresh-checkpoint.ts";
+import { advanceRefreshCheckpoint, assertTrustedWriterEnvironment } from "../scripts/advance-refresh-checkpoint.ts";
 
 const sha = "a".repeat(40);
 const source = "b".repeat(40);
@@ -244,6 +244,57 @@ test("post-success writer advances only the exact terminal pinned run", async ()
   assert.equal(await advanceRefreshCheckpoint(options), "7".repeat(40));
   assert.equal((storedCheckpoint as { boundary: { runId: number } }).boundary.runId, 11);
   assert.deepEqual(storedManifest, fixture.manifestBytes);
+});
+
+test("post-success writer rejects a newer recollected boundary before any state write", async () => {
+  const f11 = publicationFixture({ runId: 11, releaseIdValue: "f".repeat(64), sourceShaValue: sha });
+  const f12 = publicationFixture({ runId: 12, releaseIdValue: "f".repeat(64), sourceShaValue: sha });
+  const scenario = (mutateCaller: boolean) => {
+    let historyReads = 0;
+    let writes = 0;
+    const stateApi = stateFetch({ onGraphql() { writes += 1; return json({ errors: [{ message: "write was forbidden" }] }); } });
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (mutateCaller && url.endsWith("/repos/CrunchyBrunch/lionlog")) {
+        options.expectedRunId = 12;
+      }
+      if (url.includes("/actions/workflows/347992874/runs?")) {
+        historyReads += 1;
+        if (mutateCaller || historyReads >= 2) return json({ total_count: 3,
+          workflow_runs: [10, 11, 12].map((id) => ({ id, run_attempt: 1 })) });
+      }
+      if (url.startsWith("https://crunchybrunch.github.io/") || url.includes("/actions/")) {
+        const fixture = url.includes("/runs/12/") || url.includes("/artifacts/32/") ? f12 : f11;
+        return fixture.fetchImpl(input, init);
+      }
+      return stateApi(input, init);
+    };
+    const options: Parameters<typeof advanceRefreshCheckpoint>[0] = { token: "fixture", writerId: 123, productionRef: "refs/heads/lionlog-production",
+      productionSha: sha, expectedRunId: 11, manifestBytes: Buffer.from(f11.manifestBytes),
+      incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] }, fetchImpl };
+    return { options, fetchImpl, writes: () => writes, historyReads: () => historyReads };
+  };
+  for (const mutateCaller of [false, true]) {
+    const testCase = scenario(mutateCaller);
+    await assert.rejects(advanceRefreshCheckpoint(testCase.options), /terminal promotion|expected|bound|manifest|write was forbidden/i);
+    assert.equal(testCase.writes(), 0, "recollected drift must not reach GraphQL");
+    assert.ok(testCase.historyReads() >= (mutateCaller ? 1 : 2));
+  }
+});
+
+test("writer authority accepts only first-attempt dispatch on the approved production workflow revision", () => {
+  const valid = { repository: "CrunchyBrunch/lionlog", eventName: "workflow_dispatch",
+    workflowRef: "CrunchyBrunch/lionlog/.github/workflows/advance-refresh-checkpoint.yml@refs/heads/lionlog-production",
+    ref: "refs/heads/lionlog-production", sha, runAttempt: 1,
+    activation: "ENABLE_AUTOMATIC_LIONLOG_REFRESH", productionRef: "refs/heads/lionlog-production",
+    productionSha: sha, writerId: 123, expectedRunId: 11 };
+  assert.doesNotThrow(() => assertTrustedWriterEnvironment(valid));
+  for (const changed of [{ eventName: "workflow_run", ref: "refs/heads/main" },
+    { workflowRef: valid.workflowRef.replace("lionlog-production", "main") },
+    { sha: "b".repeat(40) }, { productionSha: "b".repeat(40) },
+    { runAttempt: 2 }, { activation: "" }, { expectedRunId: 0 }]) {
+    assert.throws(() => assertTrustedWriterEnvironment({ ...valid, ...changed }), /writer|workflow|production|pin|attempt|inactive/i);
+  }
 });
 
 test("append rejects a parent changed during the final ref read without posting a mutation", async () => {

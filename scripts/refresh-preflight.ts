@@ -88,30 +88,49 @@ export async function assertNoAutomaticCandidateConflict(options: {
 
 async function completeRuns(api: Api, workflow: string, serviceDate: string, currentRunId: number): Promise<Run[]> {
   const workflowId = workflow === PRODUCER ? LIVE_CANDIDATE_WORKFLOW_ID : PROMOTION_WORKFLOW_ID;
-  const result: Run[] = [];
+  const all: Run[] = [];
+  const seen = new Set<number>();
   let lastCreatedMs = Number.POSITIVE_INFINITY;
+  let expectedTotal: number | undefined;
   for (let page = 1; page <= 10; page += 1) {
     const data = await api.getJson(`repos/${REPOSITORY}/actions/workflows/${workflowId}/runs?event=workflow_dispatch&per_page=100&page=${page}`);
-    const runs = (data as { workflow_runs?: Run[] }).workflow_runs;
-    if (!Array.isArray(runs)) throw new Error("Refresh run history response is invalid.");
+    const response = data as { total_count?: unknown; workflow_runs?: Run[] };
+    const runs = response?.workflow_runs;
+    const total = response?.total_count;
+    if (!Number.isSafeInteger(total) || (total as number) < 0 || (total as number) > 1_000
+      || !Array.isArray(runs) || runs.length !== Math.min(100, (total as number) - all.length)
+      || (expectedTotal !== undefined && total !== expectedTotal)) {
+      throw new Error("Refresh run history count or pagination is incomplete.");
+    }
+    expectedTotal = total as number;
     for (const run of runs) {
-      if (run.id === currentRunId) continue;
+      if (!Number.isSafeInteger(run?.id) || run.id < 1 || seen.has(run.id)) {
+        throw new Error("Refresh run history contains a duplicate or invalid run ID.");
+      }
+      seen.add(run.id);
       const created = new Date(run.created_at);
       if (!Number.isFinite(created.getTime())) throw new Error("Refresh run creation time is invalid.");
       if (created.getTime() > lastCreatedMs) throw new Error("Refresh run history ordering is incomplete.");
       lastCreatedMs = created.getTime();
-      const activity = [run.created_at, run.run_started_at, run.updated_at].filter((value): value is string => typeof value === "string");
-      if (activity.some((value) => {
-        const instant = new Date(value);
-        if (!Number.isFinite(instant.getTime())) throw new Error("Refresh run activity time is invalid.");
-        const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(instant);
-        const field = (name: string) => parts.find((part) => part.type === name)?.value ?? "";
-        return `${field("year")}-${field("month")}-${field("day")}` >= serviceDate;
-      }) || run.status !== "completed") result.push(run);
+      all.push(run);
     }
-    if (runs.length < 100) return result;
+    if (all.length === expectedTotal) break;
   }
-  throw new Error("Refresh run history exceeded the bounded enumeration window.");
+  if (expectedTotal === undefined || all.length !== expectedTotal) {
+    throw new Error("Refresh run history exceeded the bounded enumeration window.");
+  }
+  return all.filter((run) => {
+    if (run.id === currentRunId) return false;
+    const activity = [run.created_at, run.run_started_at, run.updated_at].filter((value): value is string => typeof value === "string");
+    if (activity.some((value) => {
+      const instant = new Date(value);
+      if (!Number.isFinite(instant.getTime())) throw new Error("Refresh run activity time is invalid.");
+      const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(instant);
+      const field = (name: string) => parts.find((part) => part.type === name)?.value ?? "";
+      return `${field("year")}-${field("month")}-${field("day")}` >= serviceDate;
+    }) || run.status !== "completed") return true;
+    return false;
+  });
 }
 
 async function githubApi(token: string): Promise<Api> {
@@ -155,10 +174,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     await assertNoAutomaticCandidateConflict({ api, activation: config.activation, productionRef: config.productionRef,
       serviceDate: env.SERVICE_DATE ?? "", currentRunId: Number(env.GITHUB_RUN_ID) });
   } else {
+    if (env.REFRESH_TRIGGER !== "primary" && env.REFRESH_TRIGGER !== "recovery") {
+      throw new Error("Automatic refresh opportunity is invalid.");
+    }
     const remaining = await preflightAutomaticRefresh({ api, configuration: config,
       repository: env.GITHUB_REPOSITORY ?? "", workflowRef: env.GITHUB_WORKFLOW_REF ?? "", workflowSha: env.GITHUB_SHA ?? "",
       runId: Number(env.GITHUB_RUN_ID), runAttempt: Number(env.GITHUB_RUN_ATTEMPT), serviceDate: env.SERVICE_DATE ?? "",
-      trigger: env.REFRESH_TRIGGER === "recovery" ? "recovery" : "primary", now: new Date() });
-    await appendFile(env.GITHUB_OUTPUT, `remaining_requests=${remaining}\n`);
+      trigger: env.REFRESH_TRIGGER, now: new Date() });
+    await appendFile(env.GITHUB_OUTPUT, `remaining_requests=${remaining}\nopportunity=${env.REFRESH_TRIGGER}\n`);
   }
 }

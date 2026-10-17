@@ -1,9 +1,12 @@
 name: Advance verified LionLog publication checkpoint
 
 on:
-  workflow_run:
-    workflows: [Promote exact LionLog release to GitHub Pages]
-    types: [completed]
+  workflow_dispatch:
+    inputs:
+      expected_promotion_run_id:
+        description: Exact completed successful promotion run to checkpoint
+        required: true
+        type: string
 
 permissions: {}
 
@@ -14,14 +17,17 @@ concurrency:
 jobs:
   advance:
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'workflow_dispatch' &&
-      github.event.workflow_run.run_attempt == 1 &&
+      github.repository == 'CrunchyBrunch/lionlog' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.run_attempt == 1 &&
       vars.LIONLOG_REFRESH_ACTIVATION == 'ENABLE_AUTOMATIC_LIONLOG_REFRESH' &&
       vars.LIONLOG_PRODUCTION_REF != '' &&
       vars.LIONLOG_PRODUCTION_SHA != '' &&
       vars.LIONLOG_PUBLICATION_WRITER_ID != '' &&
-      github.event.workflow_run.head_sha == vars.LIONLOG_PRODUCTION_SHA
+      github.ref == vars.LIONLOG_PRODUCTION_REF &&
+      github.sha == vars.LIONLOG_PRODUCTION_SHA &&
+      github.workflow_ref == format('{0}/.github/workflows/advance-refresh-checkpoint.yml@{1}', github.repository, vars.LIONLOG_PRODUCTION_REF) &&
+      inputs.expected_promotion_run_id != ''
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -41,12 +47,13 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ID: ${{ inputs.expected_promotion_run_id }}
           RUN_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
           PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
         run: |
           set -euo pipefail
           mkdir -p work/refresh-checkpoint
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
           gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID" > work/refresh-checkpoint/run.json
           [[ "$PRODUCTION_REF" == refs/heads/* && "$PRODUCTION_REF" != refs/heads/main ]]
           jq -e --argjson id "$RUN_ID" --arg sha "$RUN_SHA" --arg branch "${PRODUCTION_REF#refs/heads/}" \
@@ -82,12 +89,12 @@ jobs:
       - name: Append authenticated checkpoint after terminal success
         shell: bash
         env:
-          GITHUB_REPOSITORY: ${{ github.repository }}
           LIONLOG_PUBLICATION_WRITER_TOKEN: ${{ secrets.LIONLOG_PUBLICATION_WRITER_TOKEN }}
           LIONLOG_PUBLICATION_WRITER_ID: ${{ vars.LIONLOG_PUBLICATION_WRITER_ID }}
+          LIONLOG_REFRESH_ACTIVATION: ${{ vars.LIONLOG_REFRESH_ACTIVATION }}
           LIONLOG_PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
           LIONLOG_PRODUCTION_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ID: ${{ inputs.expected_promotion_run_id }}
         run: |
           set -euo pipefail
           test -n "$LIONLOG_PUBLICATION_WRITER_TOKEN"
