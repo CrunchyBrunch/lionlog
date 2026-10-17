@@ -3,6 +3,12 @@ name: Promote exact LionLog release to GitHub Pages
 on:
   workflow_dispatch:
     inputs:
+      publication_mode:
+        description: Manual promotion, or explicitly enabled pinned automatic promotion
+        required: true
+        default: manual
+        type: choice
+        options: [manual, automatic]
       operation:
         description: Promote a fresh candidate or roll back to retained known-good bytes
         required: true
@@ -71,7 +77,14 @@ jobs:
   validate-and-stage:
     if: >-
       github.repository == 'CrunchyBrunch/lionlog' &&
-      github.ref == 'refs/heads/main' &&
+      ((inputs.publication_mode == 'manual' && github.ref == 'refs/heads/main') ||
+       (inputs.publication_mode == 'automatic' &&
+        inputs.operation == 'promote' &&
+        vars.LIONLOG_REFRESH_ACTIVATION == 'ENABLE_AUTOMATIC_LIONLOG_REFRESH' &&
+        vars.LIONLOG_PRODUCTION_REF == github.ref &&
+        vars.LIONLOG_PRODUCTION_SHA == github.sha &&
+        vars.LIONLOG_PUBLICATION_WRITER_ID != '' &&
+        inputs.expected_source_sha == vars.LIONLOG_PRODUCTION_SHA)) &&
       github.run_attempt == 1 &&
       inputs.expected_workflow_sha == github.sha &&
       inputs.confirmation == 'PROMOTE_EXACT_LIONLOG_RELEASE'
@@ -113,8 +126,19 @@ jobs:
           APPROVAL_EXPIRES_AT: ${{ inputs.approval_expires_at }}
           ROLLBACK_RECEIPT_ID: ${{ inputs.rollback_receipt_artifact_id }}
           ROLLBACK_RECEIPT_DIGEST: ${{ inputs.rollback_receipt_artifact_digest }}
+          PUBLICATION_MODE: ${{ inputs.publication_mode }}
+          PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
+          PRODUCTION_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
         run: |
           set -euo pipefail
+          if [[ "$PUBLICATION_MODE" == automatic ]]; then
+            [[ "$PRODUCTION_REF" =~ ^refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]
+            [[ "$PRODUCTION_REF" != refs/heads/main ]]
+            [[ "$PRODUCTION_SHA" =~ ^[a-f0-9]{40}$ ]]
+            test "$GITHUB_WORKFLOW_REF" = "${{ github.repository }}/.github/workflows/deploy-github-pages.yml@$PRODUCTION_REF"
+          else
+            test "$GITHUB_WORKFLOW_REF" = "${{ github.repository }}/.github/workflows/deploy-github-pages.yml@refs/heads/main"
+          fi
           [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$CANDIDATE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$CANDIDATE_ARTIFACT_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
@@ -144,11 +168,19 @@ jobs:
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
           CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
           EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          PUBLICATION_MODE: ${{ inputs.publication_mode }}
+          PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
         run: |
           set -euo pipefail
           mkdir -p work/supported-pages/metadata
           gh api "repos/${{ github.repository }}" > work/supported-pages/metadata/repository.json
-          gh api "repos/${{ github.repository }}/commits/main" > work/supported-pages/metadata/main.json
+          if [[ "$PUBLICATION_MODE" == automatic ]]; then
+            gh api "repos/${{ github.repository }}/git/ref/${PRODUCTION_REF#refs/}" > work/supported-pages/metadata/production-ref.json
+            jq -e --arg ref "$PRODUCTION_REF" 'select(.ref == $ref and .object.type == "commit") | {sha:.object.sha}' \
+              work/supported-pages/metadata/production-ref.json > work/supported-pages/metadata/main.json
+          else
+            gh api "repos/${{ github.repository }}/commits/main" > work/supported-pages/metadata/main.json
+          fi
           gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" > work/supported-pages/metadata/workflow-run.json
           gh api "repos/${{ github.repository }}/actions/runs/$CANDIDATE_RUN_ID" > work/supported-pages/metadata/candidate-run.json
           gh api "repos/${{ github.repository }}/actions/artifacts/$CANDIDATE_ARTIFACT_ID" > work/supported-pages/metadata/candidate-artifact.json
@@ -194,9 +226,15 @@ jobs:
         shell: bash
         env:
           OPERATION: ${{ inputs.operation }}
+          PUBLICATION_MODE: ${{ inputs.publication_mode }}
+          PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
+          PRODUCTION_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
         run: |
           set -euo pipefail
           EXTRA_ARGS=()
+          if [[ "$PUBLICATION_MODE" == automatic ]]; then
+            EXTRA_ARGS+=("--production-ref=$PRODUCTION_REF" "--production-sha=$PRODUCTION_SHA")
+          fi
           if [[ "$OPERATION" == rollback ]]; then
             EXTRA_ARGS+=("--rollback-receipt=work/supported-pages/rollback-receipt/pages-receipt.json")
             EXTRA_ARGS+=("--rollback-receipt-artifact-id=${{ inputs.rollback_receipt_artifact_id }}")
@@ -228,6 +266,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           STAGED_ID: ${{ steps.stage.outputs.artifact_id }}
           STAGED_NAME: ${{ steps.names.outputs.staged }}
+          PUBLICATION_MODE: ${{ inputs.publication_mode }}
+          PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
         run: |
           set -euo pipefail
           for attempt in 1 2 3 4 5; do
@@ -240,9 +280,11 @@ jobs:
           STAGED_DIGEST="sha256:$(sha256sum work/supported-pages/staged.zip | cut -d' ' -f1)"
           test "$STAGED_DIGEST" = "$(jq -er .digest work/supported-pages/staged-metadata.json)"
           node --experimental-strip-types scripts/artifact-zip.ts --zip=work/supported-pages/staged.zip --output=work/supported-pages/staged-wrapper --expected=artifact.tar
+          EXTRA_ARGS=()
+          if [[ "$PUBLICATION_MODE" == automatic ]]; then EXTRA_ARGS+=("--production-ref=$PRODUCTION_REF"); fi
           node --experimental-strip-types scripts/supported-pages-release.ts stage --validated=work/supported-pages/validated.json \
             --staged-metadata=work/supported-pages/staged-metadata.json --staged-name="$STAGED_NAME" \
-            --staged-tar=work/supported-pages/staged-wrapper/artifact.tar > work/supported-pages/preapproval.json
+            --staged-tar=work/supported-pages/staged-wrapper/artifact.tar "${EXTRA_ARGS[@]}" > work/supported-pages/preapproval.json
           echo "digest=$STAGED_DIGEST" >> "$GITHUB_OUTPUT"
           echo "expires_at=$(jq -er .expires_at work/supported-pages/staged-metadata.json)" >> "$GITHUB_OUTPUT"
       - id: summary-upload
@@ -323,12 +365,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
           CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ inputs.candidate_artifact_digest }}
+          PUBLICATION_MODE: ${{ inputs.publication_mode }}
+          PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
+          PRODUCTION_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
+          CHECKPOINT_WRITER_ID: ${{ vars.LIONLOG_PUBLICATION_WRITER_ID }}
         run: |
           set -euo pipefail
           SUMMARY=work/supported-pages-final/summary/preapproval.json
           CI_RUN_ID="$(jq -er .ci.runId "$SUMMARY")"
           gh api "repos/${{ github.repository }}" > work/supported-pages-final/repository.json
-          gh api "repos/${{ github.repository }}/commits/main" > work/supported-pages-final/main.json
+          if [[ "$PUBLICATION_MODE" == automatic ]]; then
+            gh api "repos/${{ github.repository }}/git/ref/${PRODUCTION_REF#refs/}" > work/supported-pages-final/production-ref.json
+            jq -e --arg ref "$PRODUCTION_REF" 'select(.ref == $ref and .object.type == "commit") | {sha:.object.sha}' \
+              work/supported-pages-final/production-ref.json > work/supported-pages-final/main.json
+          else
+            gh api "repos/${{ github.repository }}/commits/main" > work/supported-pages-final/main.json
+          fi
           gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" > work/supported-pages-final/workflow-run.json
           gh api "repos/${{ github.repository }}/actions/runs/$CANDIDATE_RUN_ID" > work/supported-pages-final/candidate-run.json
           gh api "repos/${{ github.repository }}/actions/artifacts/$CANDIDATE_ARTIFACT_ID" > work/supported-pages-final/candidate-artifact.json
@@ -343,9 +396,20 @@ jobs:
             echo null > work/supported-pages-final/rollback-receipt-artifact.json
             echo null > work/supported-pages-final/rollback-receipt-run.json
           fi
+          EXTRA_ARGS=()
+          if [[ "$PUBLICATION_MODE" == automatic ]]; then
+            EXTRA_ARGS+=("--production-ref=$PRODUCTION_REF" "--checkpoint-writer-id=$CHECKPOINT_WRITER_ID")
+            gh api "repos/${{ github.repository }}/actions/artifacts/$CANDIDATE_ARTIFACT_ID/zip" > work/supported-pages-final/candidate.zip
+            node --experimental-strip-types scripts/artifact-digest.ts --expected="$CANDIDATE_ARTIFACT_DIGEST" --file=work/supported-pages-final/candidate.zip > /dev/null
+            node --experimental-strip-types scripts/artifact-zip.ts --zip=work/supported-pages-final/candidate.zip \
+              --output=work/supported-pages-final/candidate --expected=release-manifest.json,site.tar
+            node --experimental-strip-types scripts/artifact-digest.ts \
+              --expected="$(jq -er .candidate.manifestSha256 "$SUMMARY")" \
+              --file=work/supported-pages-final/candidate/release-manifest.json > /dev/null
+          fi
           node --experimental-strip-types scripts/collect-pages-attempt-history.ts \
             --output=work/supported-pages-final/prior-attempts.json \
-            --incidents=infrastructure/publication/pages-incident-history.json
+            --incidents=infrastructure/publication/pages-incident-history.json "${EXTRA_ARGS[@]}"
           if [[ "$(jq '[.incidents[] | select(.outcome == "resolved-published-browser-unverified")] | length' infrastructure/publication/pages-incident-history.json)" == 1 ]]; then
             node --experimental-strip-types scripts/published-final-predecessor.ts \
               --incidents=infrastructure/publication/pages-incident-history.json \
@@ -370,8 +434,12 @@ jobs:
             --slurpfile publishedPredecessorCheck work/supported-pages-final/published-predecessor-check.json \
             '{repository:$repository[0],main:$main[0],workflowRun:$workflowRun[0],candidateRun:$candidateRun[0],candidateArtifact:$candidateArtifact[0],stagedArtifacts:$stagedArtifacts[0],ciRun:$ciRun[0],priorAttempts:$priorAttempts[0],rollbackReceiptArtifact:$rollbackReceiptArtifact[0],rollbackReceiptRun:$rollbackReceiptRun[0],publicPredecessor:$publicPredecessor[0],publishedPredecessorCheck:$publishedPredecessorCheck[0]}' \
             > work/supported-pages-final/state.json
+          if [[ "$PUBLICATION_MODE" == automatic ]]; then
+            EXTRA_ARGS+=("--production-sha=$PRODUCTION_SHA")
+          fi
           node --experimental-strip-types scripts/supported-pages-control.ts verify --summary="$SUMMARY" \
             --state=work/supported-pages-final/state.json --incidents=infrastructure/publication/pages-incident-history.json \
+            "${EXTRA_ARGS[@]}" \
             > work/supported-pages-final/verified.json
       - id: submission
         name: Record official submission boundary

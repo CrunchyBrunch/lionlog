@@ -116,10 +116,13 @@ export async function verifySupportedCandidate(options: {
   expectedPredecessorReleaseId: string;
   publicPredecessor: PublicReleaseObservation;
   now: Date;
+  productionRef?: string;
+  productionSha?: string;
 }): Promise<ValidatedRelease> {
   const { metadata } = options;
   assertSha(options.workflowSha, "Workflow SHA");
   assertSha(options.expectedSourceSha, "Source SHA");
+  const branch = approvedBranch(options.productionRef, options.productionSha, options.workflowSha, options.expectedSourceSha);
   assertHash(options.candidateManifestSha256, "Manifest digest");
   assertHash(options.expectedReleaseId, "Release ID");
   assertArtifactDigest(options.candidateArtifactDigest, "Candidate artifact digest");
@@ -133,7 +136,7 @@ export async function verifySupportedCandidate(options: {
   const predecessorReleaseId = validateExpectedPredecessor(options.expectedPredecessorReleaseId);
   assertExpectedPredecessor(predecessorReleaseId, options.publicPredecessor);
 
-  validateTrustedMetadata(metadata, options);
+  validateTrustedMetadata(metadata, options, branch);
   const manifestPath = path.join(options.bundleDirectory, "release-manifest.json");
   const [manifestInfo, manifestRealPath, bundleRealPath, manifestBytes] = await Promise.all([
     lstat(manifestPath),
@@ -313,7 +316,9 @@ export async function createPreapprovalSummary(options: {
   stagedArtifactName: string;
   stagedTarPath: string;
   now: Date;
+  productionRef?: string;
 }): Promise<Record<string, unknown>> {
+  const branch = options.productionRef ? branchFromProductionRef(options.productionRef) : "main";
   const expectedName = `lionlog-pages-${options.validated.workflow.runId}-${options.validated.workflow.runAttempt}`;
   if (options.stagedArtifactName !== expectedName || options.stagedArtifact.name !== expectedName) throw new Error("Staged Pages artifact name is not unique to this run attempt.");
   if (
@@ -323,7 +328,7 @@ export async function createPreapprovalSummary(options: {
     || options.stagedArtifact.expired
     || options.stagedArtifact.workflow_run.id !== options.validated.workflow.runId
     || options.stagedArtifact.workflow_run.head_sha !== options.validated.workflow.sha
-    || options.stagedArtifact.workflow_run.head_branch !== "main"
+    || options.stagedArtifact.workflow_run.head_branch !== branch
     || options.stagedArtifact.workflow_run.head_repository_id !== LIONLOG_REPOSITORY_ID
   ) throw new Error("Staged Pages artifact provenance mismatch.");
   if (!Number.isFinite(options.now.getTime()) || Date.parse(options.stagedArtifact.expires_at) < options.now.getTime() + PREAPPROVAL_HEADROOM_MS) {
@@ -345,19 +350,19 @@ export async function createPreapprovalSummary(options: {
   };
 }
 
-function validateTrustedMetadata(metadata: Metadata, options: Parameters<typeof verifySupportedCandidate>[0]): void {
+function validateTrustedMetadata(metadata: Metadata, options: Parameters<typeof verifySupportedCandidate>[0], branch: string): void {
   if (metadata.repository.id !== LIONLOG_REPOSITORY_ID || metadata.repository.full_name !== LIONLOG_REPOSITORY) throw new Error("Repository identity mismatch.");
-  if (metadata.main.sha !== options.workflowSha) throw new Error("Authoritative main differs from the workflow SHA.");
+  if (metadata.main.sha !== options.workflowSha) throw new Error("Authoritative production ref differs from the workflow SHA.");
   const workflow = metadata.workflowRun;
   if (
     workflow.id !== options.workflowRunId || workflow.workflow_id !== PROMOTION_WORKFLOW_ID || workflow.path !== PROMOTION_WORKFLOW
-    || workflow.event !== "workflow_dispatch" || workflow.head_sha !== options.workflowSha || workflow.head_branch !== "main"
+    || workflow.event !== "workflow_dispatch" || workflow.head_sha !== options.workflowSha || workflow.head_branch !== branch
     || workflow.run_attempt !== 1 || workflow.status !== "in_progress" || workflow.conclusion !== null
   ) throw new Error("Production workflow identity mismatch.");
   const run = metadata.candidateRun;
   if (
     run.id !== options.candidateRunId || run.workflow_id !== LIVE_CANDIDATE_WORKFLOW_ID || run.path !== LIVE_CANDIDATE_WORKFLOW
-    || run.event !== "workflow_dispatch" || run.head_sha !== options.expectedSourceSha || run.head_branch !== "main"
+    || run.event !== "workflow_dispatch" || run.head_sha !== options.expectedSourceSha || run.head_branch !== branch
     || run.run_attempt !== 1 || run.status !== "completed" || run.conclusion !== "success"
   ) throw new Error("Candidate producer provenance mismatch.");
   const artifact = metadata.candidateArtifact;
@@ -367,7 +372,7 @@ function validateTrustedMetadata(metadata: Metadata, options: Parameters<typeof 
     || !artifact.name.startsWith("lionlog-live-") || artifact.size_in_bytes <= 0 || artifact.size_in_bytes > MAX_ARTIFACT_BYTES
     || artifact.expired || !Number.isFinite(expiresAt) || expiresAt <= options.now.getTime()
     || artifact.workflow_run.id !== options.candidateRunId || artifact.workflow_run.head_sha !== options.expectedSourceSha
-    || artifact.workflow_run.head_branch !== "main" || artifact.workflow_run.head_repository_id !== LIONLOG_REPOSITORY_ID
+    || artifact.workflow_run.head_branch !== branch || artifact.workflow_run.head_repository_id !== LIONLOG_REPOSITORY_ID
   ) throw new Error("Candidate artifact provenance mismatch.");
   const ci = metadata.ciRun;
   if (
@@ -435,6 +440,19 @@ function readOctal(buffer: Buffer, offset: number, length: number): number {
 function assertSha(value: unknown, label: string): asserts value is string {
   if (typeof value !== "string" || !GIT_SHA.test(value)) throw new Error(`${label} is invalid.`);
 }
+export function branchFromProductionRef(ref: string): string {
+  if (!/^refs\/heads\/[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(ref) || ref === "refs/heads/main") {
+    throw new Error("Approved production ref is invalid.");
+  }
+  return ref.slice("refs/heads/".length);
+}
+function approvedBranch(ref: string | undefined, pin: string | undefined, workflowSha: string, sourceSha: string): string {
+  if (ref === undefined && pin === undefined) return "main";
+  if (!ref || !pin || !GIT_SHA.test(pin) || workflowSha !== pin || sourceSha !== pin) {
+    throw new Error("Automatic workflow/source pin differs from the approved production revision.");
+  }
+  return branchFromProductionRef(ref);
+}
 function assertHash(value: unknown, label: string): asserts value is string {
   if (typeof value !== "string" || !SHA256.test(value)) throw new Error(`${label} is invalid.`);
 }
@@ -486,6 +504,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
       rollbackReceiptRun: args.has("--rollback-receipt-run-metadata")
         ? JSON.parse(await readFile(required("--rollback-receipt-run-metadata"), "utf8")) : undefined,
       now: new Date(args.get("--now") ?? Date.now()),
+      productionRef: args.get("--production-ref"),
+      productionSha: args.get("--production-sha"),
       approvalExpiresAt: required("--approval-expires-at"),
       expectedPredecessorReleaseId: required("--predecessor-release-id"),
       publicPredecessor: JSON.parse(await readFile(required("--public-predecessor"), "utf8")),
@@ -498,6 +518,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
       stagedArtifactName: required("--staged-name"),
       stagedTarPath: required("--staged-tar"),
       now: new Date(args.get("--now") ?? Date.now()),
+      productionRef: args.get("--production-ref"),
     });
     process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
   } else {

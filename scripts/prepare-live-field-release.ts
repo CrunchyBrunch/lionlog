@@ -18,6 +18,8 @@ import {
 import { PsuHttpRetriever } from "../infrastructure/psu/retriever.ts";
 import { FilePsuSnapshotStore } from "../infrastructure/psu/snapshot-store.ts";
 import { assertTrustedReleaseIngestionEnvironment } from "../infrastructure/psu/trusted-release-guard.ts";
+import { PsuRetrievalError } from "../infrastructure/psu/errors.ts";
+import { validateRefreshAccounting } from "./refresh-policy.ts";
 
 assertTrustedReleaseIngestionEnvironment();
 const argumentsByName = parseArguments(process.argv.slice(2));
@@ -26,6 +28,12 @@ sourceDateFromIso(serviceDate);
 const cacheDirectory = path.resolve(argumentsByName.get("cache-dir") ?? "work/psu-field-release-cache");
 const reportPath = path.resolve(argumentsByName.get("report") ?? "work/psu-field-release/report.json");
 const startedAt = new Date();
+const automatic = process.env.LIONLOG_REFRESH_MODE === "automatic";
+if (automatic && process.env.LIONLOG_REFRESH_OPPORTUNITY !== "primary"
+  && process.env.LIONLOG_REFRESH_OPPORTUNITY !== "recovery") {
+  throw new Error("Verified automatic refresh opportunity is missing.");
+}
+const maximumRequests = automatic ? Number(process.env.LIONLOG_REMAINING_REQUESTS) : PSU_RELEASE_MAXIMUM_REQUESTS;
 const retriever = new PsuHttpRetriever({
   allowNetwork: true,
   minimumIntervalMs: PSU_RELEASE_MINIMUM_INTERVAL_MS,
@@ -33,10 +41,12 @@ const retriever = new PsuHttpRetriever({
   timeoutMs: 10_000,
   maximumAttempts: PSU_RELEASE_MAXIMUM_ATTEMPTS_PER_OPERATION,
   baseBackoffMs: 1_000,
-  maximumRequests: PSU_RELEASE_MAXIMUM_REQUESTS,
+  maximumRequests,
   maximumElapsedMs: PSU_RELEASE_REQUEST_BUDGET.ingestionWindowMs,
 });
 const store = new FilePsuSnapshotStore(cacheDirectory);
+let pipeline: PsuIngestionPipeline | undefined;
+try {
 const sourceDate = sourceDateFromIso(serviceDate);
 const mealsByHall = new Map();
 for (const hallId of PSU_RELEASE_HALL_IDS) {
@@ -49,7 +59,7 @@ for (const hallId of PSU_RELEASE_HALL_IDS) {
 }
 
 const queries = buildReleaseQueries(serviceDate, mealsByHall);
-const pipeline = new PsuIngestionPipeline(retriever, store, {
+pipeline = new PsuIngestionPipeline(retriever, store, {
   policy: {
     menuFreshForMs: 18 * 60 * 60 * 1_000,
     lastKnownGoodForMs: 48 * 60 * 60 * 1_000,
@@ -70,7 +80,7 @@ writeAggregateProgress("planned", queries.length);
 try {
   for (const query of queries) {
     const result = await pipeline.run(query);
-    if (result.state !== "live") throw new Error(`Release query failed closed: ${result.error.message}`);
+    if (result.state !== "live") throw result.error;
     itemCount += result.report.itemCount;
     sourceObservationCount += result.report.sourceObservationCount;
     invalidNameOmissions += result.report.omissions["invalid-name"];
@@ -118,17 +128,44 @@ const report = validatePsuReleaseReport({
 });
 await writeJsonAtomically(reportPath, report);
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+await writeRefreshAccounting("candidate-ready");
+} catch (error) {
+  await writeRefreshAccounting(error instanceof PsuRetrievalError && error.retryable
+    ? "transient-prepublication-failure" : "structural-failure");
+  throw error;
+}
+
+async function writeRefreshAccounting(outcome: "candidate-ready" | "transient-prepublication-failure" | "structural-failure"): Promise<void> {
+  if (!automatic) return;
+  const accountingPath = process.env.LIONLOG_REFRESH_ACCOUNTING_PATH;
+  if (!accountingPath) throw new Error("Automatic refresh accounting path is missing.");
+  const record = validateRefreshAccounting({
+    accountingVersion: "lionlog.refresh-accounting.v1",
+    repository: process.env.GITHUB_REPOSITORY,
+    runId: Number(process.env.GITHUB_RUN_ID),
+    runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+    workflowSha: process.env.GITHUB_SHA,
+    workflowRef: process.env.GITHUB_REF,
+    serviceDate,
+    startedAt: startedAt.toISOString(),
+    completedAt: new Date().toISOString(),
+    upstreamAttempts: retriever.requestCount,
+    outcome,
+    opportunity: process.env.LIONLOG_REFRESH_OPPORTUNITY,
+  });
+  await writeJsonAtomically(path.resolve(accountingPath), record);
+}
 
 function writeAggregateProgress(phase: "planned" | "query-complete" | "failed", plannedQueries: number): void {
   process.stdout.write(`${JSON.stringify({
     event: "lionlog.psu-field-release-progress.v1",
     phase,
     plannedQueries,
-    completedQueries: pipeline.telemetry.completedQueries,
-    uniqueNutritionObservations: pipeline.telemetry.uniqueNutritionObservations,
-    nutritionCacheHits: pipeline.telemetry.nutritionCacheHits,
+    completedQueries: pipeline?.telemetry.completedQueries ?? 0,
+    uniqueNutritionObservations: pipeline?.telemetry.uniqueNutritionObservations ?? 0,
+    nutritionCacheHits: pipeline?.telemetry.nutritionCacheHits ?? 0,
     requestBudget: {
-      maximumUpstreamAttempts: PSU_RELEASE_MAXIMUM_REQUESTS,
+      maximumUpstreamAttempts: maximumRequests,
       maximumUniqueNutritionObservations: PSU_RELEASE_MAXIMUM_UNIQUE_NUTRITION_OBSERVATIONS,
       maximumAttemptsPerOperation: PSU_RELEASE_REQUEST_BUDGET.maximumAttemptsPerOperation,
     },

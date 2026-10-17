@@ -88,6 +88,12 @@ test("staged Pages artifact must have unique run identity and exact candidate in
   const artifact = stagedArtifact();
   const result = await createPreapprovalSummary({ validated, stagedArtifact: artifact, stagedArtifactName: artifact.name, stagedTarPath: tarPath, now });
   assert.equal(result.summaryVersion, "lionlog.pages-preapproval.v1");
+  await assert.rejects(createPreapprovalSummary({ validated, stagedArtifact: artifact, stagedArtifactName: artifact.name,
+    stagedTarPath: tarPath, now, productionRef: "refs/heads/lionlog-production" }), /provenance mismatch/);
+  assert.equal((await createPreapprovalSummary({ validated,
+    stagedArtifact: { ...artifact, workflow_run: { ...artifact.workflow_run, head_branch: "lionlog-production" } },
+    stagedArtifactName: artifact.name, stagedTarPath: tarPath, now,
+    productionRef: "refs/heads/lionlog-production" })).summaryVersion, "lionlog.pages-preapproval.v1");
   await assert.rejects(createPreapprovalSummary({
     validated,
     stagedArtifact: { ...artifact, name: "github-pages" },
@@ -135,6 +141,35 @@ test("candidate verification fails closed before touching untrusted bytes when G
     publicPredecessor: { state: "absent", releaseId: null },
     now,
   }), /Repository identity mismatch/);
+});
+
+test("pinned automatic candidate accepts its exact production ref independent of feature main and rejects altered handoff", async () => {
+  const pin = workflowSha;
+  const branch = "lionlog-production";
+  const metadata = {
+    repository: { id: 1_346_360_244, full_name: "CrunchyBrunch/lionlog" },
+    main: { sha: pin }, // resolved production ref, even when feature main has moved
+    workflowRun: { ...currentWorkflowRun(), head_branch: branch },
+    candidateRun: { ...candidateRun(), head_sha: pin, head_branch: branch },
+    candidateArtifact: { ...candidateArtifact(), workflow_run: { ...candidateArtifact().workflow_run,
+      head_sha: pin, head_branch: branch } },
+    ciRun: { ...ciRun(), head_sha: pin },
+    ciJobs: [{ name: "verify", head_sha: pin, status: "completed", conclusion: "success" }],
+  };
+  const options = { operation: "promote" as const, bundleDirectory: "missing", extractionDirectory: "missing-output",
+    metadata, workflowSha: pin, workflowRunId: 100, candidateRunId: 200, candidateArtifactId: 300,
+    candidateArtifactDigest: digest, candidateManifestSha256: hash, expectedReleaseId: hash,
+    expectedSourceSha: pin, expectedServiceDate: "2026-09-17", approvalExpiresAt: "2026-09-17T13:00:00.000Z",
+    expectedPredecessorReleaseId: FIRST_PUBLICATION, publicPredecessor: { state: "absent" as const, releaseId: null }, now,
+    productionRef: `refs/heads/${branch}`, productionSha: pin };
+  await assert.rejects(verifySupportedCandidate(options), /ENOENT/);
+  await assert.rejects(verifySupportedCandidate({ ...options, productionSha: "f".repeat(40) }), /pin/);
+  await assert.rejects(verifySupportedCandidate({ ...options, metadata: { ...metadata,
+    workflowRun: { ...metadata.workflowRun, head_branch: "main" } } }), /workflow identity/);
+  await assert.rejects(verifySupportedCandidate({ ...options, metadata: { ...metadata,
+    candidateRun: { ...metadata.candidateRun, conclusion: "failure" } } }), /producer provenance/);
+  await assert.rejects(verifySupportedCandidate({ ...options, metadata: { ...metadata,
+    candidateArtifact: { ...metadata.candidateArtifact, id: 301 } } }), /artifact provenance/);
 });
 
 test("candidate verification enforces canonical approval expiry with preapproval headroom", async () => {
@@ -253,6 +288,18 @@ test("protected final check rejects main drift, artifact drift, expiration, and 
     }] },
     now,
   }));
+});
+
+test("automatic final gate cannot submit without the pinned source and checkpoint public proof", () => {
+  const summary = summaryFixture();
+  const state = finalState();
+  const incidents = emptyIncidentHistory();
+  assert.throws(() => verifyFinalState({ summary, state, incidents, now,
+    productionRef: "refs/heads/lionlog-production", productionSha: workflowSha }), /checkpoint public proof/);
+  assert.throws(() => verifyFinalState({ summary, state, incidents, now,
+    productionRef: "refs/heads/main", productionSha: workflowSha }), /production ref/);
+  assert.throws(() => verifyFinalState({ summary, state, incidents, now,
+    productionRef: "refs/heads/lionlog-production", productionSha: "f".repeat(40) }), /checkpoint public proof|pin/);
 });
 
 test("published browser-unverified attempt needs exact proof, fresh full-inventory phase and leaves later failures blocking", async () => {

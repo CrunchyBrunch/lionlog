@@ -22,8 +22,24 @@ export function assertTrustedReleaseIngestionEnvironment(
   if (environment.GITHUB_REPOSITORY !== REPOSITORY) {
     throw new Error("Trusted release ingestion is restricted to the LionLog repository.");
   }
+  const automatic = environment.LIONLOG_REFRESH_MODE === "automatic";
+  if (environment.LIONLOG_REFRESH_MODE && environment.LIONLOG_REFRESH_MODE !== "manual" && !automatic) {
+    throw new Error("Unknown refresh mode.");
+  }
   const ref = environment.GITHUB_REF ?? "";
-  if (ref !== ALLOWED_REF) {
+  if (automatic) {
+    if (environment.LIONLOG_REFRESH_ACTIVATION !== "ENABLE_AUTOMATIC_LIONLOG_REFRESH"
+      || environment.LIONLOG_REFRESH_SOURCE_AUTHORIZATION !== "I_APPROVE_AUTOMATIC_PSU_REQUESTS"
+      || !/^refs\/heads\/[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(environment.LIONLOG_PRODUCTION_REF ?? "")
+      || environment.LIONLOG_PRODUCTION_REF === ALLOWED_REF
+      || !/^[a-f0-9]{40}$/.test(environment.LIONLOG_PRODUCTION_SHA ?? "")
+      || ref !== environment.LIONLOG_PRODUCTION_REF
+      || environment.GITHUB_SHA !== environment.LIONLOG_PRODUCTION_SHA
+      || !/^(?:[1-9][0-9]{0,3})$/.test(environment.LIONLOG_REMAINING_REQUESTS ?? "")
+      || Number(environment.LIONLOG_REMAINING_REQUESTS) > 1_680) {
+      throw new Error("Automatic refresh lacks exact activation, production pin, or remaining request budget.");
+    }
+  } else if (ref !== ALLOWED_REF) {
     throw new Error("Trusted release ingestion is restricted to main.");
   }
   const expectedWorkflowRef = `${REPOSITORY}/${WORKFLOW_PATH}@${ref}`;
