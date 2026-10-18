@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -24,7 +25,9 @@ import { validatePublishedIncidentRecord, type PublishedIncident } from "./publi
 import { matchesPublishedJobLogEvidence } from "./published-incident-job-logs.ts";
 import type { PublishedResolution } from "./published-incident-collection.ts";
 import type { PublishedPredecessorCheck } from "./published-final-predecessor.ts";
-import { assertVerifiedPublicationCheckpoint, assertCheckpointPublicProof, type CheckpointPublicProof, type VerifiedPublicationCheckpoint } from "./publication-checkpoint.ts";
+import { assertVerifiedPublicationCheckpoint, assertCheckpointPublicProof, loadPublicationCheckpoint, observeCheckpointPublicProof, type CheckpointPublicProof, type VerifiedPublicationCheckpoint } from "./publication-checkpoint.ts";
+import { branchFromProductionRef } from "./supported-pages-release.ts";
+import { parseArtifactZip } from "./artifact-zip.ts";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const GIT_SHA = /^[a-f0-9]{40}$/;
@@ -76,7 +79,7 @@ export interface FinalState {
     id: number; workflow_id: number; path: string; event: string; head_sha: string;
     head_branch: string; run_attempt: number; status: string; conclusion: null;
   };
-  candidateRun: { id: number; head_sha: string; status: string; conclusion: string; run_attempt: number };
+  candidateRun: { id: number; head_sha: string; head_branch?: string; status: string; conclusion: string; run_attempt: number };
   candidateArtifact: { id: number; digest: string; expired: boolean; expires_at: string };
   stagedArtifacts: Array<{ id: number; name: string; digest: string; expired: boolean; expires_at: string }>;
   ciRun: { id: number; head_sha: string; status: string; conclusion: string; run_attempt: number };
@@ -162,22 +165,34 @@ export function verifyFinalState(options: {
   now: Date;
   checkpoint?: VerifiedPublicationCheckpoint;
   checkpointPublicProof?: CheckpointPublicProof;
+  productionRef?: string;
+  productionSha?: string;
 }): PreapprovalSummary {
+  const branch = options.productionRef ? branchFromProductionRef(options.productionRef) : "main";
+  if (options.productionRef && (!options.productionSha || !GIT_SHA.test(options.productionSha)
+    || !options.checkpoint || !options.checkpointPublicProof)) {
+    throw new Error("Automatic promotion requires an exact production pin and verified checkpoint public proof.");
+  }
   if (options.checkpoint) assertVerifiedPublicationCheckpoint(options.checkpoint);
   const summary = validatePreapprovalSummary(options.summary);
   const { state } = options;
   if (!Number.isFinite(options.now.getTime())) throw new Error("Final verification time is invalid.");
   if (state.repository.id !== LIONLOG_REPOSITORY_ID || state.repository.full_name !== LIONLOG_REPOSITORY) throw new Error("Repository identity drifted.");
-  if (state.main.sha !== summary.workflow.sha) throw new Error("Authoritative main drifted after staging.");
+  if (options.productionRef && (summary.workflow.sha !== options.productionSha || summary.candidate.sourceSha !== options.productionSha)) {
+    throw new Error("Automatic workflow or candidate source differs from the approved pin.");
+  }
+  if (state.main.sha !== summary.workflow.sha) throw new Error(options.productionRef
+    ? "Authoritative production ref drifted after staging." : "Authoritative main drifted after staging.");
   const run = state.workflowRun;
   if (
     run.id !== summary.workflow.runId || run.workflow_id !== PROMOTION_WORKFLOW_ID || run.path !== WORKFLOW_PATH
-    || run.event !== "workflow_dispatch" || run.head_sha !== summary.workflow.sha || run.head_branch !== "main"
+    || run.event !== "workflow_dispatch" || run.head_sha !== summary.workflow.sha || run.head_branch !== branch
     || run.run_attempt !== 1 || run.status !== "in_progress" || run.conclusion !== null
   ) throw new Error("Promotion workflow identity drifted.");
   if (
     state.candidateRun.id !== summary.candidate.runId || state.candidateRun.head_sha !== summary.candidate.sourceSha
     || state.candidateRun.run_attempt !== 1 || state.candidateRun.status !== "completed" || state.candidateRun.conclusion !== "success"
+    || (options.productionRef && state.candidateRun.head_branch !== branch)
   ) throw new Error("Candidate producer state drifted.");
   if (
     state.candidateArtifact.id !== summary.candidate.artifactId || state.candidateArtifact.digest !== summary.candidate.artifactDigest
@@ -202,6 +217,9 @@ export function verifyFinalState(options: {
     throw new Error("Candidate freshness fell below the promotion floor while awaiting approval.");
   }
   assertExpectedPredecessor(summary.authorization.predecessorReleaseId, state.publicPredecessor);
+  if (state.publicPredecessor.state === "present" && state.publicPredecessor.releaseId === summary.release.id) {
+    throw new Error("The candidate release is already public; duplicate submission is forbidden.");
+  }
   if (options.checkpoint && (
     state.publicPredecessor.state !== "present"
     || state.publicPredecessor.releaseId !== options.checkpoint.publication.releaseId
@@ -249,10 +267,14 @@ export function verifyFinalState(options: {
     const priorKey = `${prior.runId}/${prior.runAttempt}`;
     if (priorKeys.has(priorKey)) throw new Error("Earlier Pages attempt history contains duplicate run/attempt evidence.");
     priorKeys.add(priorKey);
+    const priorCandidate = (prior.receipt?.content as { candidate?: { artifactId?: unknown } } | undefined)?.candidate;
+    if (priorCandidate?.artifactId === summary.candidate.artifactId) {
+      throw new Error("The exact candidate artifact was already submitted or attempted.");
+    }
     if (
       prior.runId === summary.workflow.runId || !positive(prior.runId) || prior.workflowId !== PROMOTION_WORKFLOW_ID
       || prior.workflowPath !== WORKFLOW_PATH || !GIT_SHA.test(prior.workflowSha) || prior.event !== "workflow_dispatch"
-      || prior.headBranch !== "main" || !positive(prior.runAttempt) || prior.status !== "completed"
+      || (prior.headBranch !== "main" && prior.headBranch !== branch) || !positive(prior.runAttempt) || prior.status !== "completed"
       || !terminalConclusion(prior.conclusion) || prior.jobsComplete !== true
       || !isLegacyEvidenceContainer(prior.legacyEvidence)
       || (prior.incidentEvidence !== null && !isIncidentCollectionEvidence(prior.incidentEvidence))
@@ -606,6 +628,47 @@ function args(): Map<string, string> {
   }));
 }
 
+async function checkpointManifestBytes(checkpoint: VerifiedPublicationCheckpoint, token: string): Promise<Buffer> {
+  const artifactId = checkpoint.publication.candidateArtifactId;
+  const endpoint = `https://api.github.com/repos/${LIONLOG_REPOSITORY}/actions/artifacts/${artifactId}`;
+  const headers = { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" };
+  const metadataResponse = await fetch(endpoint, { headers, redirect: "error", signal: AbortSignal.timeout(20_000) });
+  if (!metadataResponse.ok) throw new Error("Checkpoint predecessor artifact metadata is unavailable.");
+  const metadata = await metadataResponse.json() as { id?: number; digest?: string; expired?: boolean;
+    workflow_run?: { id?: number; head_sha?: string } };
+  if (metadata.id !== artifactId || metadata.digest !== checkpoint.publication.candidateArtifactDigest
+    || metadata.expired !== false || !positive(metadata.workflow_run?.id)
+    || metadata.workflow_run?.head_sha !== checkpoint.publication.sourceSha) {
+    throw new Error("Checkpoint predecessor artifact identity drifted.");
+  }
+  const response = await fetch(`${endpoint}/zip`, { headers, redirect: "follow", signal: AbortSignal.timeout(120_000) });
+  if (!response.ok || !response.url.startsWith("https://")
+    || Number(response.headers.get("content-length") ?? 0) > 115_343_360) {
+    throw new Error("Checkpoint predecessor artifact wrapper is unavailable or oversized.");
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Checkpoint predecessor artifact has no response body.");
+  while (true) {
+    const { done, value: chunk } = await reader.read();
+    if (done) break;
+    total += chunk.byteLength;
+    if (total > 115_343_360) throw new Error("Checkpoint predecessor artifact wrapper exceeded its size bound.");
+    chunks.push(chunk);
+  }
+  const wrapper = Buffer.concat(chunks);
+  if (`sha256:${createHash("sha256").update(wrapper).digest("hex")}` !== checkpoint.publication.candidateArtifactDigest) {
+    throw new Error("Checkpoint predecessor artifact wrapper digest differs from the receipt.");
+  }
+  const entries = parseArtifactZip(wrapper, ["release-manifest.json", "site.tar"]);
+  const manifest = entries.find((entry) => entry.path === "release-manifest.json")?.data;
+  if (!manifest || createHash("sha256").update(manifest).digest("hex") !== checkpoint.publication.manifestSha256) {
+    throw new Error("Checkpoint predecessor manifest digest differs from the receipt.");
+  }
+  return manifest;
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const mode = process.argv[2];
   const values = args();
@@ -615,11 +678,25 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     return value;
   };
   if (mode === "verify") {
+    const productionRef = values.get("--production-ref");
+    const writerId = Number(values.get("--checkpoint-writer-id"));
+    const loaded = productionRef ? await loadPublicationCheckpoint({
+      token: process.env.GH_TOKEN ?? "", authorizedWriterId: writerId,
+    }) : undefined;
+    const checkpointPublicProof = loaded ? await observeCheckpointPublicProof({
+      checkpoint: loaded.checkpoint,
+      manifestBytes: loaded.manifestBytes ?? await checkpointManifestBytes(loaded.checkpoint, process.env.GH_TOKEN ?? ""),
+      token: process.env.GH_TOKEN ?? "", authorizedWriterId: writerId,
+    }) : undefined;
     const verified = verifyFinalState({
       summary: JSON.parse(await readFile(required("--summary"), "utf8")),
       state: JSON.parse(await readFile(required("--state"), "utf8")),
       incidents: JSON.parse(await readFile(required("--incidents"), "utf8")),
       now: new Date(values.get("--now") ?? Date.now()),
+      productionRef,
+      productionSha: values.get("--production-sha"),
+      checkpoint: loaded?.checkpoint,
+      checkpointPublicProof,
     });
     process.stdout.write(`${JSON.stringify(verified, null, 2)}\n`);
   } else if (mode === "receipt") {

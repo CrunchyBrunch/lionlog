@@ -3,6 +3,12 @@ name: Prepare live Pages field-release artifact
 on:
   workflow_dispatch:
     inputs:
+      refresh_mode:
+        description: Manual preparation, or an explicitly enabled automatic primary/recovery request
+        required: true
+        default: manual
+        type: choice
+        options: [manual, primary, recovery]
       service_date:
         description: PSU service date (strict YYYY-MM-DD)
         required: true
@@ -22,11 +28,20 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: github-pages-production
+  cancel-in-progress: false
+
 jobs:
   build-artifact:
     if: >-
       github.repository == 'CrunchyBrunch/lionlog' &&
-      github.ref == 'refs/heads/main' &&
+      ((inputs.refresh_mode == 'manual' && github.ref == 'refs/heads/main') ||
+       ((inputs.refresh_mode == 'primary' || inputs.refresh_mode == 'recovery') &&
+        vars.LIONLOG_REFRESH_ACTIVATION == 'ENABLE_AUTOMATIC_LIONLOG_REFRESH' &&
+        vars.LIONLOG_REFRESH_SOURCE_AUTHORIZATION == 'I_APPROVE_AUTOMATIC_PSU_REQUESTS' &&
+        github.ref == vars.LIONLOG_PRODUCTION_REF &&
+        github.sha == vars.LIONLOG_PRODUCTION_SHA)) &&
       inputs.confirmation == 'PREPARE_LIVE_PAGES_FIELD_RELEASE' &&
       inputs.expected_source_sha == github.sha &&
       inputs.expected_run_attempt == '1' &&
@@ -35,6 +50,7 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
+      actions: read
     outputs:
       live_artifact_id: ${{ steps.upload-live.outputs.artifact-id }}
       live_artifact_digest: ${{ steps.upload-live.outputs.artifact-digest }}
@@ -92,6 +108,27 @@ jobs:
           restore-keys: |
             lionlog-psu-nutrition-v2-psu-html-v2-${{ inputs.service_date }}-
       - run: npm run validate:psu-release-cache
+      - name: Stop duplicate manual ingestion when an automatic attempt exists
+        if: inputs.refresh_mode == 'manual' && vars.LIONLOG_REFRESH_ACTIVATION == 'ENABLE_AUTOMATIC_LIONLOG_REFRESH'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LIONLOG_REFRESH_ACTIVATION: ${{ vars.LIONLOG_REFRESH_ACTIVATION }}
+          LIONLOG_PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
+          SERVICE_DATE: ${{ inputs.service_date }}
+        run: node --experimental-strip-types scripts/refresh-preflight.ts --manual-conflict
+      - name: Verify automatic due date, publication state, complete run accounting, and remaining budget
+        if: inputs.refresh_mode != 'manual'
+        id: refresh-preflight
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_WORKFLOW_REF: ${{ github.workflow_ref }}
+          LIONLOG_REFRESH_ACTIVATION: ${{ vars.LIONLOG_REFRESH_ACTIVATION }}
+          LIONLOG_REFRESH_SOURCE_AUTHORIZATION: ${{ vars.LIONLOG_REFRESH_SOURCE_AUTHORIZATION }}
+          LIONLOG_PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
+          LIONLOG_PRODUCTION_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
+          SERVICE_DATE: ${{ inputs.service_date }}
+          REFRESH_TRIGGER: ${{ inputs.refresh_mode }}
+        run: node --experimental-strip-types scripts/refresh-preflight.ts
       - name: Run trusted source-driven field-release ingestion
         id: ingestion
         continue-on-error: true
@@ -102,6 +139,14 @@ jobs:
           EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
           EXPECTED_RUN_ATTEMPT: ${{ inputs.expected_run_attempt }}
           SERVICE_DATE: ${{ inputs.service_date }}
+          LIONLOG_REFRESH_MODE: ${{ inputs.refresh_mode == 'manual' && 'manual' || 'automatic' }}
+          LIONLOG_REFRESH_ACTIVATION: ${{ vars.LIONLOG_REFRESH_ACTIVATION }}
+          LIONLOG_REFRESH_SOURCE_AUTHORIZATION: ${{ vars.LIONLOG_REFRESH_SOURCE_AUTHORIZATION }}
+          LIONLOG_PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
+          LIONLOG_PRODUCTION_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
+          LIONLOG_REMAINING_REQUESTS: ${{ steps.refresh-preflight.outputs.remaining_requests }}
+          LIONLOG_REFRESH_OPPORTUNITY: ${{ steps.refresh-preflight.outputs.opportunity }}
+          LIONLOG_REFRESH_ACCOUNTING_PATH: work/psu-field-release/refresh-accounting.json
         run: >-
           npm run prepare:psu-field-release --
           --date="$SERVICE_DATE"
@@ -111,6 +156,14 @@ jobs:
         id: nutrition-cache-validation
         if: always() && steps.ingestion.outcome != 'skipped'
         run: npm run validate:psu-release-cache
+      - name: Retain immutable automatic upstream-attempt accounting
+        if: always() && inputs.refresh_mode != 'manual' && steps.ingestion.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: lionlog-refresh-accounting-${{ github.run_id }}-${{ github.run_attempt }}
+          path: work/psu-field-release/refresh-accounting.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Preserve validated nutrition cache for a bounded resume
         if: >-
           always() &&
@@ -226,11 +279,17 @@ jobs:
           gh api repos/${{ github.repository }}/actions/artifacts/${{ needs.build-artifact.outputs.recovery_artifact_id }} > work/pages-field-release/recovery-artifact.json
       - name: Create external candidate receipts
         shell: bash
+        env:
+          REFRESH_MODE: ${{ inputs.refresh_mode }}
+          PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
+          PRODUCTION_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
         run: |
           mkdir work/pages-field-release/receipts
           RECORDED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          node --experimental-strip-types scripts/create-candidate-receipt.ts --manifest=work/pages-field-release/downloaded-live/release-manifest.json --artifact-metadata=work/pages-field-release/live-artifact.json --recorded-at="$RECORDED_AT" --output=work/pages-field-release/receipts/live.json
-          node --experimental-strip-types scripts/create-candidate-receipt.ts --manifest=work/pages-field-release/downloaded-recovery/release-manifest.json --artifact-metadata=work/pages-field-release/recovery-artifact.json --recorded-at="$RECORDED_AT" --output=work/pages-field-release/receipts/first-release-recovery.json
+          EXTRA_ARGS=()
+          if [[ "$REFRESH_MODE" != manual ]]; then EXTRA_ARGS+=("--production-ref=$PRODUCTION_REF" "--production-sha=$PRODUCTION_SHA"); fi
+          node --experimental-strip-types scripts/create-candidate-receipt.ts --manifest=work/pages-field-release/downloaded-live/release-manifest.json --artifact-metadata=work/pages-field-release/live-artifact.json --recorded-at="$RECORDED_AT" --output=work/pages-field-release/receipts/live.json "${EXTRA_ARGS[@]}"
+          node --experimental-strip-types scripts/create-candidate-receipt.ts --manifest=work/pages-field-release/downloaded-recovery/release-manifest.json --artifact-metadata=work/pages-field-release/recovery-artifact.json --recorded-at="$RECORDED_AT" --output=work/pages-field-release/receipts/first-release-recovery.json "${EXTRA_ARGS[@]}"
       - name: Retain external candidate receipts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
