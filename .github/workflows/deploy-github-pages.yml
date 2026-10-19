@@ -51,7 +51,7 @@ on:
         required: true
         type: string
       approval_expires_at:
-        description: Exact PM approval expiry in canonical UTC milliseconds
+        description: Manual PM approval expiry, or automatic standing-policy execution deadline, in canonical UTC milliseconds
         required: true
         type: string
       rollback_receipt_artifact_id:
@@ -83,6 +83,7 @@ jobs:
         vars.LIONLOG_REFRESH_ACTIVATION == 'ENABLE_AUTOMATIC_LIONLOG_REFRESH' &&
         vars.LIONLOG_PRODUCTION_REF == github.ref &&
         vars.LIONLOG_PRODUCTION_SHA == github.sha &&
+        vars.LIONLOG_STANDING_PUBLICATION_POLICY == 'COMPLETE_COVERAGE_V1' &&
         vars.LIONLOG_PUBLICATION_WRITER_ID != '' &&
         inputs.expected_source_sha == vars.LIONLOG_PRODUCTION_SHA)) &&
       github.run_attempt == 1 &&
@@ -229,11 +230,12 @@ jobs:
           PUBLICATION_MODE: ${{ inputs.publication_mode }}
           PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
           PRODUCTION_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
+          STANDING_POLICY: ${{ vars.LIONLOG_STANDING_PUBLICATION_POLICY }}
         run: |
           set -euo pipefail
           EXTRA_ARGS=()
           if [[ "$PUBLICATION_MODE" == automatic ]]; then
-            EXTRA_ARGS+=("--production-ref=$PRODUCTION_REF" "--production-sha=$PRODUCTION_SHA")
+            EXTRA_ARGS+=("--production-ref=$PRODUCTION_REF" "--production-sha=$PRODUCTION_SHA" "--standing-policy=$STANDING_POLICY")
           fi
           if [[ "$OPERATION" == rollback ]]; then
             EXTRA_ARGS+=("--rollback-receipt=work/supported-pages/rollback-receipt/pages-receipt.json")
@@ -305,11 +307,11 @@ jobs:
           set -euo pipefail
           NORMALIZED="$(node --experimental-strip-types scripts/artifact-digest.ts --expected="$RAW_DIGEST" --actual="$RAW_DIGEST")"
           echo "digest=$NORMALIZED" >> "$GITHUB_OUTPUT"
-      - name: Publish human review summary
+      - name: Publish release authorization summary
         shell: bash
         run: |
           {
-            echo '## Protected Pages approval'
+            echo '## Pages release authority'
             echo
             echo '- Operation: `${{ inputs.operation }}`'
             echo '- Release: `${{ inputs.expected_release_id }}`'
@@ -319,7 +321,9 @@ jobs:
             echo "- Fresh until: \`$(jq -r .release.earliestFreshUntil work/supported-pages/preapproval.json)\`"
             echo "- Retained until: \`$(jq -r .release.earliestRetainUntil work/supported-pages/preapproval.json)\`"
             echo "- Public predecessor: \`${{ inputs.expected_predecessor_release_id }}\`"
-            echo "- Approval expires: \`${{ inputs.approval_expires_at }}\`"
+            echo '- Mode: `${{ inputs.publication_mode }}`'
+            echo '- Standing policy: `${{ inputs.publication_mode == 'automatic' && vars.LIONLOG_STANDING_PUBLICATION_POLICY || 'manual-review' }}`'
+            echo "- Authorization deadline: \`${{ inputs.approval_expires_at }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
@@ -332,7 +336,7 @@ jobs:
       pages: write
       id-token: write
     environment:
-      name: github-pages
+      name: ${{ inputs.publication_mode == 'automatic' && 'github-pages-automatic' || 'github-pages' }}
       url: ${{ steps.deployment.outputs.page_url }}
     outputs:
       submission_started: ${{ steps.submission.outputs.started }}
@@ -370,12 +374,14 @@ jobs:
           PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
           PRODUCTION_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
           CHECKPOINT_WRITER_ID: ${{ vars.LIONLOG_PUBLICATION_WRITER_ID }}
+          STANDING_POLICY: ${{ vars.LIONLOG_STANDING_PUBLICATION_POLICY }}
         run: |
           set -euo pipefail
           SUMMARY=work/supported-pages-final/summary/preapproval.json
           CI_RUN_ID="$(jq -er .ci.runId "$SUMMARY")"
           gh api "repos/${{ github.repository }}" > work/supported-pages-final/repository.json
           if [[ "$PUBLICATION_MODE" == automatic ]]; then
+            test "$STANDING_POLICY" = COMPLETE_COVERAGE_V1
             gh api "repos/${{ github.repository }}/git/ref/${PRODUCTION_REF#refs/}" > work/supported-pages-final/production-ref.json
             jq -e --arg ref "$PRODUCTION_REF" 'select(.ref == $ref and .object.type == "commit") | {sha:.object.sha}' \
               work/supported-pages-final/production-ref.json > work/supported-pages-final/main.json

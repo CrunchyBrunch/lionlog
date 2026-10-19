@@ -29,6 +29,15 @@ export const PREAPPROVAL_HEADROOM_MS = 30 * 60_000;
 export const ACTION_HEADROOM_MS = 15 * 60_000;
 const MAX_ARTIFACT_BYTES = 110 * 1024 * 1024;
 const PROMOTION_WORKFLOW = ".github/workflows/deploy-github-pages.yml";
+export const STANDING_PUBLICATION_POLICY = "COMPLETE_COVERAGE_V1";
+export function assertStandingPublicationPolicy(value: {
+  policy: string | undefined; operation: string; coverage: string; invalidNameOmissions: number;
+}): void {
+  if (value.policy !== STANDING_PUBLICATION_POLICY || value.operation !== "promote"
+    || value.coverage !== "complete" || value.invalidNameOmissions !== 0) {
+    throw new Error("Automatic publication requires the reviewed complete-coverage standing policy.");
+  }
+}
 
 export interface Metadata {
   repository: { id: number; full_name: string };
@@ -90,7 +99,7 @@ export interface ValidatedRelease {
     artifactId: number; artifactDigest: string; artifactExpiresAt: string; runId: number;
     releaseId: string; sourceWorkflowSha: string;
   };
-  authorization: { approvalExpiresAt: string; predecessorReleaseId: string };
+  authorization: { approvalExpiresAt: string; predecessorReleaseId: string; standingPolicy?: typeof STANDING_PUBLICATION_POLICY };
 }
 
 export async function verifySupportedCandidate(options: {
@@ -118,6 +127,7 @@ export async function verifySupportedCandidate(options: {
   now: Date;
   productionRef?: string;
   productionSha?: string;
+  standingPolicy?: string;
 }): Promise<ValidatedRelease> {
   const { metadata } = options;
   assertSha(options.workflowSha, "Workflow SHA");
@@ -152,6 +162,12 @@ export async function verifySupportedCandidate(options: {
   if (manifest.releaseId !== options.expectedReleaseId) throw new Error("Candidate release ID mismatch.");
   if (manifest.releaseKind !== "live" || manifest.menu === null) throw new Error("Production promotion accepts only a validated live release; first-release recovery is separate.");
   if (manifest.menu.serviceDate !== options.expectedServiceDate) throw new Error("Candidate service date mismatch.");
+  if (options.productionRef) {
+    assertStandingPublicationPolicy({ policy: options.standingPolicy, operation: options.operation,
+      coverage: manifest.menu.coverage, invalidNameOmissions: manifest.menu.omissions["invalid-name"] });
+  } else if (options.standingPolicy !== undefined) {
+    throw new Error("Manual promotion cannot claim standing publication policy.");
+  }
   if (manifest.source.commitSha !== options.expectedSourceSha || manifest.source.workflowRunId !== options.candidateRunId) {
     throw new Error("Candidate manifest source identity mismatch.");
   }
@@ -261,7 +277,8 @@ export async function verifySupportedCandidate(options: {
     },
     site: manifest.site,
     rollbackReceipt,
-    authorization: { approvalExpiresAt: options.approvalExpiresAt, predecessorReleaseId },
+    authorization: { approvalExpiresAt: options.approvalExpiresAt, predecessorReleaseId,
+      ...(options.standingPolicy ? { standingPolicy: STANDING_PUBLICATION_POLICY } : {}) },
   };
 }
 
@@ -506,6 +523,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
       now: new Date(args.get("--now") ?? Date.now()),
       productionRef: args.get("--production-ref"),
       productionSha: args.get("--production-sha"),
+      standingPolicy: args.get("--standing-policy"),
       approvalExpiresAt: required("--approval-expires-at"),
       expectedPredecessorReleaseId: required("--predecessor-release-id"),
       publicPredecessor: JSON.parse(await readFile(required("--public-predecessor"), "utf8")),

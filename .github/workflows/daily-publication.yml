@@ -1,0 +1,52 @@
+name: Daily verified LionLog publication
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+      timezone: 'America/New_York'
+
+permissions: {}
+
+# This group belongs only to dispatchers. Candidate, promotion, and checkpoint
+# share github-pages-production and must be free to complete while we wait.
+concurrency:
+  group: lionlog-daily-dispatch
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.repository == 'CrunchyBrunch/lionlog' &&
+      github.event_name == 'schedule' &&
+      github.ref == 'refs/heads/main' &&
+      github.run_attempt == 1 &&
+      vars.LIONLOG_REFRESH_ACTIVATION == 'ENABLE_AUTOMATIC_LIONLOG_REFRESH' &&
+      vars.LIONLOG_REFRESH_SOURCE_AUTHORIZATION == 'I_APPROVE_AUTOMATIC_PSU_REQUESTS' &&
+      vars.LIONLOG_STANDING_PUBLICATION_POLICY == 'COMPLETE_COVERAGE_V1' &&
+      vars.LIONLOG_PRODUCTION_REF != '' &&
+      vars.LIONLOG_PRODUCTION_SHA != '' &&
+      vars.LIONLOG_PUBLICATION_WRITER_ID != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 220
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts --omit=dev
+      - name: Dispatch and verify the one pinned daily sequence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LIONLOG_REFRESH_ACTIVATION: ${{ vars.LIONLOG_REFRESH_ACTIVATION }}
+          LIONLOG_REFRESH_SOURCE_AUTHORIZATION: ${{ vars.LIONLOG_REFRESH_SOURCE_AUTHORIZATION }}
+          LIONLOG_STANDING_PUBLICATION_POLICY: ${{ vars.LIONLOG_STANDING_PUBLICATION_POLICY }}
+          LIONLOG_PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
+          LIONLOG_PRODUCTION_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
+          LIONLOG_PUBLICATION_WRITER_ID: ${{ vars.LIONLOG_PUBLICATION_WRITER_ID }}
+        run: node --experimental-strip-types scripts/run-daily-publication.ts

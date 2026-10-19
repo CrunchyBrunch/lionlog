@@ -442,7 +442,8 @@ test("live and Pages workflows are explicit, bounded, and ordinary CI cannot inv
   assert.match(deploymentWorkflow, /permissions:\r?\n(?:\s+[a-z-]+: read\r?\n)*\s+contents: read/);
   assert.match(deploymentWorkflow, /pages: write/);
   assert.match(deploymentWorkflow, /id-token: write/);
-  assert.match(deploymentWorkflow, /environment:\r?\n\s+name: github-pages/);
+  assert.match(deploymentWorkflow, /environment:\r?\n\s+name: \$\{\{ inputs\.publication_mode == 'automatic' && 'github-pages-automatic' \|\| 'github-pages' \}\}/);
+  assert.match(deploymentWorkflow, /LIONLOG_STANDING_PUBLICATION_POLICY == 'COMPLETE_COVERAGE_V1'/);
   assert.match(deploymentWorkflow, /actions\/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9/);
   assert.match(deploymentWorkflow, /actions\/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346/);
   assert.match(deploymentWorkflow, /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/);

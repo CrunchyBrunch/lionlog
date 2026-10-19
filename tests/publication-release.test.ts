@@ -33,7 +33,7 @@ const sourceSha = "b".repeat(40);
 const hash = "c".repeat(64);
 const digest = `sha256:${"d".repeat(64)}`;
 const now = new Date("2026-09-17T12:00:00.000Z");
-const historicalIncidentHistory = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
+const historicalIncidentHistory = JSON.parse(await readFile(new URL("./fixtures/pages-incident-history-2026-09-17.json", import.meta.url), "utf8"));
 
 test("artifact ZIP parser rejects traversal, symlinks, extras, and header disagreement", () => {
   const valid = createStoredZip([{ path: "artifact.tar", data: Buffer.from("tar") }]);
@@ -583,7 +583,7 @@ test("inactive checkpoint final gate requires its exact public predecessor and c
 });
 
 test("real legacy pre-submission identities reconcile only against exact affirmative evidence", async () => {
-  const incidents = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
+  const incidents = structuredClone(historicalIncidentHistory);
   const attempts = [legacyAttempt346(), legacyAttempt348(), legacyAttempt352()];
   assert.doesNotThrow(() => verifyFinalState({
     summary: summaryFixture(), state: { ...finalState(), priorAttempts: attempts }, incidents, now,
@@ -623,6 +623,24 @@ test("real legacy pre-submission identities reconcile only against exact affirma
   assert.throws(() => verifyFinalState({
     summary: summaryFixture(), state: { ...finalState(), priorAttempts: [...attempts, structuredClone(attempts[1])] }, incidents, now,
   }), /duplicate run\/attempt/);
+});
+
+test("frozen September history remains valid when source history gains a later incident", async () => {
+  const current = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
+  assert.deepEqual(current.incidents.slice(0, 3), historicalIncidentHistory.incidents);
+  const future = JSON.parse(await readFile(new URL("./fixtures/published-incident-record.json", import.meta.url), "utf8"));
+  future.decision.evidenceDigest = canonicalEvidenceDigest(future);
+  const evolved = {
+    historyVersion: historicalIncidentHistory.historyVersion,
+    incidents: [...historicalIncidentHistory.incidents, future],
+  };
+  const state = { ...finalState(), priorAttempts: [legacyAttempt346(), legacyAttempt348(), legacyAttempt352()] };
+  assert.doesNotThrow(() => verifyFinalState({
+    summary: summaryFixture(), state, incidents: structuredClone(historicalIncidentHistory), now,
+  }));
+  assert.throws(() => verifyFinalState({
+    summary: summaryFixture(), state, incidents: evolved, now,
+  }), /observation or decision time/);
 });
 
 test("legacy collector selects exact incident-bound evidence without fuzzy-name ambiguity", () => {
@@ -710,7 +728,7 @@ test("attempt history binds every completed job and step to the exact requested 
 });
 
 test("all three real historical attempts collect and reconcile only with exact incident contracts", async () => {
-  const incidents = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
+  const incidents = structuredClone(historicalIncidentHistory);
   const evidence = await collectPagesAttemptHistory({
     repository: "CrunchyBrunch/lionlog",
     currentRunId: 999,
@@ -791,7 +809,7 @@ test("receipt artifact expiry is canonicalized only from a valid GitHub UTC time
 });
 
 test("incident collection rejects every unknown or altered job and step before projection", async () => {
-  const incidents = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
+  const incidents = structuredClone(historicalIncidentHistory);
   const collect = (mutate: (jobs: Array<Record<string, unknown>>, runId: number) => void) => collectPagesAttemptHistory({
     repository: "CrunchyBrunch/lionlog",
     currentRunId: 999,
@@ -857,7 +875,7 @@ test("incident collection rejects every unknown or altered job and step before p
 });
 
 test("incident collection rejects later-page additions, incomplete pagination, and conflicting page copies", async () => {
-  const incidents = JSON.parse(await readFile("infrastructure/publication/pages-incident-history.json", "utf8"));
+  const incidents = structuredClone(historicalIncidentHistory);
   const original = historicalJobs(34881025561, "d9e3eedec058bad2bc1c9cc8078d7bb0e30f4e64");
   const filler = (index: number) => ({
     id: 104101000000 + index, run_id: 34881025561, run_attempt: 1,
