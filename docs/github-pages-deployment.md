@@ -15,7 +15,7 @@ LionLog does not create Pages deployments, request OIDC tokens, or poll Pages st
 
 - The deployment workflow itself accepts only `workflow_dispatch`. The separately gated daily scheduler may dispatch its pinned production revision after owner activation; there is no push or pull-request deployment trigger.
 - Top-level permissions are `{}`. Validation and public verification have only `contents: read` and `actions: read`. Only the protected deploy job receives `pages: write` and `id-token: write`.
-- The workflow runs only for `CrunchyBrunch/lionlog`, `refs/heads/main`, and attempt 1, at an operator-supplied exact workflow SHA. Its shared production lock is exactly `github-pages-production` with cancellation disabled; operators must let any run using the predecessor lock finish before merging this lock-name migration.
+- The manual path runs for `CrunchyBrunch/lionlog`, `refs/heads/main`, and attempt 1, at an operator-supplied exact workflow SHA. The inactive automatic path requires the exact approved production ref/SHA and standing policy. Its shared production lock is exactly `github-pages-production` with cancellation disabled; operators must let any run using the predecessor lock finish before merging this lock-name migration.
 - Candidate run, artifact, wrapper digest, manifest digest, release ID, source SHA, service date, exact-source CI, expiry, freshness/retention, complete inventory, catalog/snapshots, marker, and `/lionlog/` paths are revalidated.
 - The official staged artifact has the unique name `lionlog-pages-<run>-<attempt>`, is uploaded once without overwrite, then downloaded again by numeric ID. Its wrapper digest and every tar path, size, and hash must match the approved candidate.
 - The authorization binds either the exact currently published release ID or the explicit `NONE_FIRST_PUBLICATION` sentinel. The public marker is checked before staging and re-observed after protected approval.
@@ -30,7 +30,7 @@ Official actions are pinned to immutable commits:
 
 ## Operation
 
-Do not dispatch until the workflow is reviewed, merged, exact-source CI succeeds, the candidate remains retained, and a human has reviewed the candidate receipt and inventory.
+For manual promotion, do not dispatch until the workflow is reviewed, merged, exact-source CI succeeds, the candidate remains retained, and a human has reviewed the candidate receipt and inventory. The prepared automatic path uses the approved production pin and complete-coverage standing policy after owner activation.
 
 Promotion inputs identify one exact fresh live candidate, exact public predecessor, and approval deadline. Rollback uses the same workflow and exact retained candidate bytes, plus the flat receipt artifact ID/digest from a prior fully verified `knownGood` deployment. Rollback never rebuilds or re-scrapes. Automated first-release recovery is intentionally absent; a first-release incident requires a separately reviewed change and authorization. Candidate construction still retains the existing first-release recovery artifact as reviewed recovery material, but the supported deployment workflow neither consumes nor promotes it automatically; removing that candidate-build artifact is deferred to a separately scoped change.
 

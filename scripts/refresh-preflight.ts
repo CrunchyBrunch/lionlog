@@ -86,6 +86,20 @@ export async function assertNoAutomaticCandidateConflict(options: {
   if (runs.length !== 0) throw new Error("A same-day automatic candidate attempt blocks duplicate manual ingestion.");
 }
 
+/** A scheduler gets one candidate opportunity, even when producer recovery would be valid for manual operation. */
+export async function assertNoScheduledCandidateConflict(options: {
+  api: Api; serviceDate: string;
+}): Promise<void> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(options.serviceDate)) throw new Error("Scheduled service date is invalid.");
+  const [candidateRuns, deployRuns] = await Promise.all([
+    completeRuns(options.api, PRODUCER, options.serviceDate, Number.MAX_SAFE_INTEGER),
+    completeRuns(options.api, DEPLOYER, options.serviceDate, Number.MAX_SAFE_INTEGER),
+  ]);
+  if (candidateRuns.length !== 0 || deployRuns.length !== 0) {
+    throw new Error("The service day's scheduled retrieval opportunity was already consumed or publication is uncertain.");
+  }
+}
+
 async function completeRuns(api: Api, workflow: string, serviceDate: string, currentRunId: number): Promise<Run[]> {
   const workflowId = workflow === PRODUCER ? LIVE_CANDIDATE_WORKFLOW_ID : PROMOTION_WORKFLOW_ID;
   const all: Array<{ run: Run; updatedMs: number | undefined }> = [];

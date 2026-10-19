@@ -19,6 +19,16 @@ const fixed = { token: "fixture-token", repository: "CrunchyBrunch/lionlog", eve
 const scheduleRun = { id: 9, path: ".github/workflows/daily-publication.yml", event: "schedule",
   run_attempt: 1, head_branch: "main", head_sha: "b".repeat(40), status: "in_progress",
   created_at: "2026-10-19T09:17:00Z" };
+const emptyDailyHistory = (route: string): unknown => {
+  if (route.includes("/actions/workflows/daily-publication.yml/runs?")) {
+    return { total_count: 1, workflow_runs: [scheduleRun] };
+  }
+  if (route.includes("/actions/workflows/347085467/runs?")
+    || route.includes("/actions/workflows/347992874/runs?")) {
+    return { total_count: 0, workflow_runs: [] };
+  }
+  return undefined;
+};
 
 test("native New York schedule handles EST, EDT, spring transition, and the missed-primary window", () => {
   assert.deepEqual(scheduledOpportunity(new Date("2026-01-15T10:17:00Z")), { serviceDate: "2026-01-15", mode: "primary" });
@@ -59,6 +69,72 @@ test("a queued schedule from the previous service day cannot request today's men
   assert.equal(dispatches, 0);
 });
 
+test("a later same-day schedule cannot consume a second retrieval opportunity", async () => {
+  let dispatches = 0;
+  const lateRun = { ...scheduleRun, id: 10, created_at: "2026-10-19T09:50:00Z" };
+  const earlier = { ...scheduleRun, id: 9, status: "completed", created_at: "2026-10-19T09:17:00Z" };
+  const api: DailyApi = {
+    get: async (route) => {
+      if (route.endsWith("/runs/10")) return lateRun;
+      if (route.includes("/actions/workflows/daily-publication.yml/runs?")) {
+        return { total_count: 2, workflow_runs: [lateRun, earlier] };
+      }
+      if (route.includes("/actions/workflows/347085467/runs?")) {
+        return { total_count: 1, workflow_runs: [{ id: 100, head_sha: sha, head_branch: "production",
+          event: "workflow_dispatch", run_attempt: 1, path: ".github/workflows/build-live-menu-artifact.yml",
+          status: "completed", conclusion: "failure", created_at: "2026-10-19T09:17:00Z",
+          updated_at: "2026-10-19T09:22:00Z" }] };
+      }
+      return { ref: config.productionRef, object: { type: "commit", sha } };
+    },
+    bytes: async () => Buffer.alloc(0),
+    dispatch: async () => { dispatches += 1; return 100; },
+  };
+  await assert.rejects(runDailyPublication({ ...fixed, schedulerRunId: 10, api,
+    now: new Date("2026-10-19T09:50:00Z"),
+    loadCheckpoint: async () => ({ checkpoint: { publication: { releaseId: "c".repeat(64) } } }) as unknown as Awaited<ReturnType<typeof loadPublicationCheckpoint>>,
+    observePublic: async () => ({ state: "present", releaseId: "c".repeat(64) }) }), /already|consumed|attempt/i);
+  assert.equal(dispatches, 0);
+});
+
+test("a delayed first schedule uses its one recovery window only with empty authenticated history", async () => {
+  const lateRun = { ...scheduleRun, id: 10, created_at: "2026-10-19T09:50:00Z" };
+  const dispatched: Array<Record<string, string>> = [];
+  let existingProducer = false;
+  const api: DailyApi = {
+    get: async (route) => {
+      if (route.endsWith("/runs/10")) return lateRun;
+      if (route.includes("/actions/workflows/daily-publication.yml/runs?")) {
+        return { total_count: 1, workflow_runs: [lateRun] };
+      }
+      if (route.includes("/actions/workflows/347085467/runs?")) {
+        return existingProducer ? { total_count: 1, workflow_runs: [{ id: 100, head_sha: sha,
+          head_branch: "production", event: "workflow_dispatch", run_attempt: 1,
+          path: ".github/workflows/build-live-menu-artifact.yml", status: "completed",
+          conclusion: "failure", created_at: "2026-10-19T09:17:00Z",
+          updated_at: "2026-10-19T09:22:00Z" }] } : { total_count: 0, workflow_runs: [] };
+      }
+      if (route.includes("/actions/workflows/347992874/runs?")) return { total_count: 0, workflow_runs: [] };
+      if (route.includes("/git/ref/")) return { ref: config.productionRef, object: { type: "commit", sha } };
+      return { id: 100, path: ".github/workflows/build-live-menu-artifact.yml", workflow_id: 347085467,
+        event: "workflow_dispatch", run_attempt: 1, head_sha: sha, head_branch: "production",
+        status: "completed", conclusion: "failure" };
+    },
+    bytes: async () => Buffer.alloc(0),
+    dispatch: async (_workflow, _branch, inputs) => { dispatched.push(inputs); return 100; },
+  };
+  const options = { ...fixed, schedulerRunId: 10, api, now: new Date("2026-10-19T09:50:00Z"),
+    loadCheckpoint: async () => ({ checkpoint: { publication: { releaseId: "c".repeat(64) } } }) as unknown as Awaited<ReturnType<typeof loadPublicationCheckpoint>>,
+    observePublic: async () => ({ state: "present" as const, releaseId: "c".repeat(64) }) };
+  await assert.rejects(runDailyPublication(options), /ended failure/);
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0].refresh_mode, "recovery");
+  dispatched.length = 0;
+  existingProducer = true;
+  await assert.rejects(runDailyPublication(options), /already consumed|uncertain/);
+  assert.equal(dispatched.length, 0);
+});
+
 test("missing bootstrap or public predecessor stops before any PSU candidate dispatch", async () => {
   let dispatches = 0;
   const api: DailyApi = { get: async (route) => route.endsWith("/runs/9") ? scheduleRun : ({ ref: config.productionRef, object: { type: "commit", sha } }),
@@ -76,17 +152,36 @@ test("missing bootstrap or public predecessor stops before any PSU candidate dis
 test("candidate failure or interruption prevents promotion and checkpoint dispatch", async () => {
   const dispatched: string[] = [];
   const api: DailyApi = {
-    get: async (route) => route.endsWith("/runs/9") ? scheduleRun : route.includes("/git/ref/")
+    get: async (route) => route.endsWith("/runs/9") ? scheduleRun : (emptyDailyHistory(route) ?? (route.includes("/git/ref/")
       ? { ref: config.productionRef, object: { type: "commit", sha } }
       : { id: 100, path: ".github/workflows/build-live-menu-artifact.yml", workflow_id: 347085467,
         event: "workflow_dispatch", run_attempt: 1, head_sha: sha, head_branch: "production",
-        status: "completed", conclusion: "failure" },
+        status: "completed", conclusion: "failure" })),
     bytes: async () => Buffer.alloc(0),
     dispatch: async (workflow) => { dispatched.push(workflow); return 100; },
   };
   await assert.rejects(runDailyPublication({ ...fixed, api, now: new Date("2026-10-19T09:17:00Z"),
     loadCheckpoint: async () => ({ checkpoint: { publication: { releaseId: "c".repeat(64) } } }) as unknown as Awaited<ReturnType<typeof loadPublicationCheckpoint>>,
     observePublic: async () => ({ state: "present", releaseId: "c".repeat(64) }) }), /ended failure/);
+  assert.deepEqual(dispatched, [".github/workflows/build-live-menu-artifact.yml"]);
+});
+
+test("queued candidate stops at the elapsed daily deadline", async () => {
+  const dispatched: string[] = [];
+  let elapsed = 0;
+  const api: DailyApi = {
+    get: async (route) => route.endsWith("/runs/9") ? scheduleRun : (emptyDailyHistory(route) ?? (route.includes("/git/ref/")
+      ? { ref: config.productionRef, object: { type: "commit", sha } }
+      : { id: 100, path: ".github/workflows/build-live-menu-artifact.yml", workflow_id: LIVE_CANDIDATE_WORKFLOW_ID,
+        event: "workflow_dispatch", run_attempt: 1, head_sha: sha, head_branch: "production",
+        status: "queued", conclusion: null })),
+    bytes: async () => Buffer.alloc(0),
+    dispatch: async (workflow) => { dispatched.push(workflow); return 100; },
+  };
+  await assert.rejects(runDailyPublication({ ...fixed, api, now: new Date("2026-10-19T09:17:00Z"),
+    elapsedNowMs: () => elapsed, sleep: async (ms) => { elapsed += ms; },
+    loadCheckpoint: async () => ({ checkpoint: { publication: { releaseId: "c".repeat(64) } } }) as unknown as Awaited<ReturnType<typeof loadPublicationCheckpoint>>,
+    observePublic: async () => ({ state: "present", releaseId: "c".repeat(64) }) }), /bounded daily window/);
   assert.deepEqual(dispatched, [".github/workflows/build-live-menu-artifact.yml"]);
 });
 
@@ -123,6 +218,7 @@ test("one complete scheduled sequence binds candidate, promotion, public verific
   const receiptZip = storedZip([{ name: "live.json", bytes: Buffer.from(JSON.stringify(receipt)) },
     { name: "first-release-recovery.json", bytes: Buffer.from("{}") }]);
   const dispatched: Array<{ workflow: string; inputs: Record<string, string> }> = [];
+  const summaries: string[] = [];
   let promotionFails = false;
   const run = (id: number, workflow: string, workflowId?: number) => ({ id, path: workflow,
     workflow_id: workflowId, event: "workflow_dispatch", run_attempt: 1, head_sha: sha,
@@ -130,6 +226,8 @@ test("one complete scheduled sequence binds candidate, promotion, public verific
   const api: DailyApi = {
     get: async (route) => {
       if (route.endsWith("/runs/9")) return scheduleRun;
+      const history = emptyDailyHistory(route);
+      if (history !== undefined) return history;
       if (route.includes("/git/ref/")) return { ref: config.productionRef, object: { type: "commit", sha } };
       if (route.endsWith("/runs/100")) return run(100, ".github/workflows/build-live-menu-artifact.yml", LIVE_CANDIDATE_WORKFLOW_ID);
       if (route.endsWith("/runs/101")) return { ...run(101, ".github/workflows/deploy-github-pages.yml", PROMOTION_WORKFLOW_ID),
@@ -146,7 +244,10 @@ test("one complete scheduled sequence binds candidate, promotion, public verific
     dispatch: async (workflow, _branch, inputs) => { dispatched.push({ workflow, inputs }); return 99 + dispatched.length; },
   };
   let checkpointReads = 0;
+  const fixtureClock = () => Date.parse("2026-10-19T09:17:00Z");
   const outcome = await runDailyPublication({ ...fixed, api, now: new Date("2026-10-19T09:17:00Z"),
+    wallNowMs: fixtureClock,
+    summary: async (line) => { summaries.push(line); },
     loadCheckpoint: async () => ({ checkpoint: { publication: { releaseId: checkpointReads++ === 0
       ? "c".repeat(64) : manifest.releaseId }, boundary: { runId: 101 } } }) as unknown as Awaited<ReturnType<typeof loadPublicationCheckpoint>>,
     observePublic: async () => ({ state: "present", releaseId: "c".repeat(64) }), });
@@ -158,10 +259,14 @@ test("one complete scheduled sequence binds candidate, promotion, public verific
   assert.equal(dispatched[1].inputs.candidate_artifact_digest, candidateDigest);
   assert.equal(dispatched[1].inputs.candidate_manifest_sha256, manifestSha);
   assert.equal(dispatched[2].inputs.expected_promotion_run_id, "101");
+  for (const id of [100, 101, 102]) {
+    assert.ok(summaries.some((line) => line.includes(`[${id}](https://github.com/CrunchyBrunch/lionlog/actions/runs/${id})`)));
+  }
   promotionFails = true;
   dispatched.length = 0;
   checkpointReads = 0;
   await assert.rejects(runDailyPublication({ ...fixed, api, now: new Date("2026-10-19T09:17:00Z"),
+    wallNowMs: fixtureClock,
     loadCheckpoint: async () => ({ checkpoint: { publication: { releaseId: "c".repeat(64) } } }) as unknown as Awaited<ReturnType<typeof loadPublicationCheckpoint>>,
     observePublic: async () => ({ state: "present", releaseId: "c".repeat(64) }), }), /ended failure/);
   assert.deepEqual(dispatched.map((entry) => entry.workflow), [

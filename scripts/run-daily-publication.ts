@@ -4,6 +4,7 @@ import { appendFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArtifactZip } from "./artifact-zip.ts";
+import { assertNoScheduledCandidateConflict } from "./refresh-preflight.ts";
 import { loadPublicationCheckpoint } from "./publication-checkpoint.ts";
 import { observePublicRelease } from "./public-release-state.ts";
 import { assertRefreshConfiguration, LATEST_DAILY_START_MINUTE, PROPOSED_PRIMARY_MINUTE,
@@ -19,6 +20,7 @@ const CHECKPOINT = ".github/workflows/advance-refresh-checkpoint.yml";
 const SHA = /^[a-f0-9]{40}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const RUN_LIMIT_MS = 3 * 60 * 60_000;
+const MAX_DAILY_SCHEDULE_RUNS = 1_000;
 
 export interface DailyApi {
   get(path: string): Promise<unknown>;
@@ -49,6 +51,51 @@ function newYorkDate(now: Date): string {
     month: "2-digit", day: "2-digit" }).formatToParts(now);
   const value = (key: string) => parts.find((part) => part.type === key)?.value ?? "";
   return `${value("year")}-${value("month")}-${value("day")}`;
+}
+
+function canonicalUtc(value: unknown): Date {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) {
+    throw new Error("Scheduler creation time is invalid.");
+  }
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime()) || date.toISOString() !== (value.includes(".") ? value : value.replace("Z", ".000Z"))) {
+    throw new Error("Scheduler creation time is invalid.");
+  }
+  return date;
+}
+
+async function assertOnlyScheduledOpportunity(api: DailyApi, serviceDate: string, currentRunId: number): Promise<void> {
+  const nextUtcDate = new Date(Date.parse(`${serviceDate}T00:00:00.000Z`) + 24 * 60 * 60_000).toISOString().slice(0, 10);
+  const created = encodeURIComponent(`${serviceDate}..${nextUtcDate}`);
+  const seen = new Set<number>();
+  let total: number | undefined;
+  let currentSeen = false;
+  for (let page = 1; page <= 10; page += 1) {
+    const value = await api.get(`repos/${REPOSITORY}/actions/workflows/daily-publication.yml/runs?event=schedule&created=${created}&per_page=100&page=${page}`) as {
+      total_count?: number; workflow_runs?: Array<{ id: number; event: string; path: string;
+        run_attempt: number; head_branch: string; created_at: string }> };
+    if (!Number.isSafeInteger(value?.total_count) || value.total_count! < 1
+      || value.total_count! > MAX_DAILY_SCHEDULE_RUNS || !Array.isArray(value.workflow_runs)
+      || (total !== undefined && total !== value.total_count)
+      || value.workflow_runs.length !== Math.min(100, value.total_count! - seen.size)) {
+      throw new Error("Scheduled run history is incomplete or ambiguous.");
+    }
+    total = value.total_count;
+    for (const run of value.workflow_runs) {
+      if (!Number.isSafeInteger(run.id) || run.id < 1 || seen.has(run.id)
+        || run.event !== "schedule" || run.path !== ".github/workflows/daily-publication.yml"
+        || run.head_branch !== "main" || !Number.isSafeInteger(run.run_attempt) || run.run_attempt < 1) {
+        throw new Error("Scheduled run history identity is invalid.");
+      }
+      const createdAt = canonicalUtc(run.created_at);
+      seen.add(run.id);
+      if (newYorkDate(createdAt) !== serviceDate) continue;
+      if (run.id === currentRunId) currentSeen = true;
+      else throw new Error("The service day's scheduled retrieval opportunity was already consumed.");
+    }
+    if (seen.size === total) break;
+  }
+  if (seen.size !== total || !currentSeen) throw new Error("Scheduled run history omitted the current opportunity.");
 }
 
 function exactArtifact(value: unknown, name: string, runId: number, sha: string): GitHubArtifact {
@@ -82,9 +129,10 @@ function assertProductionRef(value: unknown, config: RefreshConfiguration): void
 }
 
 async function waitForRun(api: DailyApi, id: number, workflow: string, workflowId: number | undefined,
-  config: RefreshConfiguration, deadline: number, sleep: (ms: number) => Promise<void>): Promise<void> {
+  config: RefreshConfiguration, deadline: number, sleep: (ms: number) => Promise<void>,
+  elapsedNowMs: () => number): Promise<void> {
   const branch = config.productionRef.slice("refs/heads/".length);
-  while (Date.now() < deadline) {
+  while (elapsedNowMs() < deadline) {
     const run = await api.get(`repos/${REPOSITORY}/actions/runs/${id}`) as GitHubRun;
     if (run?.id !== id || run.path !== workflow || (workflowId !== undefined && run.workflow_id !== workflowId)
       || run.event !== "workflow_dispatch" || run.run_attempt !== 1 || run.head_sha !== config.productionSha
@@ -105,6 +153,7 @@ export async function runDailyPublication(options: {
   schedulerRunId: number; schedulerSha: string;
   configuration: RefreshConfiguration; standingPolicy: string; writerId: number; now: Date;
   sleep?: (ms: number) => Promise<void>; summary?: (line: string) => Promise<void>;
+  wallNowMs?: () => number; elapsedNowMs?: () => number;
   loadCheckpoint?: typeof loadPublicationCheckpoint;
   observePublic?: typeof observePublicRelease;
 }): Promise<{ candidateRunId: number; promotionRunId: number; checkpointRunId: number }> {
@@ -122,14 +171,15 @@ export async function runDailyPublication(options: {
   if (scheduledRun?.id !== options.schedulerRunId || scheduledRun.path !== ".github/workflows/daily-publication.yml"
     || scheduledRun.event !== "schedule" || scheduledRun.run_attempt !== 1
     || scheduledRun.head_branch !== "main" || scheduledRun.head_sha !== options.schedulerSha
-    || scheduledRun.status !== "in_progress" || typeof scheduledRun.created_at !== "string"
-    || !Number.isFinite(Date.parse(scheduledRun.created_at))) {
+    || scheduledRun.status !== "in_progress") {
     throw new Error("Scheduler run identity or creation time is invalid.");
   }
-  if (newYorkDate(new Date(scheduledRun.created_at)) !== serviceDate) {
+  if (newYorkDate(canonicalUtc(scheduledRun.created_at)) !== serviceDate) {
     throw new Error("Delayed schedule crossed the New York service-day boundary.");
   }
-  const deadline = Date.now() + RUN_LIMIT_MS;
+  const wallNowMs = options.wallNowMs ?? Date.now;
+  const elapsedNowMs = options.elapsedNowMs ?? (() => performance.now());
+  const deadline = elapsedNowMs() + RUN_LIMIT_MS;
   const branch = config.productionRef.slice("refs/heads/".length);
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const summary = options.summary ?? (async () => {});
@@ -142,12 +192,15 @@ export async function runDailyPublication(options: {
   if (publicBefore.state !== "present" || publicBefore.releaseId !== checkpoint.checkpoint.publication.releaseId) {
     throw new Error("Public predecessor differs from the authenticated checkpoint.");
   }
+  await assertOnlyScheduledOpportunity(api, serviceDate, options.schedulerRunId);
+  await assertNoScheduledCandidateConflict({ api: { getJson: (route) => api.get(route), getBytes: (route) => api.bytes(route) },
+    serviceDate });
   const candidateRunId = await api.dispatch(PRODUCER, branch, {
     refresh_mode: mode, service_date: serviceDate, confirmation: "PREPARE_LIVE_PAGES_FIELD_RELEASE",
     expected_source_sha: config.productionSha, expected_run_attempt: "1",
   });
-  await summary(`Candidate run: ${candidateRunId}`);
-  await waitForRun(api, candidateRunId, PRODUCER, LIVE_CANDIDATE_WORKFLOW_ID, config, deadline, sleep);
+  await summary(`Candidate run: [${candidateRunId}](https://github.com/${REPOSITORY}/actions/runs/${candidateRunId})`);
+  await waitForRun(api, candidateRunId, PRODUCER, LIVE_CANDIDATE_WORKFLOW_ID, config, deadline, sleep, elapsedNowMs);
   const receipts = exactArtifact(await api.get(`repos/${REPOSITORY}/actions/runs/${candidateRunId}/artifacts?per_page=100`),
     `lionlog-candidate-receipts-${candidateRunId}-1`, candidateRunId, config.productionSha);
   const receiptFiles = await artifactEntries(api, receipts, ["live.json", "first-release-recovery.json"]);
@@ -171,8 +224,10 @@ export async function runDailyPublication(options: {
     || manifest.menu.omissions["invalid-name"] !== 0) {
     throw new Error("Candidate manifest is outside complete-coverage standing policy.");
   }
-  const expiresAt = Math.min(Date.now() + 3 * 60 * 60_000, Date.parse(manifest.menu.earliestFreshUntil) - 60 * 60_000);
-  if (expiresAt < Date.now() + 45 * 60_000) throw new Error("Candidate lacks time for unattended publication and verification.");
+  const headroomNow = wallNowMs();
+  if (!Number.isFinite(headroomNow)) throw new Error("Publication deadline clock is invalid.");
+  const expiresAt = Math.min(headroomNow + 3 * 60 * 60_000, Date.parse(manifest.menu.earliestFreshUntil) - 60 * 60_000);
+  if (expiresAt < wallNowMs() + 45 * 60_000) throw new Error("Candidate lacks time for unattended publication and verification.");
   await checkPin();
   const predecessor = await observePublic();
   if (predecessor.state !== "present" || predecessor.releaseId !== checkpoint.checkpoint.publication.releaseId) {
@@ -187,12 +242,12 @@ export async function runDailyPublication(options: {
     approval_expires_at: new Date(expiresAt).toISOString(), rollback_receipt_artifact_id: "NONE",
     rollback_receipt_artifact_digest: "NONE", confirmation: "PROMOTE_EXACT_LIONLOG_RELEASE",
   });
-  await summary(`Publication run: ${promotionRunId}`);
-  await waitForRun(api, promotionRunId, PROMOTION, PROMOTION_WORKFLOW_ID, config, deadline, sleep);
+  await summary(`Publication run: [${promotionRunId}](https://github.com/${REPOSITORY}/actions/runs/${promotionRunId})`);
+  await waitForRun(api, promotionRunId, PROMOTION, PROMOTION_WORKFLOW_ID, config, deadline, sleep, elapsedNowMs);
   await checkPin();
   const checkpointRunId = await api.dispatch(CHECKPOINT, branch, { expected_promotion_run_id: String(promotionRunId) });
-  await summary(`Checkpoint run: ${checkpointRunId}`);
-  await waitForRun(api, checkpointRunId, CHECKPOINT, undefined, config, deadline, sleep);
+  await summary(`Checkpoint run: [${checkpointRunId}](https://github.com/${REPOSITORY}/actions/runs/${checkpointRunId})`);
+  await waitForRun(api, checkpointRunId, CHECKPOINT, undefined, config, deadline, sleep, elapsedNowMs);
   const advanced = await readCheckpoint({ token: options.token, authorizedWriterId: options.writerId });
   if (advanced.checkpoint.boundary.runId !== promotionRunId
     || advanced.checkpoint.publication.releaseId !== manifest.releaseId) {

@@ -30,6 +30,8 @@ jobs:
       inputs.expected_promotion_run_id != ''
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    environment:
+      name: lionlog-publication-writer
     permissions:
       actions: read
       contents: read
