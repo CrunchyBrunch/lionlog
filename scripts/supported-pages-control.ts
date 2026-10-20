@@ -12,7 +12,7 @@ import {
   TARGET_ORIGIN,
 } from "../infrastructure/publication/release-contract.ts";
 import type { ValidatedRelease } from "./supported-pages-release.ts";
-import { ACTION_HEADROOM_MS } from "./supported-pages-release.ts";
+import { ACTION_HEADROOM_MS, STANDING_PUBLICATION_POLICY, assertStandingPublicationPolicy } from "./supported-pages-release.ts";
 import { assertExpectedPredecessor, validateExpectedPredecessor, type PublicReleaseObservation } from "./public-release-state.ts";
 import type {
   IncidentCollectionEvidence,
@@ -155,6 +155,9 @@ export function validatePreapprovalSummary(value: unknown): PreapprovalSummary {
     throw new Error("Preapproval summary approval expiry is not canonical.");
   }
   validateExpectedPredecessor(summary.authorization.predecessorReleaseId);
+  if (summary.authorization.standingPolicy !== undefined && summary.authorization.standingPolicy !== STANDING_PUBLICATION_POLICY) {
+    throw new Error("Preapproval summary standing policy is invalid.");
+  }
   return summary;
 }
 
@@ -175,6 +178,12 @@ export function verifyFinalState(options: {
   }
   if (options.checkpoint) assertVerifiedPublicationCheckpoint(options.checkpoint);
   const summary = validatePreapprovalSummary(options.summary);
+  if (options.productionRef) assertStandingPublicationPolicy({ policy: summary.authorization.standingPolicy,
+    operation: summary.operation, coverage: summary.release.coverage,
+    invalidNameOmissions: summary.release.omissions["invalid-name"] });
+  if (!options.productionRef && summary.authorization.standingPolicy !== undefined) {
+    throw new Error("Manual submission cannot claim standing authority.");
+  }
   const { state } = options;
   if (!Number.isFinite(options.now.getTime())) throw new Error("Final verification time is invalid.");
   if (state.repository.id !== LIONLOG_REPOSITORY_ID || state.repository.full_name !== LIONLOG_REPOSITORY) throw new Error("Repository identity drifted.");

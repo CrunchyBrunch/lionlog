@@ -9,7 +9,9 @@ import {
   preparePublicationCheckpoint,
   observeCheckpointPublicProof,
   assertCheckpointPublicProof,
+  isResolvedPublishedPredecessor,
 } from "../scripts/publication-checkpoint.ts";
+import type { PriorAttemptEvidence } from "../scripts/supported-pages-control.ts";
 import { collectPagesAttemptHistory } from "../scripts/collect-pages-attempt-history.ts";
 import { advanceRefreshCheckpoint, assertTrustedWriterEnvironment } from "../scripts/advance-refresh-checkpoint.ts";
 
@@ -44,6 +46,25 @@ const checkpoint = {
   },
   history: { sha256: "2".repeat(64), coveredReruns: [] },
 };
+
+test("bootstrap may carry a reviewed published incident only before a later known-good boundary", () => {
+  const historical = {
+    runId: 36900859358, runAttempt: 1, workflowSha: sha, status: "completed", conclusion: "failure",
+    jobsComplete: true, finalGateConclusion: "success", submissionBoundaryConclusion: "success",
+    deploymentConclusion: "success", incidentEvidence: { reviewed: true },
+    receipt: { artifactId: 30, artifactDigest: digest, content: {
+      workflow: { runId: 36900859358, runAttempt: 1 }, knownGood: false, unresolved: true,
+      public: { browserVerified: false },
+    } },
+    publishedResolution: { runId: 36900859358, runAttempt: 1, workflowSha: sha,
+      receiptArtifactId: 30, receiptArtifactDigest: digest },
+  } as unknown as PriorAttemptEvidence;
+  assert.equal(isResolvedPublishedPredecessor(historical), true);
+  assert.equal(isResolvedPublishedPredecessor({ ...historical, publishedResolution: null }), false);
+  assert.equal(isResolvedPublishedPredecessor({ ...historical, receipt: {
+    ...historical.receipt!, content: { ...historical.receipt!.content, knownGood: true },
+  } }), false);
+});
 
 function validated(overrides: Record<string, unknown> = {}, alternateReceipt = receiptBytes) {
   return validatePublicationCheckpoint({

@@ -1,7 +1,8 @@
-/** Inactive automatic-refresh policy. No timer or workflow dispatch is defined here. */
+/** Bounded daily refresh policy; activation remains controlled by repository settings. */
 export const REFRESH_DAILY_UPSTREAM_LIMIT = 1_680;
 export const PROPOSED_PRIMARY_MINUTE = 5 * 60 + 17;
 export const PROPOSED_PRIMARY_WINDOW_MINUTES = 30;
+export const LATEST_DAILY_START_MINUTE = 10 * 60;
 
 const REPOSITORY = "CrunchyBrunch/lionlog";
 const PRODUCER_WORKFLOW = ".github/workflows/build-live-menu-artifact.yml";
@@ -94,6 +95,7 @@ export function evaluateRefreshPolicy(options: {
   }
   const minute = local.hour * 60 + local.minute;
   if (minute < PROPOSED_PRIMARY_MINUTE) throw new Error("Proposed 05:17 New York refresh is not due.");
+  if (minute >= LATEST_DAILY_START_MINUTE) throw new Error("The daily refresh start window has closed.");
   if (options.publication === "known-good") throw new Error("The service date already has a known-good published release.");
   if (options.publication === "uncertain") throw new Error("Uncertain publication pauses automatic refresh.");
   if (options.publication !== "none" || options.completeHistory !== true || !Array.isArray(options.attempts)) {

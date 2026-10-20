@@ -1,4 +1,4 @@
-# Manual GitHub Pages deployment handoff
+# GitHub Pages deployment handoff
 
 Date: 2026-09-17
 Expected project URL: `https://crunchybrunch.github.io/lionlog/`
@@ -9,17 +9,17 @@ The manual production workflow uses GitHub's supported Pages actions:
 
 validated retained candidate → `actions/upload-pages-artifact` → protected `github-pages` approval → `actions/deploy-pages` → exact public inventory and mobile/offline verification → one flat retained receipt.
 
-LionLog does not create Pages deployments, request OIDC tokens, or poll Pages status itself. Those responsibilities belong to the pinned official action. The removed custom adapter, deployment ledgers, partial-approval tokens, and automatic first-release recovery are not part of this workflow. A Project Manager approval still has an exact digest-bound expiry; the workflow requires 30 minutes of headroom before staging and 15 minutes immediately before submission.
+LionLog does not create Pages deployments, request OIDC tokens, or poll Pages status itself. Those responsibilities belong to the pinned official action. The removed custom adapter, deployment ledgers, partial-approval tokens, and automatic first-release recovery are not part of this workflow. Manual Project Manager approval has an exact digest-bound expiry; automatic promotion has a short execution deadline under the reviewed standing policy. Both require 30 minutes of headroom before staging and 15 minutes immediately before submission.
 
 ## Safety boundary
 
-- `workflow_dispatch` is the only trigger; there is no push, pull-request, or schedule trigger.
+- The deployment workflow itself accepts only `workflow_dispatch`. The separately gated daily scheduler may dispatch its pinned production revision after owner activation; there is no push or pull-request deployment trigger.
 - Top-level permissions are `{}`. Validation and public verification have only `contents: read` and `actions: read`. Only the protected deploy job receives `pages: write` and `id-token: write`.
-- The workflow runs only for `CrunchyBrunch/lionlog`, `refs/heads/main`, and attempt 1, at an operator-supplied exact workflow SHA. Its shared production lock is exactly `github-pages-production` with cancellation disabled; operators must let any run using the predecessor lock finish before merging this lock-name migration.
+- The manual path runs for `CrunchyBrunch/lionlog`, `refs/heads/main`, and attempt 1, at an operator-supplied exact workflow SHA. The inactive automatic path requires the exact approved production ref/SHA and standing policy. Its shared production lock is exactly `github-pages-production` with cancellation disabled; operators must let any run using the predecessor lock finish before merging this lock-name migration.
 - Candidate run, artifact, wrapper digest, manifest digest, release ID, source SHA, service date, exact-source CI, expiry, freshness/retention, complete inventory, catalog/snapshots, marker, and `/lionlog/` paths are revalidated.
 - The official staged artifact has the unique name `lionlog-pages-<run>-<attempt>`, is uploaded once without overwrite, then downloaded again by numeric ID. Its wrapper digest and every tar path, size, and hash must match the approved candidate.
 - The authorization binds either the exact currently published release ID or the explicit `NONE_FIRST_PUBLICATION` sentinel. The public marker is checked before staging and re-observed after protected approval.
-- The protected job repeats main, run, CI, candidate, artifact, staged-artifact, approval-expiry, freshness/retention, public-predecessor, and attempt-specific unresolved-submission checks after human approval and immediately before the official deploy action. GitHub cannot make a shell check and the later action-internal HTTP submission one atomic operation, so a stopped or ambiguous action remains unresolved rather than being inferred safe.
+- The deployment job repeats source, run, CI, candidate, artifact, staged-artifact, authorization-deadline, freshness/retention, public-predecessor, and attempt-specific unresolved-submission checks immediately before the official deploy action. Manual mode follows protected human approval; automatic mode requires the `COMPLETE_COVERAGE_V1` standing policy and the owner-configured `github-pages-automatic` environment. GitHub cannot make a shell check and the later action-internal HTTP submission one atomic operation, so a stopped or ambiguous action remains unresolved rather than being inferred safe.
 - Promotion never builds, runs candidate code, contacts PSU, changes Pages settings, modifies DNS, or changes repository visibility.
 - A successful official action is not enough for `knownGood`: the exact public marker and full inventory must match, and a 390×844 Chrome check must render an approved non-empty hall/date/meal snapshot with the exact shell revision, item count, and first item online and after a service-worker-backed offline reload. Sample fallback, console warnings/errors, and horizontal overflow fail verification.
 
@@ -30,7 +30,7 @@ Official actions are pinned to immutable commits:
 
 ## Operation
 
-Do not dispatch until the workflow is reviewed, merged, exact-source CI succeeds, the candidate remains retained, and a human has reviewed the candidate receipt and inventory.
+For manual promotion, do not dispatch until the workflow is reviewed, merged, exact-source CI succeeds, the candidate remains retained, and a human has reviewed the candidate receipt and inventory. The prepared automatic path uses the approved production pin and complete-coverage standing policy after owner activation.
 
 Promotion inputs identify one exact fresh live candidate, exact public predecessor, and approval deadline. Rollback uses the same workflow and exact retained candidate bytes, plus the flat receipt artifact ID/digest from a prior fully verified `knownGood` deployment. Rollback never rebuilds or re-scrapes. Automated first-release recovery is intentionally absent; a first-release incident requires a separately reviewed change and authorization. Candidate construction still retains the existing first-release recovery artifact as reviewed recovery material, but the supported deployment workflow neither consumes nor promotes it automatically; removing that candidate-build artifact is deferred to a separately scoped change.
 
@@ -44,4 +44,4 @@ Legacy run `35221481720` is reconciled once in `infrastructure/publication/pages
 
 ## Scope
 
-This handoff does not authorize a workflow dispatch, environment approval, deployment, ingestion, schedule, GitHub Pages/settings change, DNS/hosting change, repository visibility change, or optimizer work.
+This handoff does not itself authorize a workflow dispatch, environment approval, deployment, ingestion, schedule activation, GitHub Pages/settings change, DNS/hosting change, repository visibility change, or optimizer work. The precise owner steps for the prepared daily route are in [daily publication activation](daily-publication-activation.md).

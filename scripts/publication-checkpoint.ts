@@ -8,7 +8,7 @@ import {
 import { branchFromProductionRef, validateKnownGoodReceipt } from "./supported-pages-release.ts";
 import { validatePublicationReleaseManifest, PROMOTION_WORKFLOW_ID } from "../infrastructure/publication/release-contract.ts";
 import { collectPagesAttemptHistory } from "./collect-pages-attempt-history.ts";
-import { isKnownGoodAttempt, isProvenPreSubmissionFailure } from "./supported-pages-control.ts";
+import { isKnownGoodAttempt, isProvenPreSubmissionFailure, type PriorAttemptEvidence } from "./supported-pages-control.ts";
 import { observePublicRelease } from "./public-release-state.ts";
 import { verifyPublicSite } from "./verify-public-site.mjs";
 
@@ -17,6 +17,22 @@ const HASH = /^[a-f0-9]{64}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const CHECKPOINT_MANIFEST_MAX_BYTES = 512 * 1024;
 export const PUBLICATION_STATE_BRANCH = "refs/heads/lionlog-publication-state";
+
+/** A reviewed historical publication may precede a later genuine known-good seed. */
+export function isResolvedPublishedPredecessor(attempt: PriorAttemptEvidence): boolean {
+  const resolution = attempt.publishedResolution;
+  const receipt = attempt.receipt?.content as { knownGood?: unknown; unresolved?: unknown;
+    workflow?: { runId?: unknown; runAttempt?: unknown }; public?: { browserVerified?: unknown } } | undefined;
+  return resolution !== null && resolution !== undefined && attempt.incidentEvidence !== null
+    && attempt.status === "completed" && attempt.conclusion === "failure" && attempt.jobsComplete === true
+    && attempt.finalGateConclusion === "success" && attempt.submissionBoundaryConclusion === "success"
+    && attempt.deploymentConclusion === "success" && receipt?.knownGood === false && receipt.unresolved === true
+    && receipt.workflow?.runId === attempt.runId && receipt.workflow.runAttempt === attempt.runAttempt
+    && receipt.public?.browserVerified === false && resolution.runId === attempt.runId
+    && resolution.runAttempt === attempt.runAttempt && resolution.workflowSha === attempt.workflowSha
+    && resolution.receiptArtifactId === attempt.receipt?.artifactId
+    && resolution.receiptArtifactDigest === attempt.receipt?.artifactDigest;
+}
 
 export interface PublicationCheckpoint {
   checkpointVersion: "lionlog.pages-publication-checkpoint.v1";
@@ -420,10 +436,13 @@ export async function preparePublicationCheckpoint(options: {
       || attempt.workflowPath !== ".github/workflows/deploy-github-pages.yml"
       || attempt.event !== "workflow_dispatch" || (attempt.headBranch !== "main" && attempt.headBranch !== productionBranch)
       || !SHA.test(attempt.workflowSha) || attempt.status !== "completed" || attempt.jobsComplete !== true
-      || attempt.incidentEvidence !== null || attempt.publishedResolution !== null) {
+      || ((attempt.incidentEvidence !== null
+        || (attempt.publishedResolution !== null && attempt.publishedResolution !== undefined))
+        && !isResolvedPublishedPredecessor(attempt))) {
       throw new Error("Checkpoint proposal includes an unresolved or nonstandard attempt.");
     }
-    if (!isKnownGoodAttempt(attempt) && !isProvenPreSubmissionFailure(attempt)) {
+    if (!isKnownGoodAttempt(attempt) && !isProvenPreSubmissionFailure(attempt)
+      && !isResolvedPublishedPredecessor(attempt)) {
       throw new Error("Checkpoint proposal includes an unknown submission outcome.");
     }
   }
