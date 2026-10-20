@@ -185,7 +185,7 @@ test("queued candidate stops at the elapsed daily deadline", async () => {
   assert.deepEqual(dispatched, [".github/workflows/build-live-menu-artifact.yml"]);
 });
 
-test("one complete scheduled sequence binds candidate, promotion, public verification, and checkpoint", async () => {
+async function completeSequenceFixture() {
   const parsed = JSON.parse(await readFile(new URL("./fixtures/published-incident-parsed.json", import.meta.url), "utf8"));
   const manifest = parsed.manifest;
   manifest.source.commitSha = sha;
@@ -220,11 +220,15 @@ test("one complete scheduled sequence binds candidate, promotion, public verific
   const dispatched: Array<{ workflow: string; inputs: Record<string, string> }> = [];
   const summaries: string[] = [];
   let promotionFails = false;
+  let onGet: ((route: string) => void) | undefined;
+  let onBytes: ((route: string) => void) | undefined;
+  let onDispatch: ((workflow: string) => void) | undefined;
   const run = (id: number, workflow: string, workflowId?: number) => ({ id, path: workflow,
     workflow_id: workflowId, event: "workflow_dispatch", run_attempt: 1, head_sha: sha,
     head_branch: "production", status: "completed", conclusion: "success" });
   const api: DailyApi = {
     get: async (route) => {
+      onGet?.(route);
       if (route.endsWith("/runs/9")) return scheduleRun;
       const history = emptyDailyHistory(route);
       if (history !== undefined) return history;
@@ -240,9 +244,23 @@ test("one complete scheduled sequence binds candidate, promotion, public verific
         digest: candidateDigest, expired: false, workflow_run: { id: 100, head_sha: sha } };
       throw new Error(`Unexpected fixture API route: ${route}`);
     },
-    bytes: async (route) => route.endsWith("/artifacts/200/zip") ? receiptZip : candidateZip,
-    dispatch: async (workflow, _branch, inputs) => { dispatched.push({ workflow, inputs }); return 99 + dispatched.length; },
+    bytes: async (route) => { onBytes?.(route); return route.endsWith("/artifacts/200/zip") ? receiptZip : candidateZip; },
+    dispatch: async (workflow, _branch, inputs) => {
+      dispatched.push({ workflow, inputs });
+      onDispatch?.(workflow);
+      return 99 + dispatched.length;
+    },
   };
+  return { api, manifest, dispatched, summaries, candidateDigest, manifestSha,
+    setPromotionFails: (value: boolean) => { promotionFails = value; },
+    setHooks: (hooks: { get?: (route: string) => void; bytes?: (route: string) => void;
+      dispatch?: (workflow: string) => void }) => {
+      onGet = hooks.get; onBytes = hooks.bytes; onDispatch = hooks.dispatch;
+    } };
+}
+
+test("one complete scheduled sequence binds candidate, promotion, public verification, and checkpoint", async () => {
+  const { api, manifest, dispatched, summaries, candidateDigest, manifestSha, setPromotionFails } = await completeSequenceFixture();
   let checkpointReads = 0;
   const fixtureClock = () => Date.parse("2026-10-19T09:17:00Z");
   const outcome = await runDailyPublication({ ...fixed, api, now: new Date("2026-10-19T09:17:00Z"),
@@ -262,7 +280,7 @@ test("one complete scheduled sequence binds candidate, promotion, public verific
   for (const id of [100, 101, 102]) {
     assert.ok(summaries.some((line) => line.includes(`[${id}](https://github.com/CrunchyBrunch/lionlog/actions/runs/${id})`)));
   }
-  promotionFails = true;
+  setPromotionFails(true);
   dispatched.length = 0;
   checkpointReads = 0;
   await assert.rejects(runDailyPublication({ ...fixed, api, now: new Date("2026-10-19T09:17:00Z"),
@@ -272,6 +290,128 @@ test("one complete scheduled sequence binds candidate, promotion, public verific
   assert.deepEqual(dispatched.map((entry) => entry.workflow), [
     ".github/workflows/build-live-menu-artifact.yml", ".github/workflows/deploy-github-pages.yml",
   ]);
+});
+
+test("elapsed deadline gates every dispatch and terminal result at equality", async () => {
+  const limit = 3 * 60 * 60_000;
+  const cases = [
+    { name: "candidate preflight", expectedDispatches: 0, point: "preflight" },
+    { name: "candidate dispatch response", expectedDispatches: 1, point: "candidate-dispatch" },
+    { name: "candidate artifact read", expectedDispatches: 1, point: "artifact" },
+    { name: "public predecessor read", expectedDispatches: 1, point: "promotion-public-read" },
+    { name: "promotion terminal read", expectedDispatches: 2, point: "promotion-result" },
+    { name: "checkpoint ref read", expectedDispatches: 2, point: "checkpoint-pin" },
+    { name: "checkpoint terminal read", expectedDispatches: 3, point: "checkpoint-result" },
+    { name: "final checkpoint read", expectedDispatches: 3, point: "final-checkpoint" },
+  ] as const;
+  for (const boundary of cases) {
+    const fixture = await completeSequenceFixture();
+    let elapsed = 0;
+    let checkpointReads = 0;
+    let publicReads = 0;
+    let pinReads = 0;
+    fixture.setHooks({
+      bytes: (route) => { if (boundary.point === "artifact" && route.endsWith("/artifacts/300/zip")) elapsed = limit; },
+      get: (route) => {
+        if (route.includes("/git/ref/") && ++pinReads === 3 && boundary.point === "checkpoint-pin") elapsed = limit;
+        if (boundary.point === "promotion-result" && route.endsWith("/runs/101")) elapsed = limit;
+        if (boundary.point === "checkpoint-result" && route.endsWith("/runs/102")) elapsed = limit;
+      },
+      dispatch: (workflow) => {
+        if (boundary.point === "candidate-dispatch" && workflow === ".github/workflows/build-live-menu-artifact.yml") elapsed = limit;
+      },
+    });
+    const operation = runDailyPublication({ ...fixed, api: fixture.api, now: new Date("2026-10-19T09:17:00Z"),
+      wallNowMs: () => Date.parse("2026-10-19T09:17:00Z") + elapsed, elapsedNowMs: () => elapsed,
+      loadCheckpoint: async () => {
+        const first = checkpointReads++ === 0;
+        if (boundary.point === "final-checkpoint" && !first) elapsed = limit;
+        return { checkpoint: { publication: { releaseId: first ? "c".repeat(64) : fixture.manifest.releaseId },
+          boundary: { runId: 101 } } } as unknown as Awaited<ReturnType<typeof loadPublicationCheckpoint>>;
+      },
+      observePublic: async () => {
+        if (++publicReads === 2 && boundary.point === "promotion-public-read") elapsed = limit;
+        if (boundary.point === "preflight") elapsed = limit;
+        return { state: "present", releaseId: "c".repeat(64) };
+      },
+    });
+    await assert.rejects(operation, /bounded daily window/, boundary.name);
+    assert.equal(fixture.dispatched.length, boundary.expectedDispatches, boundary.name);
+  }
+});
+
+test("elapsed deadline permits a complete sequence just inside each boundary", async () => {
+  const limit = 3 * 60 * 60_000;
+  const fixedWall = Date.parse("2026-10-19T09:17:00Z");
+  for (const point of ["preflight", "candidate-dispatch", "artifact", "promotion-public-read",
+    "promotion-result", "checkpoint-pin", "checkpoint-result", "final-checkpoint"]) {
+    const fixture = await completeSequenceFixture();
+    let elapsed = 0;
+    let checkpointReads = 0;
+    let publicReads = 0;
+    let pinReads = 0;
+    fixture.setHooks({
+      bytes: (route) => { if (point === "artifact" && route.endsWith("/artifacts/300/zip")) elapsed = limit - 1; },
+      get: (route) => {
+        if (route.includes("/git/ref/") && ++pinReads === 3 && point === "checkpoint-pin") elapsed = limit - 1;
+        if (point === "promotion-result" && route.endsWith("/runs/101")) elapsed = limit - 1;
+        if (point === "checkpoint-result" && route.endsWith("/runs/102")) elapsed = limit - 1;
+      },
+      dispatch: (workflow) => {
+        if (point === "candidate-dispatch" && workflow === ".github/workflows/build-live-menu-artifact.yml") elapsed = limit - 1;
+      },
+    });
+    const outcome = await runDailyPublication({ ...fixed, api: fixture.api, now: new Date(fixedWall),
+      // Keep freshness headroom stable so this case isolates the elapsed-boundary comparison.
+      wallNowMs: () => fixedWall, elapsedNowMs: () => elapsed,
+      loadCheckpoint: async () => {
+        const first = checkpointReads++ === 0;
+        if (point === "final-checkpoint" && !first) elapsed = limit - 1;
+        return { checkpoint: { publication: { releaseId: first ? "c".repeat(64) : fixture.manifest.releaseId },
+          boundary: { runId: 101 } } } as unknown as Awaited<ReturnType<typeof loadPublicationCheckpoint>>;
+      },
+      observePublic: async () => {
+        if (++publicReads === 2 && point === "promotion-public-read") elapsed = limit - 1;
+        if (point === "preflight") elapsed = limit - 1;
+        return { state: "present" as const, releaseId: "c".repeat(64) };
+      },
+    });
+    assert.deepEqual(outcome, { candidateRunId: 100, promotionRunId: 101, checkpointRunId: 102 }, point);
+  }
+});
+
+test("promotion authorization never extends the original daily window", async () => {
+  const fixture = await completeSequenceFixture();
+  const startedAt = Date.parse("2026-10-19T09:17:00Z");
+  let elapsed = 0;
+  let checkpointReads = 0;
+  fixture.setHooks({ bytes: (route) => {
+    if (route.endsWith("/artifacts/300/zip")) elapsed = 2 * 60 * 60_000;
+  } });
+  const outcome = await runDailyPublication({ ...fixed, api: fixture.api, now: new Date(startedAt),
+    wallNowMs: () => startedAt + elapsed, elapsedNowMs: () => elapsed,
+    loadCheckpoint: async () => ({ checkpoint: { publication: { releaseId: checkpointReads++ === 0
+      ? "c".repeat(64) : fixture.manifest.releaseId }, boundary: { runId: 101 } } }) as unknown as Awaited<ReturnType<typeof loadPublicationCheckpoint>>,
+    observePublic: async () => ({ state: "present", releaseId: "c".repeat(64) }),
+  });
+  assert.equal(outcome.promotionRunId, 101);
+  assert.equal(fixture.dispatched[1].inputs.approval_expires_at, new Date(startedAt + 3 * 60 * 60_000).toISOString());
+});
+
+test("promotion rechecks wall-clock headroom after the last public read", async () => {
+  const fixture = await completeSequenceFixture();
+  const startedAt = Date.parse("2026-10-19T09:17:00Z");
+  let wall = startedAt;
+  let publicReads = 0;
+  await assert.rejects(runDailyPublication({ ...fixed, api: fixture.api, now: new Date(startedAt),
+    wallNowMs: () => wall, elapsedNowMs: () => 0,
+    loadCheckpoint: async () => ({ checkpoint: { publication: { releaseId: "c".repeat(64) } } }) as unknown as Awaited<ReturnType<typeof loadPublicationCheckpoint>>,
+    observePublic: async () => {
+      if (++publicReads === 2) wall = startedAt + 2 * 60 * 60_000 + 30 * 60_000;
+      return { state: "present", releaseId: "c".repeat(64) };
+    },
+  }), /Candidate lacks time/);
+  assert.deepEqual(fixture.dispatched.map((entry) => entry.workflow), [".github/workflows/build-live-menu-artifact.yml"]);
 });
 
 function hash(bytes: Buffer): string { return createHash("sha256").update(bytes).digest("hex"); }

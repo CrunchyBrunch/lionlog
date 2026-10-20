@@ -23,9 +23,9 @@ const RUN_LIMIT_MS = 3 * 60 * 60_000;
 const MAX_DAILY_SCHEDULE_RUNS = 1_000;
 
 export interface DailyApi {
-  get(path: string): Promise<unknown>;
-  bytes(path: string): Promise<Buffer>;
-  dispatch(workflow: string, branch: string, inputs: Record<string, string>): Promise<number>;
+  get(path: string, budgetMs?: number): Promise<unknown>;
+  bytes(path: string, budgetMs?: number): Promise<Buffer>;
+  dispatch(workflow: string, branch: string, inputs: Record<string, string>, budgetMs?: number): Promise<number>;
 }
 interface GitHubArtifact { id: number; name: string; digest: string; expired: boolean;
   workflow_run: { id: number; head_sha: string } }
@@ -129,11 +129,12 @@ function assertProductionRef(value: unknown, config: RefreshConfiguration): void
 }
 
 async function waitForRun(api: DailyApi, id: number, workflow: string, workflowId: number | undefined,
-  config: RefreshConfiguration, deadline: number, sleep: (ms: number) => Promise<void>,
-  elapsedNowMs: () => number): Promise<void> {
+  config: RefreshConfiguration, sleep: (ms: number) => Promise<void>, remainingMs: () => number): Promise<void> {
   const branch = config.productionRef.slice("refs/heads/".length);
-  while (elapsedNowMs() < deadline) {
+  while (true) {
+    remainingMs();
     const run = await api.get(`repos/${REPOSITORY}/actions/runs/${id}`) as GitHubRun;
+    remainingMs();
     if (run?.id !== id || run.path !== workflow || (workflowId !== undefined && run.workflow_id !== workflowId)
       || run.event !== "workflow_dispatch" || run.run_attempt !== 1 || run.head_sha !== config.productionSha
       || run.head_branch !== branch || !["queued", "in_progress", "completed"].includes(run.status)) {
@@ -143,9 +144,8 @@ async function waitForRun(api: DailyApi, id: number, workflow: string, workflowI
       if (run.conclusion !== "success") throw new Error(`${workflow} ended ${run.conclusion ?? "without a conclusion"}.`);
       return;
     }
-    await sleep(15_000);
+    await sleep(Math.min(15_000, remainingMs()));
   }
-  throw new Error(`${workflow} did not complete within the bounded daily window.`);
 }
 
 export async function runDailyPublication(options: {
@@ -166,8 +166,39 @@ export async function runDailyPublication(options: {
     || !Number.isSafeInteger(options.writerId) || options.writerId < 1 || !options.token) {
     throw new Error("Daily schedule or standing authority is inactive or changed.");
   }
+  const wallNowMs = options.wallNowMs ?? Date.now;
+  const elapsedNowMs = options.elapsedNowMs ?? (() => performance.now());
+  const wallStartMs = wallNowMs();
+  const elapsedStartMs = elapsedNowMs();
+  if (!Number.isFinite(wallStartMs) || !Number.isFinite(elapsedStartMs)) {
+    throw new Error("Daily scheduler clock is invalid.");
+  }
+  const deadline = elapsedStartMs + RUN_LIMIT_MS;
+  const remainingMs = (): number => {
+    const remaining = Math.floor(deadline - elapsedNowMs());
+    if (!Number.isFinite(remaining) || remaining < 1) {
+      throw new Error("Daily publication did not complete within the bounded daily window.");
+    }
+    return remaining;
+  };
+  const boundedApi: DailyApi = {
+    get: async (route) => {
+      const result = await api.get(route, remainingMs());
+      remainingMs();
+      return result;
+    },
+    bytes: async (route) => {
+      const result = await api.bytes(route, remainingMs());
+      remainingMs();
+      return result;
+    },
+    // A dispatch may have started remotely even when its response arrives late. Preserve its returned ID for the summary.
+    dispatch: (workflow, branch, inputs) => api.dispatch(workflow, branch, inputs, remainingMs()),
+  };
+  const boundedFetch: typeof fetch = (input, init) => fetch(input, { ...init,
+    signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), AbortSignal.timeout(remainingMs())]) });
   const { serviceDate, mode } = scheduledOpportunity(options.now);
-  const scheduledRun = await api.get(`repos/${REPOSITORY}/actions/runs/${options.schedulerRunId}`) as GitHubRun;
+  const scheduledRun = await boundedApi.get(`repos/${REPOSITORY}/actions/runs/${options.schedulerRunId}`) as GitHubRun;
   if (scheduledRun?.id !== options.schedulerRunId || scheduledRun.path !== ".github/workflows/daily-publication.yml"
     || scheduledRun.event !== "schedule" || scheduledRun.run_attempt !== 1
     || scheduledRun.head_branch !== "main" || scheduledRun.head_sha !== options.schedulerSha
@@ -177,44 +208,46 @@ export async function runDailyPublication(options: {
   if (newYorkDate(canonicalUtc(scheduledRun.created_at)) !== serviceDate) {
     throw new Error("Delayed schedule crossed the New York service-day boundary.");
   }
-  const wallNowMs = options.wallNowMs ?? Date.now;
-  const elapsedNowMs = options.elapsedNowMs ?? (() => performance.now());
-  const deadline = elapsedNowMs() + RUN_LIMIT_MS;
   const branch = config.productionRef.slice("refs/heads/".length);
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const summary = options.summary ?? (async () => {});
   const readCheckpoint = options.loadCheckpoint ?? loadPublicationCheckpoint;
   const observePublic = options.observePublic ?? observePublicRelease;
-  const checkPin = async () => assertProductionRef(await api.get(`repos/${REPOSITORY}/git/ref/${config.productionRef.slice("refs/".length)}`), config);
+  const checkPin = async () => assertProductionRef(await boundedApi.get(`repos/${REPOSITORY}/git/ref/${config.productionRef.slice("refs/".length)}`), config);
   await checkPin();
-  const checkpoint = await readCheckpoint({ token: options.token, authorizedWriterId: options.writerId });
-  const publicBefore = await observePublic();
+  const checkpoint = await readCheckpoint({ token: options.token, authorizedWriterId: options.writerId,
+    fetchImpl: boundedFetch });
+  remainingMs();
+  const publicBefore = await observePublic(boundedFetch);
+  remainingMs();
   if (publicBefore.state !== "present" || publicBefore.releaseId !== checkpoint.checkpoint.publication.releaseId) {
     throw new Error("Public predecessor differs from the authenticated checkpoint.");
   }
-  await assertOnlyScheduledOpportunity(api, serviceDate, options.schedulerRunId);
-  await assertNoScheduledCandidateConflict({ api: { getJson: (route) => api.get(route), getBytes: (route) => api.bytes(route) },
+  await assertOnlyScheduledOpportunity(boundedApi, serviceDate, options.schedulerRunId);
+  await assertNoScheduledCandidateConflict({ api: { getJson: (route) => boundedApi.get(route), getBytes: (route) => boundedApi.bytes(route) },
     serviceDate });
-  const candidateRunId = await api.dispatch(PRODUCER, branch, {
+  remainingMs();
+  const candidateRunId = await boundedApi.dispatch(PRODUCER, branch, {
     refresh_mode: mode, service_date: serviceDate, confirmation: "PREPARE_LIVE_PAGES_FIELD_RELEASE",
     expected_source_sha: config.productionSha, expected_run_attempt: "1",
   });
   await summary(`Candidate run: [${candidateRunId}](https://github.com/${REPOSITORY}/actions/runs/${candidateRunId})`);
-  await waitForRun(api, candidateRunId, PRODUCER, LIVE_CANDIDATE_WORKFLOW_ID, config, deadline, sleep, elapsedNowMs);
-  const receipts = exactArtifact(await api.get(`repos/${REPOSITORY}/actions/runs/${candidateRunId}/artifacts?per_page=100`),
+  remainingMs();
+  await waitForRun(boundedApi, candidateRunId, PRODUCER, LIVE_CANDIDATE_WORKFLOW_ID, config, sleep, remainingMs);
+  const receipts = exactArtifact(await boundedApi.get(`repos/${REPOSITORY}/actions/runs/${candidateRunId}/artifacts?per_page=100`),
     `lionlog-candidate-receipts-${candidateRunId}-1`, candidateRunId, config.productionSha);
-  const receiptFiles = await artifactEntries(api, receipts, ["live.json", "first-release-recovery.json"]);
+  const receiptFiles = await artifactEntries(boundedApi, receipts, ["live.json", "first-release-recovery.json"]);
   const receipt = publicationCandidateReceiptSchema.parse(JSON.parse(receiptFiles.get("live.json")!.toString("utf8")));
   if (receipt.producer.runId !== candidateRunId || receipt.producer.runAttempt !== 1
     || receipt.producer.sourceCommitSha !== config.productionSha || receipt.producer.workflowPath !== PRODUCER
     || receipt.candidate.releaseKind !== "live") throw new Error("Candidate receipt differs from the exact scheduled run.");
-  const candidate = await api.get(`repos/${REPOSITORY}/actions/artifacts/${receipt.candidate.artifactId}`) as GitHubArtifact;
+  const candidate = await boundedApi.get(`repos/${REPOSITORY}/actions/artifacts/${receipt.candidate.artifactId}`) as GitHubArtifact;
   if (candidate?.id !== receipt.candidate.artifactId || candidate.digest !== receipt.candidate.artifactDigest
     || candidate.name !== receipt.candidate.artifactName || candidate.expired !== false
     || candidate.workflow_run?.id !== candidateRunId || candidate.workflow_run?.head_sha !== config.productionSha) {
     throw new Error("Live candidate artifact differs from its retained receipt.");
   }
-  const bundle = await artifactEntries(api, candidate, ["release-manifest.json", "site.tar"]);
+  const bundle = await artifactEntries(boundedApi, candidate, ["release-manifest.json", "site.tar"]);
   const manifestBytes = bundle.get("release-manifest.json")!;
   const manifestDigest = createHash("sha256").update(manifestBytes).digest("hex");
   const manifest = validatePublicationReleaseManifest(JSON.parse(manifestBytes.toString("utf8")));
@@ -224,16 +257,23 @@ export async function runDailyPublication(options: {
     || manifest.menu.omissions["invalid-name"] !== 0) {
     throw new Error("Candidate manifest is outside complete-coverage standing policy.");
   }
-  const headroomNow = wallNowMs();
-  if (!Number.isFinite(headroomNow)) throw new Error("Publication deadline clock is invalid.");
-  const expiresAt = Math.min(headroomNow + 3 * 60 * 60_000, Date.parse(manifest.menu.earliestFreshUntil) - 60 * 60_000);
-  if (expiresAt < wallNowMs() + 45 * 60_000) throw new Error("Candidate lacks time for unattended publication and verification.");
+  remainingMs();
+  const expiresAt = Math.min(wallStartMs + RUN_LIMIT_MS, Date.parse(manifest.menu.earliestFreshUntil) - 60 * 60_000);
+  const assertPromotionHeadroom = () => {
+    const now = wallNowMs();
+    if (!Number.isFinite(now) || expiresAt < now + 45 * 60_000) {
+      throw new Error("Candidate lacks time for unattended publication and verification.");
+    }
+  };
+  assertPromotionHeadroom();
   await checkPin();
-  const predecessor = await observePublic();
+  const predecessor = await observePublic(boundedFetch);
+  remainingMs();
   if (predecessor.state !== "present" || predecessor.releaseId !== checkpoint.checkpoint.publication.releaseId) {
     throw new Error("Public predecessor changed before publication dispatch.");
   }
-  const promotionRunId = await api.dispatch(PROMOTION, branch, {
+  assertPromotionHeadroom();
+  const promotionRunId = await boundedApi.dispatch(PROMOTION, branch, {
     publication_mode: "automatic", operation: "promote", candidate_run_id: String(candidateRunId),
     candidate_artifact_id: String(candidate.id), candidate_artifact_digest: candidate.digest,
     candidate_manifest_sha256: manifestDigest, expected_release_id: manifest.releaseId,
@@ -243,44 +283,59 @@ export async function runDailyPublication(options: {
     rollback_receipt_artifact_digest: "NONE", confirmation: "PROMOTE_EXACT_LIONLOG_RELEASE",
   });
   await summary(`Publication run: [${promotionRunId}](https://github.com/${REPOSITORY}/actions/runs/${promotionRunId})`);
-  await waitForRun(api, promotionRunId, PROMOTION, PROMOTION_WORKFLOW_ID, config, deadline, sleep, elapsedNowMs);
+  remainingMs();
+  await waitForRun(boundedApi, promotionRunId, PROMOTION, PROMOTION_WORKFLOW_ID, config, sleep, remainingMs);
   await checkPin();
-  const checkpointRunId = await api.dispatch(CHECKPOINT, branch, { expected_promotion_run_id: String(promotionRunId) });
+  remainingMs();
+  const checkpointRunId = await boundedApi.dispatch(CHECKPOINT, branch, { expected_promotion_run_id: String(promotionRunId) });
   await summary(`Checkpoint run: [${checkpointRunId}](https://github.com/${REPOSITORY}/actions/runs/${checkpointRunId})`);
-  await waitForRun(api, checkpointRunId, CHECKPOINT, undefined, config, deadline, sleep, elapsedNowMs);
-  const advanced = await readCheckpoint({ token: options.token, authorizedWriterId: options.writerId });
+  remainingMs();
+  await waitForRun(boundedApi, checkpointRunId, CHECKPOINT, undefined, config, sleep, remainingMs);
+  const advanced = await readCheckpoint({ token: options.token, authorizedWriterId: options.writerId,
+    fetchImpl: boundedFetch });
+  remainingMs();
   if (advanced.checkpoint.boundary.runId !== promotionRunId
     || advanced.checkpoint.publication.releaseId !== manifest.releaseId) {
     throw new Error("Terminal checkpoint does not bind the verified publication.");
   }
   await summary(`Verified service date ${serviceDate}; release ${manifest.releaseId}`);
+  remainingMs();
   return { candidateRunId, promotionRunId, checkpointRunId };
 }
 
 class GitHubApi implements DailyApi {
   private readonly token: string;
   constructor(token: string) { this.token = token; }
-  private async request(route: string, body?: unknown): Promise<Response> {
+  private async request(route: string, body?: unknown, budgetMs?: number): Promise<Response> {
+    const timeout = Math.min(30_000, budgetMs ?? 30_000);
+    if (!Number.isFinite(timeout) || timeout < 1) throw new Error("GitHub request has no daily window remaining.");
     const response = await fetch(`https://api.github.com/${route}`, { method: body === undefined ? "GET" : "POST",
       redirect: "error", headers: { accept: "application/vnd.github+json", authorization: `Bearer ${this.token}`,
         "x-github-api-version": "2026-03-10", ...(body === undefined ? {} : { "content-type": "application/json" }) },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(Math.floor(timeout)) });
     if (!response.ok || response.redirected) throw new Error(`GitHub API ${route} returned HTTP ${response.status}.`);
     return response;
   }
-  async get(route: string): Promise<unknown> { return (await this.request(route)).json(); }
-  async bytes(route: string): Promise<Buffer> {
+  async get(route: string, budgetMs?: number): Promise<unknown> { return (await this.request(route, undefined, budgetMs)).json(); }
+  async bytes(route: string, budgetMs?: number): Promise<Buffer> {
+    const timeout = Math.min(120_000, budgetMs ?? 120_000);
+    if (!Number.isFinite(timeout) || timeout < 1) throw new Error("Artifact request has no daily window remaining.");
     const response = await fetch(`https://api.github.com/${route}`, { redirect: "follow",
       headers: { accept: "application/vnd.github+json", authorization: `Bearer ${this.token}`,
-        "x-github-api-version": "2026-03-10" }, signal: AbortSignal.timeout(120_000) });
+        "x-github-api-version": "2026-03-10" }, signal: AbortSignal.timeout(Math.floor(timeout)) });
     if (!response.ok || !response.url.startsWith("https://")) throw new Error(`Artifact download returned HTTP ${response.status}.`);
     const bytes = Buffer.from(await response.arrayBuffer());
     if (bytes.length === 0 || bytes.length > 115 * 1024 * 1024) throw new Error("Artifact download size is invalid.");
     return bytes;
   }
-  async dispatch(workflow: string, branch: string, inputs: Record<string, string>): Promise<number> {
-    const response = await this.request(`repos/${REPOSITORY}/actions/workflows/${workflow.slice(workflow.lastIndexOf("/") + 1)}/dispatches`,
-      { ref: branch, inputs, return_run_details: true });
+  async dispatch(workflow: string, branch: string, inputs: Record<string, string>, budgetMs?: number): Promise<number> {
+    let response: Response;
+    try {
+      response = await this.request(`repos/${REPOSITORY}/actions/workflows/${workflow.slice(workflow.lastIndexOf("/") + 1)}/dispatches`,
+        { ref: branch, inputs, return_run_details: true }, budgetMs);
+    } catch (error) {
+      throw new Error("Dispatch response is unavailable or uncertain; do not retry automatically.", { cause: error });
+    }
     if (response.status !== 200) throw new Error("Dispatch returned no exact run ID; do not retry automatically.");
     const result = await response.json() as { workflow_run_id?: unknown };
     if (!Number.isSafeInteger(result.workflow_run_id) || (result.workflow_run_id as number) < 1) {
