@@ -26,12 +26,12 @@ export function assertTrustedWriterEnvironment(value: {
 }
 
 export async function advanceRefreshCheckpoint(options: {
-  token: string; writerId: number; productionRef: string; productionSha: string;
+  token: string; writerId: number; appSlug: string; productionRef: string; productionSha: string;
   expectedRunId: number; manifestBytes: Buffer; incidentHistory: unknown;
   fetchImpl?: typeof fetch;
 }): Promise<string> {
   if (!Buffer.isBuffer(options.manifestBytes)) throw new Error("Checkpoint manifest bytes are invalid.");
-  const authority = { token: options.token, writerId: options.writerId,
+  const authority = { token: options.token, writerId: options.writerId, appSlug: options.appSlug,
     productionRef: options.productionRef, productionSha: options.productionSha,
     expectedRunId: options.expectedRunId, manifestBytes: Buffer.from(options.manifestBytes),
     incidentHistory: structuredClone(options.incidentHistory), fetchImpl: options.fetchImpl };
@@ -54,7 +54,8 @@ export async function advanceRefreshCheckpoint(options: {
     throw new Error("The terminal promotion differs from the approved production pin or expected run.");
   }
   const commitSha = await appendPublicationCheckpoint({ token: authority.token,
-    authorizedWriterId: authority.writerId, expectedParentSha: previous.commitSha,
+    authorizedWriterId: authority.writerId, authorizedAppSlug: authority.appSlug,
+    expectedParentSha: previous.commitSha,
     manifestBytes: authority.manifestBytes, incidentHistory: authority.incidentHistory,
     productionRef: authority.productionRef, fetchImpl: authority.fetchImpl,
     expectedPublication: { runId: authority.expectedRunId, runAttempt: 1,
@@ -90,6 +91,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const commitSha = await advanceRefreshCheckpoint({
     token: process.env.LIONLOG_PUBLICATION_WRITER_TOKEN ?? "",
     writerId: Number(process.env.LIONLOG_PUBLICATION_WRITER_ID),
+    appSlug: process.env.LIONLOG_PUBLICATION_APP_SLUG ?? "",
     productionRef: process.env.LIONLOG_PRODUCTION_REF ?? "",
     productionSha: process.env.LIONLOG_PRODUCTION_SHA ?? "",
     expectedRunId,
