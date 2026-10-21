@@ -249,7 +249,7 @@ export async function loadPublicationCheckpoint(options: {
   const parents = commit.parents as Array<{ sha: string }> | undefined;
   const tree = commitInfo?.tree as Record<string, unknown> | undefined;
   if (commit.sha !== commitSha || !Array.isArray(parents) || parents.length !== 1 || !SHA.test(parents[0]?.sha)
-    || author?.id !== options.authorizedWriterId || committer?.id !== options.authorizedWriterId
+    || author?.id !== options.authorizedWriterId || !positive(committer?.id)
     || verification?.verified !== true || typeof tree?.sha !== "string" || !SHA.test(tree.sha)) {
     throw new Error("Checkpoint commit lacks the authorized verified writer and exact parent.");
   }
@@ -287,10 +287,117 @@ export async function loadPublicationCheckpoint(options: {
   return { checkpoint, receiptBytes, manifestBytes, commitSha };
 }
 
-/** The future caller must hold the github-pages-production serialization group. This code never creates the state branch. */
+/** Installation-token preflight. The state ruleset must separately allow only this App to update. */
+export async function assertAuthorizedWriterInstallation(options: {
+  token: string; authorizedWriterId: number; authorizedAppSlug: string; fetchImpl?: typeof fetch;
+}): Promise<void> {
+  if (!positive(options.authorizedWriterId)
+    || !/^[a-z0-9][a-z0-9-]{0,99}$/.test(options.authorizedAppSlug)) {
+    throw new Error("Checkpoint App writer identity is invalid.");
+  }
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const installation = await githubJson(fetchImpl, options.token,
+    `${API}/installation/repositories?per_page=100`) as Record<string, unknown>;
+  const repositories = installation.repositories as Array<Record<string, unknown>> | undefined;
+  if (installation.total_count !== 1 || !Array.isArray(repositories) || repositories.length !== 1
+    || repositories[0].id !== LIONLOG_REPOSITORY_ID || repositories[0].full_name !== LIONLOG_REPOSITORY) {
+    throw new Error("Checkpoint App installation is not limited to the approved repository.");
+  }
+  const login = `${options.authorizedAppSlug}[bot]`;
+  const bot = await githubJson(fetchImpl, options.token,
+    `${API}/users/${encodeURIComponent(login)}`) as Record<string, unknown>;
+  if (bot.id !== options.authorizedWriterId || bot.login !== login || bot.type !== "Bot") {
+    throw new Error("Checkpoint App bot identity differs from the approved writer.");
+  }
+}
+
+/** One-time, preactivation seed on a separately approved zero-parent empty state root. */
+export async function bootstrapPublicationCheckpoint(options: {
+  token: string; authorizedWriterId: number; authorizedAppSlug: string;
+  expectedRootSha: string; expectedRunId: number; expectedSourceSha: string;
+  manifestBytes: Buffer; incidentHistory: unknown; productionRef: string;
+  fetchImpl?: typeof fetch; now?: Date;
+}): Promise<string> {
+  if (!SHA.test(options.expectedRootSha) || !SHA.test(options.expectedSourceSha)
+    || !positive(options.expectedRunId) || !Buffer.isBuffer(options.manifestBytes)
+    || options.manifestBytes.length === 0 || options.manifestBytes.length > CHECKPOINT_MANIFEST_MAX_BYTES) {
+    throw new Error("Checkpoint bootstrap authority or manifest is invalid.");
+  }
+  branchFromProductionRef(options.productionRef);
+  const fetchImpl = options.fetchImpl ?? fetch;
+  await assertAuthorizedWriterInstallation({ token: options.token,
+    authorizedWriterId: options.authorizedWriterId,
+    authorizedAppSlug: options.authorizedAppSlug, fetchImpl });
+  const assertRoot = async (): Promise<void> => {
+    const ref = await githubJson(fetchImpl, options.token, STATE_REF_API) as Record<string, unknown>;
+    if (ref.ref !== PUBLICATION_STATE_BRANCH
+      || (ref.object as Record<string, unknown> | undefined)?.type !== "commit"
+      || (ref.object as Record<string, unknown> | undefined)?.sha !== options.expectedRootSha) {
+      throw new Error("Checkpoint bootstrap state ref is not the approved root.");
+    }
+  };
+  await assertRoot();
+  const root = await githubJson(fetchImpl, options.token,
+    `${REPO_API}/commits/${options.expectedRootSha}`) as Record<string, unknown>;
+  const rootTreeSha = (root.commit as Record<string, unknown> | undefined)?.tree as Record<string, unknown> | undefined;
+  if (root.sha !== options.expectedRootSha || !Array.isArray(root.parents) || root.parents.length !== 0
+    || typeof rootTreeSha?.sha !== "string" || !SHA.test(rootTreeSha.sha)) {
+    throw new Error("Checkpoint bootstrap parent is not a zero-parent root.");
+  }
+  const rootTree = await githubJson(fetchImpl, options.token,
+    `${REPO_API}/git/trees/${rootTreeSha.sha}`) as Record<string, unknown>;
+  if (rootTree.sha !== rootTreeSha.sha || rootTree.truncated !== false
+    || !Array.isArray(rootTree.tree) || rootTree.tree.length !== 0) {
+    throw new Error("Checkpoint bootstrap root tree is not empty.");
+  }
+  const manifestBytes = Buffer.from(options.manifestBytes);
+  const prepared = await preparePublicationCheckpoint({ token: options.token,
+    authorizedWriterId: options.authorizedWriterId, expectedParentSha: options.expectedRootSha,
+    manifestBytes, incidentHistory: structuredClone(options.incidentHistory),
+    productionRef: options.productionRef, fetchImpl, now: options.now });
+  if (prepared.checkpoint.boundary.runId !== options.expectedRunId
+    || prepared.checkpoint.boundary.runAttempt !== 1
+    || prepared.checkpoint.boundary.workflowSha !== options.expectedSourceSha
+    || prepared.checkpoint.publication.sourceSha !== options.expectedSourceSha
+    || prepared.checkpoint.stateParentSha !== options.expectedRootSha
+    || prepared.checkpoint.writerId !== options.authorizedWriterId) {
+    throw new Error("Checkpoint bootstrap differs from the exact approved publication.");
+  }
+  await assertRoot();
+  const query = `mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }`;
+  const variables = { input: {
+    branch: { repositoryNameWithOwner: LIONLOG_REPOSITORY, refName: PUBLICATION_STATE_BRANCH },
+    expectedHeadOid: options.expectedRootSha,
+    message: { headline: `Seed verified Pages checkpoint ${options.expectedRunId}/1` },
+    fileChanges: { additions: [
+      { path: "checkpoint.json", contents: Buffer.from(`${JSON.stringify(prepared.checkpoint, null, 2)}\n`).toString("base64") },
+      { path: "receipt.json", contents: prepared.receiptBytes.toString("base64") },
+      { path: "manifest.json", contents: manifestBytes.toString("base64") },
+    ] },
+  } };
+  const result = await githubJson(fetchImpl, options.token, `${API}/graphql`, { query, variables }) as Record<string, unknown>;
+  const mutation = (result.data as Record<string, unknown> | undefined)?.createCommitOnBranch as Record<string, unknown> | undefined;
+  const commit = mutation?.commit as Record<string, unknown> | undefined;
+  if (result.errors || typeof commit?.oid !== "string" || !SHA.test(commit.oid)) {
+    throw new Error("Checkpoint bootstrap expected-parent state update failed.");
+  }
+  const loaded = await loadPublicationCheckpoint({ token: options.token,
+    authorizedWriterId: options.authorizedWriterId, fetchImpl });
+  if (loaded.commitSha !== commit.oid
+    || JSON.stringify(loaded.checkpoint) !== JSON.stringify(prepared.checkpoint)
+    || !loaded.receiptBytes.equals(prepared.receiptBytes)
+    || !loaded.manifestBytes?.equals(manifestBytes)) {
+    throw new Error("Checkpoint bootstrap state moved or changed immediately after update.");
+  }
+  await observeCheckpointPublicProof({ checkpoint: loaded.checkpoint, manifestBytes,
+    token: options.token, authorizedWriterId: options.authorizedWriterId, fetchImpl });
+  return loaded.commitSha;
+}
+
+/** The caller must hold the github-pages-production serialization group. This path never creates the state branch. */
 export async function appendPublicationCheckpoint(options: {
   manifestBytes: Buffer; incidentHistory: unknown; expectedParentSha: string;
-  token: string; authorizedWriterId: number; fetchImpl?: typeof fetch; now?: Date;
+  token: string; authorizedWriterId: number; authorizedAppSlug: string; fetchImpl?: typeof fetch; now?: Date;
   productionRef?: string;
   expectedPublication?: { runId: number; runAttempt: number; workflowSha: string; sourceSha: string;
     manifestSha256: string; releaseId: string; candidateArtifactId: number; candidateArtifactDigest: string };
@@ -318,8 +425,8 @@ export async function appendPublicationCheckpoint(options: {
     || !positive(expectedPublication.candidateArtifactId) || !DIGEST.test(expectedPublication.candidateArtifactDigest))) {
     throw new Error("Checkpoint expected publication identity is invalid.");
   }
-  const actor = await githubJson(fetchImpl, token, `${API}/user`) as Record<string, unknown>;
-  if (actor.id !== authorizedWriterId) throw new Error("Checkpoint writer token is unauthorized.");
+  await assertAuthorizedWriterInstallation({ token, authorizedWriterId,
+    authorizedAppSlug: options.authorizedAppSlug, fetchImpl });
   // A first checkpoint needs a separately reviewed bootstrap authority. This append path only advances an authenticated one.
   const current = await loadPublicationCheckpoint({ token, authorizedWriterId, fetchImpl });
   if (current.commitSha !== expectedParentSha) throw new Error("Checkpoint expected parent is stale.");

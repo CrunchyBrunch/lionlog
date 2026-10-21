@@ -24,6 +24,7 @@ jobs:
       vars.LIONLOG_PRODUCTION_REF != '' &&
       vars.LIONLOG_PRODUCTION_SHA != '' &&
       vars.LIONLOG_PUBLICATION_WRITER_ID != '' &&
+      vars.LIONLOG_PUBLICATION_APP_CLIENT_ID != '' &&
       github.ref == vars.LIONLOG_PRODUCTION_REF &&
       github.sha == vars.LIONLOG_PRODUCTION_SHA &&
       github.workflow_ref == format('{0}/.github/workflows/advance-refresh-checkpoint.yml@{1}', github.repository, vars.LIONLOG_PRODUCTION_REF) &&
@@ -88,11 +89,20 @@ jobs:
           node --experimental-strip-types scripts/artifact-digest.ts \
             --expected="$(jq -er .candidate.manifestSha256 "$RECEIPT")" \
             --file=work/refresh-checkpoint/candidate/release-manifest.json > /dev/null
+      - name: Mint repository-scoped publication App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          client-id: ${{ vars.LIONLOG_PUBLICATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.LIONLOG_PUBLICATION_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-actions: read
       - name: Append authenticated checkpoint after terminal success
         shell: bash
         env:
-          LIONLOG_PUBLICATION_WRITER_TOKEN: ${{ secrets.LIONLOG_PUBLICATION_WRITER_TOKEN }}
+          LIONLOG_PUBLICATION_WRITER_TOKEN: ${{ steps.app-token.outputs.token }}
           LIONLOG_PUBLICATION_WRITER_ID: ${{ vars.LIONLOG_PUBLICATION_WRITER_ID }}
+          LIONLOG_PUBLICATION_APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           LIONLOG_REFRESH_ACTIVATION: ${{ vars.LIONLOG_REFRESH_ACTIVATION }}
           LIONLOG_PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
           LIONLOG_PRODUCTION_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
