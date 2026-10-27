@@ -32,6 +32,8 @@ test("preactivation bootstrap requires the same protected App environment and ex
   assert.match(source, /LIONLOG_PUBLICATION_WRITER_TOKEN: \$\{\{ steps\.app-token\.outputs\.token \}\}/);
   assert.match(source, /--expected-root-sha="\$ROOT_SHA"/);
   assert.match(source, /--expected-source-sha="\$SOURCE_SHA"/);
+  assert.match(source, /--validate-run=work\/refresh-checkpoint\/run\.json/);
+  assert.doesNotMatch(source, /\.head_branch == \$branch/);
 });
 
 test("default-branch scheduler only checks out and installs the immutable production revision", async () => {

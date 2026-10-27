@@ -15,6 +15,7 @@ import type { PriorAttemptEvidence } from "../scripts/supported-pages-control.ts
 import { collectPagesAttemptHistory } from "../scripts/collect-pages-attempt-history.ts";
 import { advanceRefreshCheckpoint, assertTrustedWriterEnvironment } from "../scripts/advance-refresh-checkpoint.ts";
 import { assertTrustedBootstrapEnvironment } from "../scripts/bootstrap-publication-checkpoint.ts";
+import * as bootstrapScript from "../scripts/bootstrap-publication-checkpoint.ts";
 import * as checkpointExports from "../scripts/publication-checkpoint.ts";
 
 const sha = "a".repeat(40);
@@ -541,6 +542,107 @@ test("bootstrap CLI authority permits only an inactive first-attempt pinned prod
     { workflowRef: valid.workflowRef.replace("bootstrap-publication", "advance-refresh") },
     { expectedRootSha: "wrong" }, { expectedSourceSha: "wrong" },
   ]) assert.throws(() => assertTrustedBootstrapEnvironment({ ...valid, ...change }), /bootstrap|production|pin|authority/i);
+});
+
+test("bootstrap accepts only the exact completed manual main promotion run", () => {
+  const validate = (bootstrapScript as Record<string, unknown>).assertManualBootstrapPromotionRun as
+    ((run: unknown, expectedRunId: number, expectedSourceSha: string) => void) | undefined;
+  assert.equal(typeof validate, "function");
+  const run = { id: 42, run_attempt: 1, status: "completed", conclusion: "success",
+    head_sha: sha, head_branch: "main", event: "workflow_dispatch",
+    path: ".github/workflows/deploy-github-pages.yml" };
+  assert.doesNotThrow(() => validate!(run, 42, sha));
+  for (const change of [
+    { head_branch: "lionlog-production" }, { head_sha: source }, { id: 43 },
+    { run_attempt: 2 }, { status: "in_progress" }, { conclusion: "failure" },
+    { event: "schedule" }, { path: ".github/workflows/other.yml" },
+  ]) assert.throws(() => validate!({ ...run, ...change }, 42, sha), /manual promotion run/i);
+});
+
+test("bootstrap rejects originally invalid authority even when caller repairs it during preflight", async () => {
+  const fixture = publicationFixture({ sourceShaValue: sha });
+  for (const change of [
+    { label: "root", initial: { expectedRootSha: state.commitSha }, repair: { expectedRootSha: state.parentSha } },
+    { label: "run", initial: { expectedRunId: 11 }, repair: { expectedRunId: 10 } },
+    { label: "source", initial: { expectedSourceSha: state.commitSha }, repair: { expectedSourceSha: sha } },
+  ]) {
+    let writes = 0;
+    const options = { token: "fixture", authorizedWriterId: 123, authorizedAppSlug: "lionlog-publication",
+      expectedRootSha: state.parentSha, expectedRunId: 10, expectedSourceSha: sha,
+      manifestBytes: fixture.manifestBytes,
+      incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
+      productionRef: "refs/heads/lionlog-production", fetchImpl: undefined as unknown as typeof fetch,
+      ...change.initial };
+    const stateApi = stateFetch({ commitSha: state.parentSha,
+      onGraphql() { writes++; return json({ errors: [{ message: "write forbidden" }] }); } });
+    let repaired = false;
+    options.fetchImpl = (input, init) => {
+      if (!repaired && String(input).includes("/installation/repositories")) {
+        repaired = true;
+        Object.assign(options, change.repair);
+      }
+      return String(input).startsWith("https://crunchybrunch.github.io/")
+        || String(input).includes("/actions/") ? fixture.fetchImpl(input, init) : stateApi(input, init);
+    };
+    await assert.rejects(checkpointExports.bootstrapPublicationCheckpoint(options),
+      /approved root|exact approved publication/i, change.label);
+    assert.equal(writes, 0, change.label);
+  }
+});
+
+test("bootstrap retains original writer, root, history, and manifest when caller mutates during preflight", async () => {
+  const fixture = publicationFixture({ sourceShaValue: sha });
+  const originalManifest = Buffer.from(fixture.manifestBytes);
+  let tip = state.parentSha;
+  let parent = state.parentSha;
+  let storedCheckpoint: unknown = checkpoint;
+  let storedReceipt = receiptBytes;
+  let storedManifest: Buffer | undefined;
+  let writes = 0;
+  const stateApi = stateFetch({ commitSha: () => tip, parentSha: () => parent,
+    checkpointValue: () => storedCheckpoint, receiptBytes: () => storedReceipt,
+    manifestBytes: () => storedManifest,
+    onGraphql(body) {
+      writes++;
+      const input = (body.variables as { input: { expectedHeadOid: string;
+        fileChanges: { additions: Array<{ path: string; contents: string }> } } }).input;
+      assert.equal(input.expectedHeadOid, state.parentSha);
+      storedCheckpoint = JSON.parse(Buffer.from(input.fileChanges.additions[0].contents, "base64").toString("utf8"));
+      storedReceipt = Buffer.from(input.fileChanges.additions[1].contents, "base64");
+      storedManifest = Buffer.from(input.fileChanges.additions[2].contents, "base64");
+      parent = tip;
+      tip = "7".repeat(40);
+      return json({ data: { createCommitOnBranch: { commit: { oid: tip } } } });
+    } });
+  const options = { token: "fixture", authorizedWriterId: 123, authorizedAppSlug: "lionlog-publication",
+    expectedRootSha: state.parentSha, expectedRunId: 10, expectedSourceSha: sha,
+    manifestBytes: Buffer.from(originalManifest),
+    incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] as unknown[] },
+    productionRef: "refs/heads/lionlog-production", fetchImpl: undefined as unknown as typeof fetch };
+  let changed = false;
+  options.fetchImpl = (input, init) => {
+    if (!changed && String(input).includes("/installation/repositories")) {
+      changed = true;
+      options.token = "changed";
+      options.authorizedWriterId = 777;
+      options.authorizedAppSlug = "changed-app";
+      options.expectedRootSha = state.commitSha;
+      options.expectedRunId = 11;
+      options.expectedSourceSha = state.commitSha;
+      options.productionRef = "refs/heads/main";
+      options.manifestBytes.fill(0);
+      options.incidentHistory.incidents.push({ invalid: true });
+    }
+    return String(input).startsWith("https://crunchybrunch.github.io/")
+      || String(input).includes("/actions/") ? fixture.fetchImpl(input, init) : stateApi(input, init);
+  };
+  const committed = await checkpointExports.bootstrapPublicationCheckpoint(options);
+  assert.equal(committed, "7".repeat(40));
+  assert.equal(writes, 1);
+  assert.equal((storedCheckpoint as { writerId: number; stateParentSha: string; boundary: { runId: number } }).writerId, 123);
+  assert.equal((storedCheckpoint as { stateParentSha: string }).stateParentSha, state.parentSha);
+  assert.equal((storedCheckpoint as { boundary: { runId: number } }).boundary.runId, 10);
+  assert.deepEqual(storedManifest, originalManifest);
 });
 
 test("public proof is fresh, complete, and bound to the authenticated state commit", async () => {

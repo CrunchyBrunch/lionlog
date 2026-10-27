@@ -28,6 +28,20 @@ export function assertTrustedBootstrapEnvironment(value: {
   }
 }
 
+/** The seed follows a protected manual promotion from main at the approved production SHA. */
+export function assertManualBootstrapPromotionRun(run: unknown, expectedRunId: number, expectedSourceSha: string): void {
+  const value = run as Record<string, unknown>;
+  if (!Number.isSafeInteger(expectedRunId) || expectedRunId <= 0
+    || !/^[a-f0-9]{40}$/.test(expectedSourceSha)
+    || !value || value.id !== expectedRunId || value.run_attempt !== 1
+    || value.status !== "completed" || value.conclusion !== "success"
+    || value.head_sha !== expectedSourceSha || value.head_branch !== "main"
+    || value.event !== "workflow_dispatch"
+    || value.path !== ".github/workflows/deploy-github-pages.yml") {
+    throw new Error("Checkpoint bootstrap requires the exact completed manual promotion run from main.");
+  }
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const args = new Map(process.argv.slice(2).map((arg) => {
     const [key, ...value] = arg.split("="); return [key, value.join("=")];
@@ -36,23 +50,28 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     const value = args.get(key); if (!value) throw new Error(`Missing ${key}.`); return value;
   };
   const expectedRunId = Number(required("--expected-run-id"));
-  const expectedRootSha = required("--expected-root-sha");
   const expectedSourceSha = required("--expected-source-sha");
-  assertTrustedBootstrapEnvironment({ repository: process.env.GITHUB_REPOSITORY ?? "",
-    eventName: process.env.GITHUB_EVENT_NAME ?? "", workflowRef: process.env.GITHUB_WORKFLOW_REF ?? "",
-    ref: process.env.GITHUB_REF ?? "", sha: process.env.GITHUB_SHA ?? "",
-    runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT), activation: process.env.LIONLOG_REFRESH_ACTIVATION ?? "",
-    productionRef: process.env.LIONLOG_PRODUCTION_REF ?? "", productionSha: process.env.LIONLOG_PRODUCTION_SHA ?? "",
-    writerId: Number(process.env.LIONLOG_PUBLICATION_WRITER_ID), expectedRunId,
-    expectedRootSha, expectedSourceSha });
-  const commitSha = await bootstrapPublicationCheckpoint({
-    token: process.env.LIONLOG_PUBLICATION_WRITER_TOKEN ?? "",
-    authorizedWriterId: Number(process.env.LIONLOG_PUBLICATION_WRITER_ID),
-    authorizedAppSlug: process.env.LIONLOG_PUBLICATION_APP_SLUG ?? "",
-    expectedRootSha, expectedRunId, expectedSourceSha,
-    productionRef: process.env.LIONLOG_PRODUCTION_REF ?? "",
-    manifestBytes: await readFile(required("--manifest")),
-    incidentHistory: JSON.parse(await readFile(required("--incidents"), "utf8")),
-  });
-  process.stdout.write(`${commitSha}\n`);
+  if (args.has("--validate-run")) {
+    assertManualBootstrapPromotionRun(JSON.parse(await readFile(required("--validate-run"), "utf8")),
+      expectedRunId, expectedSourceSha);
+  } else {
+    const expectedRootSha = required("--expected-root-sha");
+    assertTrustedBootstrapEnvironment({ repository: process.env.GITHUB_REPOSITORY ?? "",
+      eventName: process.env.GITHUB_EVENT_NAME ?? "", workflowRef: process.env.GITHUB_WORKFLOW_REF ?? "",
+      ref: process.env.GITHUB_REF ?? "", sha: process.env.GITHUB_SHA ?? "",
+      runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT), activation: process.env.LIONLOG_REFRESH_ACTIVATION ?? "",
+      productionRef: process.env.LIONLOG_PRODUCTION_REF ?? "", productionSha: process.env.LIONLOG_PRODUCTION_SHA ?? "",
+      writerId: Number(process.env.LIONLOG_PUBLICATION_WRITER_ID), expectedRunId,
+      expectedRootSha, expectedSourceSha });
+    const commitSha = await bootstrapPublicationCheckpoint({
+      token: process.env.LIONLOG_PUBLICATION_WRITER_TOKEN ?? "",
+      authorizedWriterId: Number(process.env.LIONLOG_PUBLICATION_WRITER_ID),
+      authorizedAppSlug: process.env.LIONLOG_PUBLICATION_APP_SLUG ?? "",
+      expectedRootSha, expectedRunId, expectedSourceSha,
+      productionRef: process.env.LIONLOG_PRODUCTION_REF ?? "",
+      manifestBytes: await readFile(required("--manifest")),
+      incidentHistory: JSON.parse(await readFile(required("--incidents"), "utf8")),
+    });
+    process.stdout.write(`${commitSha}\n`);
+  }
 }

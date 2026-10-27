@@ -70,9 +70,9 @@ jobs:
           gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID" > work/refresh-checkpoint/run.json
           [[ "$PRODUCTION_REF" == refs/heads/* && "$PRODUCTION_REF" != refs/heads/main ]]
           [[ "$RUN_SHA" =~ ^[a-f0-9]{40}$ ]]
-          jq -e --argjson id "$RUN_ID" --arg sha "$RUN_SHA" --arg branch "${PRODUCTION_REF#refs/heads/}" \
-            '.id == $id and .run_attempt == 1 and .status == "completed" and .conclusion == "success" and .head_sha == $sha and .head_branch == $branch and .event == "workflow_dispatch" and .path == ".github/workflows/deploy-github-pages.yml"' \
-            work/refresh-checkpoint/run.json > /dev/null
+          node --experimental-strip-types scripts/bootstrap-publication-checkpoint.ts \
+            --validate-run=work/refresh-checkpoint/run.json \
+            --expected-run-id="$RUN_ID" --expected-source-sha="$RUN_SHA"
           gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts?per_page=100" > work/refresh-checkpoint/artifacts.json
           jq -e '.total_count == (.artifacts | length)' work/refresh-checkpoint/artifacts.json > /dev/null
           RECEIPT_ID="$(jq -er --arg name "lionlog-pages-receipt-$RUN_ID-1" \

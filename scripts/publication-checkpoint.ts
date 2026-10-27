@@ -318,71 +318,79 @@ export async function bootstrapPublicationCheckpoint(options: {
   manifestBytes: Buffer; incidentHistory: unknown; productionRef: string;
   fetchImpl?: typeof fetch; now?: Date;
 }): Promise<string> {
-  if (!SHA.test(options.expectedRootSha) || !SHA.test(options.expectedSourceSha)
-    || !positive(options.expectedRunId) || !Buffer.isBuffer(options.manifestBytes)
+  const token = options.token;
+  const authorizedWriterId = options.authorizedWriterId;
+  const authorizedAppSlug = options.authorizedAppSlug;
+  const expectedRootSha = options.expectedRootSha;
+  const expectedRunId = options.expectedRunId;
+  const expectedSourceSha = options.expectedSourceSha;
+  const productionRef = options.productionRef;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  if (!SHA.test(expectedRootSha) || !SHA.test(expectedSourceSha)
+    || !positive(expectedRunId) || !Buffer.isBuffer(options.manifestBytes)
     || options.manifestBytes.length === 0 || options.manifestBytes.length > CHECKPOINT_MANIFEST_MAX_BYTES) {
     throw new Error("Checkpoint bootstrap authority or manifest is invalid.");
   }
-  branchFromProductionRef(options.productionRef);
-  const fetchImpl = options.fetchImpl ?? fetch;
-  await assertAuthorizedWriterInstallation({ token: options.token,
-    authorizedWriterId: options.authorizedWriterId,
-    authorizedAppSlug: options.authorizedAppSlug, fetchImpl });
+  const manifestBytes = Buffer.from(options.manifestBytes);
+  const incidentHistory = structuredClone(options.incidentHistory);
+  const now = options.now === undefined ? undefined : new Date(options.now.getTime());
+  branchFromProductionRef(productionRef);
+  await assertAuthorizedWriterInstallation({ token,
+    authorizedWriterId, authorizedAppSlug, fetchImpl });
   const assertRoot = async (): Promise<void> => {
-    const ref = await githubJson(fetchImpl, options.token, STATE_REF_API) as Record<string, unknown>;
+    const ref = await githubJson(fetchImpl, token, STATE_REF_API) as Record<string, unknown>;
     if (ref.ref !== PUBLICATION_STATE_BRANCH
       || (ref.object as Record<string, unknown> | undefined)?.type !== "commit"
-      || (ref.object as Record<string, unknown> | undefined)?.sha !== options.expectedRootSha) {
+      || (ref.object as Record<string, unknown> | undefined)?.sha !== expectedRootSha) {
       throw new Error("Checkpoint bootstrap state ref is not the approved root.");
     }
   };
   await assertRoot();
-  const root = await githubJson(fetchImpl, options.token,
-    `${REPO_API}/commits/${options.expectedRootSha}`) as Record<string, unknown>;
+  const root = await githubJson(fetchImpl, token,
+    `${REPO_API}/commits/${expectedRootSha}`) as Record<string, unknown>;
   const rootTreeSha = (root.commit as Record<string, unknown> | undefined)?.tree as Record<string, unknown> | undefined;
-  if (root.sha !== options.expectedRootSha || !Array.isArray(root.parents) || root.parents.length !== 0
+  if (root.sha !== expectedRootSha || !Array.isArray(root.parents) || root.parents.length !== 0
     || typeof rootTreeSha?.sha !== "string" || !SHA.test(rootTreeSha.sha)) {
     throw new Error("Checkpoint bootstrap parent is not a zero-parent root.");
   }
-  const rootTree = await githubJson(fetchImpl, options.token,
+  const rootTree = await githubJson(fetchImpl, token,
     `${REPO_API}/git/trees/${rootTreeSha.sha}`) as Record<string, unknown>;
   if (rootTree.sha !== rootTreeSha.sha || rootTree.truncated !== false
     || !Array.isArray(rootTree.tree) || rootTree.tree.length !== 0) {
     throw new Error("Checkpoint bootstrap root tree is not empty.");
   }
-  const manifestBytes = Buffer.from(options.manifestBytes);
-  const prepared = await preparePublicationCheckpoint({ token: options.token,
-    authorizedWriterId: options.authorizedWriterId, expectedParentSha: options.expectedRootSha,
-    manifestBytes, incidentHistory: structuredClone(options.incidentHistory),
-    productionRef: options.productionRef, fetchImpl, now: options.now });
-  if (prepared.checkpoint.boundary.runId !== options.expectedRunId
+  const prepared = await preparePublicationCheckpoint({ token,
+    authorizedWriterId, expectedParentSha: expectedRootSha,
+    manifestBytes, incidentHistory,
+    productionRef, fetchImpl, now });
+  if (prepared.checkpoint.boundary.runId !== expectedRunId
     || prepared.checkpoint.boundary.runAttempt !== 1
-    || prepared.checkpoint.boundary.workflowSha !== options.expectedSourceSha
-    || prepared.checkpoint.publication.sourceSha !== options.expectedSourceSha
-    || prepared.checkpoint.stateParentSha !== options.expectedRootSha
-    || prepared.checkpoint.writerId !== options.authorizedWriterId) {
+    || prepared.checkpoint.boundary.workflowSha !== expectedSourceSha
+    || prepared.checkpoint.publication.sourceSha !== expectedSourceSha
+    || prepared.checkpoint.stateParentSha !== expectedRootSha
+    || prepared.checkpoint.writerId !== authorizedWriterId) {
     throw new Error("Checkpoint bootstrap differs from the exact approved publication.");
   }
   await assertRoot();
   const query = `mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }`;
   const variables = { input: {
     branch: { repositoryNameWithOwner: LIONLOG_REPOSITORY, refName: PUBLICATION_STATE_BRANCH },
-    expectedHeadOid: options.expectedRootSha,
-    message: { headline: `Seed verified Pages checkpoint ${options.expectedRunId}/1` },
+    expectedHeadOid: expectedRootSha,
+    message: { headline: `Seed verified Pages checkpoint ${expectedRunId}/1` },
     fileChanges: { additions: [
       { path: "checkpoint.json", contents: Buffer.from(`${JSON.stringify(prepared.checkpoint, null, 2)}\n`).toString("base64") },
       { path: "receipt.json", contents: prepared.receiptBytes.toString("base64") },
       { path: "manifest.json", contents: manifestBytes.toString("base64") },
     ] },
   } };
-  const result = await githubJson(fetchImpl, options.token, `${API}/graphql`, { query, variables }) as Record<string, unknown>;
+  const result = await githubJson(fetchImpl, token, `${API}/graphql`, { query, variables }) as Record<string, unknown>;
   const mutation = (result.data as Record<string, unknown> | undefined)?.createCommitOnBranch as Record<string, unknown> | undefined;
   const commit = mutation?.commit as Record<string, unknown> | undefined;
   if (result.errors || typeof commit?.oid !== "string" || !SHA.test(commit.oid)) {
     throw new Error("Checkpoint bootstrap expected-parent state update failed.");
   }
-  const loaded = await loadPublicationCheckpoint({ token: options.token,
-    authorizedWriterId: options.authorizedWriterId, fetchImpl });
+  const loaded = await loadPublicationCheckpoint({ token,
+    authorizedWriterId, fetchImpl });
   if (loaded.commitSha !== commit.oid
     || JSON.stringify(loaded.checkpoint) !== JSON.stringify(prepared.checkpoint)
     || !loaded.receiptBytes.equals(prepared.receiptBytes)
@@ -390,7 +398,7 @@ export async function bootstrapPublicationCheckpoint(options: {
     throw new Error("Checkpoint bootstrap state moved or changed immediately after update.");
   }
   await observeCheckpointPublicProof({ checkpoint: loaded.checkpoint, manifestBytes,
-    token: options.token, authorizedWriterId: options.authorizedWriterId, fetchImpl });
+    token, authorizedWriterId, fetchImpl });
   return loaded.commitSha;
 }
 
