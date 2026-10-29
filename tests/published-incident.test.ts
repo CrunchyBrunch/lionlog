@@ -58,10 +58,13 @@ test("PM decision requires the exact unedited comment and a complete comment lis
   incident.decision.decidedAt = "2026-10-06T12:13:25.000Z";
   const body = `Approve factual reconciliation only for CrunchyBrunch/lionlog 36900859358/1, evidence ${incident.decision.evidenceDigest}; no release authorization.`;
   const comment = {
-    id: incident.decision.commentId, body, user: { id: 296610507 },
+    id: incident.decision.commentId, body, user: { id: 296610507, login: "CrunchyBrunch", type: "User", avatar_url: "https://avatars.githubusercontent.com/u/296610507?u=signed&v=4" },
     issue_url: `https://api.github.com/repos/CrunchyBrunch/lionlog/issues/${incident.decision.pullRequestNumber}`,
     created_at: "2026-10-06T12:13:25Z", updated_at: "2026-10-06T12:13:25Z",
+    pin: null,
   };
+  const listedComment = { ...comment, user: { ...comment.user, avatar_url: "https://avatars.githubusercontent.com/u/296610507?v=4" } };
+  delete (listedComment as { pin?: null }).pin;
   const responses = new Map<string, unknown>([
     [`/repos/CrunchyBrunch/lionlog/pulls/${incident.decision.pullRequestNumber}`, {
       number: incident.decision.pullRequestNumber, merged_at: "2026-10-06T12:20:00Z", merge_commit_sha: "b".repeat(40),
@@ -83,7 +86,7 @@ test("PM decision requires the exact unedited comment and a complete comment lis
       encoding: "base64", content: Buffer.from(JSON.stringify({ incidents: [incident] })).toString("base64"),
     }],
     [`/repos/CrunchyBrunch/lionlog/issues/comments/${comment.id}`, comment],
-    [`/repos/CrunchyBrunch/lionlog/issues/${incident.decision.pullRequestNumber}/comments?per_page=100&page=1`, [comment]],
+    [`/repos/CrunchyBrunch/lionlog/issues/${incident.decision.pullRequestNumber}/comments?per_page=100&page=1`, [listedComment]],
     [`/repos/CrunchyBrunch/lionlog/issues/${incident.decision.pullRequestNumber}/comments?per_page=100&page=2`, []],
   ]);
   const fetchImpl: typeof fetch = async (input) => {
@@ -92,8 +95,31 @@ test("PM decision requires the exact unedited comment and a complete comment lis
     return value === undefined ? new Response("missing", { status: 404 }) : new Response(JSON.stringify(value), { status: 200 });
   };
   assert.equal((await verifyPublishedDecision(incident, fetchImpl)).commentId, comment.id);
+  const listRoute = `/repos/CrunchyBrunch/lionlog/issues/${incident.decision.pullRequestNumber}/comments?per_page=100&page=1`;
+  for (const [field, value] of [
+    ["id", comment.id + 1], ["issue_url", "https://api.github.com/repos/CrunchyBrunch/lionlog/issues/26"],
+    ["body", "changed decision"], ["created_at", "2026-10-06T12:13:26Z"],
+    ["updated_at", "2026-10-06T12:13:26Z"],
+  ] as const) {
+    responses.set(listRoute, [{ ...listedComment, [field]: value }]);
+    await assert.rejects(() => verifyPublishedDecision(incident, fetchImpl), /conflicts|duplicate|conflicting/i, field);
+  }
+  for (const user of [
+    { ...listedComment.user, id: 1 }, { ...listedComment.user, login: "other" },
+    { ...listedComment.user, type: "Bot" },
+  ]) {
+    responses.set(listRoute, [{ ...listedComment, user }]);
+    await assert.rejects(() => verifyPublishedDecision(incident, fetchImpl), /conflicts/i);
+  }
+  responses.set(listRoute, [listedComment]);
+  responses.set(`/repos/CrunchyBrunch/lionlog/issues/comments/${comment.id}`,
+    { ...comment, user: { ...comment.user, type: "Bot" } });
+  await assert.rejects(() => verifyPublishedDecision(incident, fetchImpl), /edited|changed/i);
+  responses.set(`/repos/CrunchyBrunch/lionlog/issues/comments/${comment.id}`, comment);
   responses.set(`/repos/CrunchyBrunch/lionlog/issues/${incident.decision.pullRequestNumber}/comments?per_page=100&page=2`, [{ ...comment, id: comment.id + 1 }]);
   await assert.rejects(() => verifyPublishedDecision(incident, fetchImpl), /duplicate|conflicting/i);
+  responses.delete(`/repos/CrunchyBrunch/lionlog/issues/${incident.decision.pullRequestNumber}/comments?per_page=100&page=2`);
+  await assert.rejects(() => verifyPublishedDecision(incident, fetchImpl), /unavailable \(404\)/i);
   responses.set(`/repos/CrunchyBrunch/lionlog/issues/${incident.decision.pullRequestNumber}/comments?per_page=100&page=2`, []);
   responses.set(`/repos/CrunchyBrunch/lionlog/issues/comments/${comment.id}`, { ...comment, updated_at: "2026-10-06T12:14:00Z" });
   await assert.rejects(() => verifyPublishedDecision(incident, fetchImpl), /edited|changed/i);
