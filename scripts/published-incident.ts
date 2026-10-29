@@ -196,6 +196,15 @@ function utcSecondsToMs(value: unknown): string {
   return normalized;
 }
 
+function decisionCommentIdentity(value: Record<string, unknown>): unknown {
+  const user = value.user as Record<string, unknown> | undefined;
+  return {
+    id: value.id, actorId: user?.id, actorLogin: user?.login, actorType: user?.type,
+    issueUrl: value.issue_url, body: value.body,
+    createdAt: value.created_at, updatedAt: value.updated_at,
+  };
+}
+
 export interface VerifiedPublishedDecision {
   commentId: number;
   evidenceDigest: string;
@@ -239,8 +248,9 @@ export async function verifyPublishedDecision(record: PublishedIncident, fetchIm
   }
   const selected = await publicJson(fetchImpl, `${route}/issues/comments/${record.decision.commentId}`) as Record<string, unknown>;
   const expectedBody = `${DECISION_PREFIX}${record.decision.evidenceDigest}; no release authorization.`;
-  const actor = selected.user as { id?: unknown } | undefined;
+  const actor = selected.user as { id?: unknown; login?: unknown; type?: unknown } | undefined;
   if (selected.id !== record.decision.commentId || actor?.id !== RECONCILIATION_PM_ACTOR_ID
+    || actor.login !== "CrunchyBrunch" || actor.type !== "User"
     || selected.issue_url !== `${API_ORIGIN}${route}/issues/${pr}`
     || selected.body !== expectedBody || utcSecondsToMs(selected.created_at) !== record.decision.decidedAt
     || selected.updated_at !== selected.created_at) throw new Error("Published incident decision comment is wrong, edited or changed.");
@@ -259,7 +269,9 @@ export async function verifyPublishedDecision(record: PublishedIncident, fetchIm
       if (!Number.isSafeInteger(comment.id) || seenIds.has(comment.id as number)) throw new Error("Published incident decision comment listing is duplicate.");
       seenIds.add(comment.id as number);
       if (comment.id === selected.id) {
-        if (!isDeepStrictEqual(comment, selected)) throw new Error("Published incident selected comment conflicts with listing.");
+        if (!isDeepStrictEqual(decisionCommentIdentity(comment), decisionCommentIdentity(selected))) {
+          throw new Error("Published incident selected comment conflicts with listing.");
+        }
         seenSelected += 1;
       }
       const user = comment.user as { id?: unknown } | undefined;
