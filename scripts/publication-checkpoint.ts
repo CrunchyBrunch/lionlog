@@ -13,6 +13,7 @@ import { observePublicRelease } from "./public-release-state.ts";
 import { verifyPublicSite } from "./verify-public-site.mjs";
 
 const SHA = /^[a-f0-9]{40}$/;
+const GIT_EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const HASH = /^[a-f0-9]{64}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const CHECKPOINT_MANIFEST_MAX_BYTES = 512 * 1024;
@@ -353,10 +354,8 @@ export async function bootstrapPublicationCheckpoint(options: {
     || typeof rootTreeSha?.sha !== "string" || !SHA.test(rootTreeSha.sha)) {
     throw new Error("Checkpoint bootstrap parent is not a zero-parent root.");
   }
-  const rootTree = await githubJson(fetchImpl, token,
-    `${REPO_API}/git/trees/${rootTreeSha.sha}`) as Record<string, unknown>;
-  if (rootTree.sha !== rootTreeSha.sha || rootTree.truncated !== false
-    || !Array.isArray(rootTree.tree) || rootTree.tree.length !== 0) {
+  // GitHub can return 404 for the canonical empty tree, whose Git object ID already proves its contents.
+  if (rootTreeSha.sha !== GIT_EMPTY_TREE_SHA) {
     throw new Error("Checkpoint bootstrap root tree is not empty.");
   }
   const prepared = await preparePublicationCheckpoint({ token,
