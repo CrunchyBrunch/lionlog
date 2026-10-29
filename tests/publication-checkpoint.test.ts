@@ -398,7 +398,8 @@ test("append refuses a caller-edited history digest before any state mutation", 
 
 function stateFetch(options: {
   writerId?: number; botId?: number; committerId?: number; repositoryId?: number; installationRepositoryId?: number;
-  rootParents?: ReadonlyArray<{ readonly sha: string }>; rootEntries?: ReadonlyArray<Record<string, unknown>>;
+  rootParents?: ReadonlyArray<{ readonly sha: string }>; rootCommitSha?: string; rootTreeSha?: string;
+  rootTreeNotFound?: boolean;
   receiptBytes?: Buffer | (() => Buffer);
   manifestBytes?: Buffer | (() => Buffer | undefined);
   commitSha?: string | (() => string); parentSha?: string | (() => string); checkpointValue?: unknown | (() => unknown);
@@ -424,10 +425,13 @@ function stateFetch(options: {
       return json({ ref: "refs/heads/lionlog-publication-state", object: { type: "commit", sha: commitSha } });
     }
     if (url.endsWith(`/commits/${state.parentSha}`)) {
-      return json({ sha: state.parentSha, parents: options.rootParents ?? [], commit: { tree: { sha: "8".repeat(40) } } });
+      return json({ sha: options.rootCommitSha ?? state.parentSha, parents: options.rootParents ?? [],
+        commit: { tree: { sha: options.rootTreeSha ?? "4b825dc642cb6eb9a060e54bf8d69288fbee4904" } } });
     }
-    if (url.endsWith(`/git/trees/${"8".repeat(40)}`)) {
-      return json({ sha: "8".repeat(40), truncated: false, tree: options.rootEntries ?? [] });
+    if (url.endsWith(`/git/trees/${options.rootTreeSha ?? "4b825dc642cb6eb9a060e54bf8d69288fbee4904"}`)) {
+      return options.rootTreeNotFound === false
+        ? json({ sha: options.rootTreeSha ?? "4b825dc642cb6eb9a060e54bf8d69288fbee4904", truncated: false, tree: [] })
+        : new Response("Not Found", { status: 404 });
     }
     if (url.endsWith(`/commits/${commitSha}`)) {
       return json({ sha: commitSha, author: { id: options.writerId ?? 123 }, committer: { id: options.committerId ?? options.writerId ?? 123 },
@@ -509,7 +513,10 @@ test("App bootstrap refuses wrong identity, root, publication, or public bytes b
     { label: "wrong installation", state: { installationRepositoryId: 777 }, expected: /approved repository/i },
     { label: "moved root", state: { commitSha: state.commitSha }, expected: /approved root/i },
     { label: "root has parent", state: { rootParents: [{ sha: state.commitSha }] }, expected: /zero-parent/i },
-    { label: "root has file", state: { rootEntries: [{ path: "unexpected", type: "blob" }] }, expected: /not empty/i },
+    { label: "root commit differs", state: { rootCommitSha: state.commitSha }, expected: /zero-parent/i },
+    { label: "root tree SHA is malformed", state: { rootTreeSha: "not-a-sha" }, expected: /zero-parent/i },
+    { label: "nonempty root tree is rejected even when API says empty", state: { rootTreeSha: "8".repeat(40), rootTreeNotFound: false }, expected: /not empty/i },
+    { label: "noncanonical tree 404 is not accepted as empty", state: { rootTreeSha: "8".repeat(40) }, expected: /not empty/i },
     { label: "wrong run", args: { expectedRunId: 11 }, expected: /exact approved publication/i },
     { label: "wrong source", args: { expectedSourceSha: state.commitSha }, expected: /exact approved publication/i },
     { label: "public drift", fixture: { driftPublic: true }, expected: /drifted|identity mismatch/i },
