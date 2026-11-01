@@ -159,10 +159,12 @@ export async function collectPagesAttemptHistory(options: {
         `/repos/${options.repository}/actions/runs/${runId}/attempts/${attempt}/jobs`, "jobs");
       assertUniqueRecords(jobs, "id", "Attempt-specific job history");
       validateAttemptJobs(jobs, runId, attempt, attemptRun.head_sha);
-      const checkpointGraphSha256 = options.checkpoint || options.strictCheckpointEvidence
-        ? validateCheckpointJobGraph(attemptRun, jobs) : null;
       const key = `${runId}/${attempt}`;
       const contract = incidentContracts.get(key) ?? null;
+      // Reviewed incidents bind every historical job and step exactly below. Current
+      // workflow shape applies only to attempts without an incident contract.
+      const checkpointGraphSha256 = (options.checkpoint || options.strictCheckpointEvidence) && !contract
+        ? validateCheckpointJobGraph(attemptRun, jobs) : null;
       const steps = jobs.flatMap((jobValue) => {
         const job = jobValue as { steps?: unknown };
         if (job.steps === undefined) return [];
@@ -456,7 +458,7 @@ const CHECKPOINT_JOB_STEPS = {
     "Bind the exact public predecessor before approval", "Download exact retained inputs",
     "Validate candidate and extract exact site bytes", "Stage exact bytes with official Pages artifact action",
     "Re-download and verify staged bytes", "Retain compact preapproval evidence",
-    "Normalize retained preapproval wrapper digest", "Publish human review summary",
+    "Normalize retained preapproval wrapper digest", "Publish release authorization summary",
   ],
   deploy: [
     "Download exact preapproval summary", "Recheck all authority immediately before submission",

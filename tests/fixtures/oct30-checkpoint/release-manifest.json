@@ -1,0 +1,309 @@
+{
+  "manifestVersion": "lionlog.pages-release.v2",
+  "releaseId": "86c0bb964368c5f0ebec53e4b68e5f955460a0a285d3a4845106d5b81992d8f7",
+  "releaseKind": "live",
+  "createdAt": "2026-10-30T13:34:46.582Z",
+  "repository": {
+    "id": 1346360244,
+    "name": "CrunchyBrunch/lionlog"
+  },
+  "source": {
+    "commitSha": "30a070a2346e3f6015be5c79e93495a9d52ba67b",
+    "workflowPath": ".github/workflows/build-live-menu-artifact.yml",
+    "workflowId": 347085467,
+    "workflowRunId": 41062266442,
+    "workflowRunAttempt": 1
+  },
+  "target": {
+    "origin": "https://crunchybrunch.github.io",
+    "basePath": "/lionlog/"
+  },
+  "shellRevision": "30a070a2346e3f6015be5c79e93495a9d52ba67b",
+  "menu": {
+    "serviceDate": "2026-10-30",
+    "catalogPath": "menu-data/v2/catalog.json",
+    "catalogSha256": "d669d3fc533af08656d593ee2d90c3b41a3747bff9026d18c1119157f56f5c30",
+    "catalogVersion": "lionlog.psu-catalog.v3",
+    "snapshotSchemaVersion": "lionlog.psu-menu.v2",
+    "parserVersion": "psu-html.v2",
+    "generatedAt": "2026-10-30T13:34:41.577Z",
+    "retrievalStartedAt": "2026-10-30T13:20:30.737Z",
+    "retrievalCompletedAt": "2026-10-30T13:34:39.384Z",
+    "earliestFreshUntil": "2026-10-31T07:21:33.092Z",
+    "earliestRetainUntil": "2026-11-01T13:21:33.092Z",
+    "coverage": "partial",
+    "sourceObservationCount": 736,
+    "publishedObservationCount": 734,
+    "omissions": {
+      "invalid-name": 2
+    },
+    "snapshotCount": 15
+  },
+  "recovery": {
+    "releaseId": "0c1184dd7361dcfeae8ae2c0950e28d63391eae417b313e854eecf05973d6a5d",
+    "manifestSha256": "ee9906fe6c9ae8519cd40b193f14f42d36319f5f23d629619dd2442389716e56",
+    "artifactId": 12978699424,
+    "artifactDigest": "sha256:4e424650a5ad3a643e16f22d86cb09137aeb8da87d14ee11d80adf45e6cfa7f6"
+  },
+  "marker": {
+    "path": "release.json",
+    "sha256": "26ea9f4c6083f77de185efa1446b3e5be4b0052407852a570a60bc33675ad018"
+  },
+  "site": {
+    "tarFile": "site.tar",
+    "tarSha256": "87879a8bcfe2c89f4af34057fc47385291359f7788f46f1eed4e120bd20e6f68",
+    "bytes": 5026816,
+    "inventory": [
+      {
+        "path": ".nojekyll",
+        "bytes": 1,
+        "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+      },
+      {
+        "path": "404.html",
+        "bytes": 19387,
+        "sha256": "696579ca23418084807668023ccb74ec53f9032cbab0ad6645adaae2ae0bc51f"
+      },
+      {
+        "path": "_headers",
+        "bytes": 139,
+        "sha256": "97dc561be4fadd4f976a5a77dfc409f3fe88598241bb21e1d9b89709723094be"
+      },
+      {
+        "path": "_next/static/64496972-3976-47a2-989f-afd07cd505a7/_buildManifest.js",
+        "bytes": 159,
+        "sha256": "47f02b34be6dc481257b6efce4c19e19111f37ef5c437f8ffed44f0da97fa9bb"
+      },
+      {
+        "path": "_next/static/64496972-3976-47a2-989f-afd07cd505a7/_ssgManifest.js",
+        "bytes": 76,
+        "sha256": "653f3e53e89b4f8548ff86c19e92bb3c6b84b6be7485a320b1e00893ed877479"
+      },
+      {
+        "path": "_next/static/_vinext_fonts/geist-8ac0455e797f/geist-001175b1.woff2",
+        "bytes": 16540,
+        "sha256": "58a6b173d5ca1dec92166ea3c6cb1a84a4144556d10928ac14e8e6b40e4787bd"
+      },
+      {
+        "path": "_next/static/_vinext_fonts/geist-8ac0455e797f/geist-52306abf.woff2",
+        "bytes": 7968,
+        "sha256": "f689f638f29fff460a2d5749edb5d5c38d7bef0389f32032d871f23fc6ebb008"
+      },
+      {
+        "path": "_next/static/_vinext_fonts/geist-8ac0455e797f/geist-875ccdd4.woff2",
+        "bytes": 14900,
+        "sha256": "6129fc8571c3e0cb0a4c41f5160c974a843b055009dc4ad8858bd808e18a2d86"
+      },
+      {
+        "path": "_next/static/_vinext_fonts/geist-8ac0455e797f/geist-98bbbccb.woff2",
+        "bytes": 29288,
+        "sha256": "9b6f5ff45b278c744b5f379a2c4ecbaf858a842b8eaf82ac8d21b699ca16c608"
+      },
+      {
+        "path": "_next/static/_vinext_fonts/geist-8ac0455e797f/geist-ff2310f5.woff2",
+        "bytes": 7252,
+        "sha256": "b7a545bbb08256bd809f11cfe66d88da3e22d169ea4407737b1ef0ec1ed3d791"
+      },
+      {
+        "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-013b2f2f.woff2",
+        "bytes": 23108,
+        "sha256": "5f3d6ad60f29d6cb708414ec6887163d63bf197377ef5417d2483ff31ace6c3b"
+      },
+      {
+        "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-0638449e.woff2",
+        "bytes": 5892,
+        "sha256": "d67e4a94ba498635f764ddca7d1ec4271f5642f032eb24b426764480f66f8497"
+      },
+      {
+        "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-44745446.woff2",
+        "bytes": 14712,
+        "sha256": "745994b5cd950ec201b66526375f057d540847cccfc70f4f24f5f571d26d3923"
+      },
+      {
+        "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-44e03052.woff2",
+        "bytes": 12872,
+        "sha256": "75b3bedbebc35f347c0ae3b416aa871941555357e7b0f83767eb5987875589ed"
+      },
+      {
+        "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-971fb274.woff2",
+        "bytes": 7728,
+        "sha256": "16e1d48b6dd29eb240aec5db36184eb182933c082cd43de7f35af686d58087d2"
+      },
+      {
+        "path": "_next/static/_vinext_fonts/geist-mono-00e989178794/geist-mono-f6b33328.woff2",
+        "bytes": 6204,
+        "sha256": "e27f657e38d52887baa3b6b2f812bef93dfdd356f0810e40edd4ee284cc7e9f6"
+      },
+      {
+        "path": "_next/static/chunks/framework-DTZGTDtF.js",
+        "bytes": 190109,
+        "sha256": "2a1edf81f32a49b1eacafc3546b371bca024c82a9191836e274d90890212e9df"
+      },
+      {
+        "path": "_next/static/chunks/index-zdjzo30O.js",
+        "bytes": 109086,
+        "sha256": "71b6851e3839c1ac599a98dde10bf58e51ad6550b5bdc4e937906e25ab0cd803"
+      },
+      {
+        "path": "_next/static/chunks/layout-segment-context-5xdZIsdk.js",
+        "bytes": 496,
+        "sha256": "89d5f24a432e4aeceee3403928ef61236b9d794467a219ff43a4422e796353cd"
+      },
+      {
+        "path": "_next/static/chunks/meal-builder-DfAGX3az.js",
+        "bytes": 121608,
+        "sha256": "b20c35fe1fb3e506a19132b29cffa110bf107358176e77aa387cec1ad2771396"
+      },
+      {
+        "path": "_next/static/chunks/pwa-register-DamRpdof.js",
+        "bytes": 1382,
+        "sha256": "56bec86be526e5ec92ca13454bf491269b7377007f17288b6f24e7d9e12f0054"
+      },
+      {
+        "path": "_next/static/chunks/rolldown-runtime-hePW80VL.js",
+        "bytes": 716,
+        "sha256": "580ad8c58061a4dde99bde0a56905e382f0568516ee2f5b84dbfb52085709021"
+      },
+      {
+        "path": "_next/static/chunks/vinext-59NOwznY.js",
+        "bytes": 110138,
+        "sha256": "d18c9f2076fb4050cc552dd7ce93248d0250d4013b8859589a49560e389fd59d"
+      },
+      {
+        "path": "_next/static/css/index.C_3LqAfq.css",
+        "bytes": 12546,
+        "sha256": "15bffdfff82d9882c3cea529678782ed9386868b06b04cd79eee31ac21cacb6e"
+      },
+      {
+        "path": "icons/apple-touch-icon.png",
+        "bytes": 24254,
+        "sha256": "355e2d17bfcdb9d5c96e86519caac31cd69b21debd8b8de8e16fc77a79a7b7dc"
+      },
+      {
+        "path": "icons/icon-192.png",
+        "bytes": 27695,
+        "sha256": "445d84d99ac26f7f698d10cb447935e00b81d697112e487faafc64134a04581d"
+      },
+      {
+        "path": "icons/icon-512.png",
+        "bytes": 220891,
+        "sha256": "828f7d97d641451c662b34408daf5a57dc73059a5dbfee9b183443949c2772c9"
+      },
+      {
+        "path": "index.html",
+        "bytes": 21296,
+        "sha256": "0973080f685e0cc36eb926840196c23853ba595c6e1dc0b551f35c8d17dbc246"
+      },
+      {
+        "path": "index.rsc",
+        "bytes": 6398,
+        "sha256": "4c8059b88bba4963a909f8b1f7b0caced3a43e3683dd5459e1ce2e5294a7d3b6"
+      },
+      {
+        "path": "manifest.webmanifest",
+        "bytes": 652,
+        "sha256": "047191a75fe5276ec31bfb7226b4e940c89486660e7c635a4a082db501a43304"
+      },
+      {
+        "path": "menu-data/v2/catalog.json",
+        "bytes": 10465,
+        "sha256": "d669d3fc533af08656d593ee2d90c3b41a3747bff9026d18c1119157f56f5c30"
+      },
+      {
+        "path": "menu-data/v2/snapshots/2026-10-30/11/breakfast.json",
+        "bytes": 94855,
+        "sha256": "2af4ef98d4e0b0f43994bbf06a90a11b46d2f8874607f9d28caed955e74dd33b"
+      },
+      {
+        "path": "menu-data/v2/snapshots/2026-10-30/11/dinner.json",
+        "bytes": 104767,
+        "sha256": "aa5df31f3313c80e3e89a4aee06ac3d8e381d2bcee23526eb8b64c86c8c1b4f9"
+      },
+      {
+        "path": "menu-data/v2/snapshots/2026-10-30/11/lunch.json",
+        "bytes": 152649,
+        "sha256": "cfc8b85e2ed7bcb2368ed03bd918b4d74c07cc1f79ade29a59ecc9b365123601"
+      },
+      {
+        "path": "menu-data/v2/snapshots/2026-10-30/13/breakfast.json",
+        "bytes": 93812,
+        "sha256": "f60e5e7c6e5c3c2bcb9e6034409e5226e5a58c88ed24bd1edc8287603a0bf9e9"
+      },
+      {
+        "path": "menu-data/v2/snapshots/2026-10-30/13/dinner.json",
+        "bytes": 132932,
+        "sha256": "4b6f447dc28d3742502db73f6092c8789788839399f14c794ef2496334e647b0"
+      },
+      {
+        "path": "menu-data/v2/snapshots/2026-10-30/13/lunch.json",
+        "bytes": 162405,
+        "sha256": "e0a618c2d638f950bbb4040373a2663f5db72af9fc6c57852745b5b1511654e1"
+      },
+      {
+        "path": "menu-data/v2/snapshots/2026-10-30/14/breakfast.json",
+        "bytes": 54019,
+        "sha256": "3f12798f0d770865ed67bb66c2d8f9f25e26b3ea2bc9ac8b3e98f84a92359cba"
+      },
+      {
+        "path": "menu-data/v2/snapshots/2026-10-30/14/dinner.json",
+        "bytes": 128525,
+        "sha256": "6038fa94e02afdd4d77f3df122cf5441b2715feb0a615692db6946a3aa2b8200"
+      },
+      {
+        "path": "menu-data/v2/snapshots/2026-10-30/14/lunch.json",
+        "bytes": 141887,
+        "sha256": "47516d3fc2910f2fd372e9474d541c2d971dcb1cb7bfd7fbc0e94a9c134f152e"
+      },
+      {
+        "path": "menu-data/v2/snapshots/2026-10-30/16/breakfast.json",
+        "bytes": 58230,
+        "sha256": "bd0c8e85dc576e75a13f42b076b98ff8a68009481dd76db6e6de4cbe2df215d6"
+      },
+      {
+        "path": "menu-data/v2/snapshots/2026-10-30/16/dinner.json",
+        "bytes": 95852,
+        "sha256": "e5bb31979478d8af77202b8701a94719aa142ac2ac79a9836576d03a92ad75e6"
+      },
+      {
+        "path": "menu-data/v2/snapshots/2026-10-30/16/lunch.json",
+        "bytes": 111345,
+        "sha256": "0f15385c0210d41f8877590e0e9b634fb91e4516f37e07fe05a79cd3fcb04270"
+      },
+      {
+        "path": "menu-data/v2/snapshots/2026-10-30/17/breakfast.json",
+        "bytes": 39805,
+        "sha256": "0d14bb922a5b7d6d7fc5de9a774ce0773975d96e21bc5af274f7055b9519d53a"
+      },
+      {
+        "path": "menu-data/v2/snapshots/2026-10-30/17/dinner.json",
+        "bytes": 118617,
+        "sha256": "1c50e8758764314d1eeff01f607d6873492b47f8b02a3e08a21b7cacbe489f8a"
+      },
+      {
+        "path": "menu-data/v2/snapshots/2026-10-30/17/lunch.json",
+        "bytes": 121673,
+        "sha256": "19bb39257f491e576e17882a4221fe0e40b683d6c035f3743352581301966242"
+      },
+      {
+        "path": "og.png",
+        "bytes": 2343765,
+        "sha256": "4137567520763b820a160f2ae0d3310f528e088e14f16e57e82c7f98f73fc359"
+      },
+      {
+        "path": "release.json",
+        "bytes": 456,
+        "sha256": "26ea9f4c6083f77de185efa1446b3e5be4b0052407852a570a60bc33675ad018"
+      },
+      {
+        "path": "sw.js",
+        "bytes": 4796,
+        "sha256": "af7d3c834bc4e9923773f9001fb79860d11071ec152da81a25b286c8ec7ca59a"
+      },
+      {
+        "path": "vinext-client-entry-manifest.json",
+        "bytes": 73,
+        "sha256": "fbd48a315bd35d55381f42909bcb726a5e3c08f297a0cfa6663043d5d3639006"
+      }
+    ]
+  }
+}

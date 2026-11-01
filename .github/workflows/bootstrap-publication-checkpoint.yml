@@ -37,7 +37,7 @@ jobs:
       github.sha == vars.LIONLOG_PRODUCTION_SHA &&
       github.workflow_ref == format('{0}/.github/workflows/bootstrap-publication-checkpoint.yml@{1}', github.repository, vars.LIONLOG_PRODUCTION_REF) &&
       inputs.expected_promotion_run_id != '' &&
-      inputs.expected_source_sha == vars.LIONLOG_PRODUCTION_SHA &&
+      inputs.expected_source_sha != '' &&
       inputs.expected_state_root_sha != ''
     runs-on: ubuntu-latest
     timeout-minutes: 20

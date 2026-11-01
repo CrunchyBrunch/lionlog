@@ -22,13 +22,12 @@ export function assertTrustedBootstrapEnvironment(value: {
   }
   branchFromProductionRef(value.productionRef);
   if (value.ref !== value.productionRef || value.sha !== value.productionSha
-    || value.expectedSourceSha !== value.productionSha
     || value.workflowRef !== `${LIONLOG_REPOSITORY}/.github/workflows/bootstrap-publication-checkpoint.yml@${value.productionRef}`) {
     throw new Error("Checkpoint bootstrap workflow differs from the approved production pin.");
   }
 }
 
-/** The seed follows a protected manual promotion from main at the approved production SHA. */
+/** The seed follows the exact protected manual promotion from main. */
 export function assertManualBootstrapPromotionRun(run: unknown, expectedRunId: number, expectedSourceSha: string): void {
   const value = run as Record<string, unknown>;
   if (!Number.isSafeInteger(expectedRunId) || expectedRunId <= 0

@@ -454,6 +454,23 @@ function matchesLegacyPreSubmissionFailure(attempt: PriorAttemptEvidence, incide
     && exactLegacyEvidence(attempt.legacyEvidence, incident.legacyEvidence);
 }
 
+/** Accept a historical exception only when it matches the complete reviewed contract. */
+export function isReviewedIncidentPredecessor(attempt: PriorAttemptEvidence, incident: Incident, now: Date): boolean {
+  try { validateIncident(incident, now); }
+  catch { return false; }
+  if (attempt.runId !== incident.runId || attempt.runAttempt !== incident.runAttempt
+    || attempt.workflowSha !== incident.workflowSha || attempt.status !== incident.collectorEvidence.status
+    || attempt.conclusion !== incident.collectorEvidence.conclusion || attempt.jobsComplete !== true
+    || !exactIncidentEvidence(attempt.incidentEvidence, incident.collectorEvidence)) return false;
+  if (incident.outcome === "resolved-legacy-pre-submission-failure") {
+    return attempt.publishedResolution == null && matchesLegacyPreSubmissionFailure(attempt, incident);
+  }
+  if (incident.outcome === "resolved-unknown-no-publication") {
+    return attempt.receipt === null && attempt.publishedResolution == null;
+  }
+  return matchesPublishedIncident(attempt, incident);
+}
+
 function isLegacyFailureShape(value: LegacyAttemptEvidence): value is {
   validationFailure: LegacyStepEvidence;
   deploymentBoundary: LegacyStepEvidence;

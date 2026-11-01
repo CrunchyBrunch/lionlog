@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import incidentHistory from "../infrastructure/publication/pages-incident-history.json" with { type: "json" };
 import {
   validatePublicationCheckpoint,
   assertCheckpointRunBoundary,
@@ -11,10 +13,12 @@ import {
   assertCheckpointPublicProof,
   isResolvedPublishedPredecessor,
 } from "../scripts/publication-checkpoint.ts";
-import type { PriorAttemptEvidence } from "../scripts/supported-pages-control.ts";
+import { isReviewedIncidentPredecessor, type Incident, type PriorAttemptEvidence } from "../scripts/supported-pages-control.ts";
 import { collectPagesAttemptHistory } from "../scripts/collect-pages-attempt-history.ts";
 import { advanceRefreshCheckpoint, assertTrustedWriterEnvironment } from "../scripts/advance-refresh-checkpoint.ts";
 import { assertTrustedBootstrapEnvironment } from "../scripts/bootstrap-publication-checkpoint.ts";
+import { validateKnownGoodReceipt } from "../scripts/supported-pages-release.ts";
+import { validatePublicationReleaseManifest } from "../infrastructure/publication/release-contract.ts";
 import * as bootstrapScript from "../scripts/bootstrap-publication-checkpoint.ts";
 import * as checkpointExports from "../scripts/publication-checkpoint.ts";
 
@@ -49,6 +53,96 @@ const checkpoint = {
   },
   history: { sha256: "2".repeat(64), coveredReruns: [] },
 };
+
+test("reviewed legacy and unknown incidents require their exact historical evidence", () => {
+  for (const record of incidentHistory.incidents.slice(0, 3)) {
+    const attempt = {
+      runId: record.runId, runAttempt: record.runAttempt, workflowSha: record.workflowSha,
+      status: record.collectorEvidence.status, conclusion: record.collectorEvidence.conclusion,
+      jobsComplete: true, finalGateConclusion: null, submissionBoundaryConclusion: null,
+      deploymentConclusion: null, incidentEvidence: structuredClone(record.collectorEvidence),
+      legacyEvidence: "legacyEvidence" in record ? record.legacyEvidence : { validationFailure: null, deploymentBoundary: null },
+      receipt: null, publishedResolution: null,
+    } as PriorAttemptEvidence;
+    const contract = record as unknown as Incident;
+    assert.equal(isReviewedIncidentPredecessor(attempt, contract, new Date("2026-11-01")), true);
+    assert.equal(isReviewedIncidentPredecessor({ ...attempt, incidentEvidence: {
+      ...attempt.incidentEvidence!, jobs: attempt.incidentEvidence!.jobs.slice(1),
+    } }, contract, new Date("2026-11-01")), false);
+    assert.equal(isReviewedIncidentPredecessor({ ...attempt, receipt: { artifactId: 1 } as PriorAttemptEvidence["receipt"] },
+      contract, new Date("2026-11-01")), false);
+    assert.equal(isReviewedIncidentPredecessor(attempt, { ...contract, outcome: "unreviewed" } as unknown as Incident,
+      new Date("2026-11-01")), false);
+  }
+});
+
+test("strict checkpoint collector accepts only the exact reviewed legacy job graph", async () => {
+  const record = incidentHistory.incidents[0];
+  const jobs = record.collectorEvidence.jobs.map((job) => ({
+    id: job.jobId, run_id: job.runId, run_attempt: job.runAttempt, head_sha: job.headSha,
+    name: job.jobName, status: job.jobStatus, conclusion: job.jobConclusion,
+    steps: job.steps.map((step) => ({ number: step.stepNumber, name: step.stepName,
+      status: step.stepStatus, conclusion: step.stepConclusion })),
+  }));
+  const fetchFor = (tamper: boolean): typeof fetch => async (input) => {
+    const url = String(input);
+    if (url.includes("/actions/workflows/347992874/runs?")) return json({ total_count: 1,
+      workflow_runs: [{ id: record.runId, run_attempt: 1 }] });
+    if (url.includes(`/actions/runs/${record.runId}/artifacts?`)) return json({ total_count: 0, artifacts: [] });
+    if (url.includes(`/actions/runs/${record.runId}/attempts/1/jobs?`)) {
+      const copy = structuredClone(jobs);
+      if (tamper) copy[0].steps[0].name = "unreviewed step";
+      return json({ total_count: copy.length, jobs: copy });
+    }
+    if (url.includes(`/actions/runs/${record.runId}/attempts/1`)) return json({
+      id: record.runId, workflow_id: 347_992_874, run_attempt: 1,
+      path: ".github/workflows/deploy-github-pages.yml", event: "workflow_dispatch",
+      head_branch: "main", head_sha: record.workflowSha,
+      status: "completed", conclusion: "failure",
+    });
+    return new Response("missing", { status: 404 });
+  };
+  const options = { repository: "CrunchyBrunch/lionlog", currentRunId: Number.MAX_SAFE_INTEGER,
+    token: "fixture", incidentHistory: { historyVersion: incidentHistory.historyVersion, incidents: [record] },
+    strictCheckpointEvidence: true, now: new Date("2026-11-01") };
+  assert.equal((await collectPagesAttemptHistory({ ...options, fetchImpl: fetchFor(false) }))[0].runId, record.runId);
+  await assert.rejects(collectPagesAttemptHistory({ ...options, fetchImpl: fetchFor(true) }), /incident|step|evidence/i);
+  await assert.rejects(collectPagesAttemptHistory({ ...options,
+    incidentHistory: { historyVersion: incidentHistory.historyVersion, incidents: [] }, fetchImpl: fetchFor(false) }),
+  /graph|job|step/i);
+});
+
+test("October 30 retained publication inputs bind a historical source to a distinct pinned bootstrap revision", () => {
+  const promotionSha = "30a070a2346e3f6015be5c79e93495a9d52ba67b";
+  const runId = 41_072_714_284;
+  const implementationSha = "f".repeat(40);
+  const receiptValue = JSON.parse(readFileSync(new URL("./fixtures/oct30-checkpoint/pages-receipt.json", import.meta.url), "utf8"));
+  const manifestBytes = Buffer.from(readFileSync(
+    new URL("./fixtures/oct30-checkpoint/release-manifest.json", import.meta.url), "utf8").replaceAll("\r\n", "\n"));
+  const manifest = validatePublicationReleaseManifest(JSON.parse(manifestBytes.toString("utf8")));
+  const retainedReceipt = validateKnownGoodReceipt(receiptValue);
+  const authority = {
+    repository: "CrunchyBrunch/lionlog", eventName: "workflow_dispatch",
+    workflowRef: "CrunchyBrunch/lionlog/.github/workflows/bootstrap-publication-checkpoint.yml@refs/heads/lionlog-production",
+    ref: "refs/heads/lionlog-production", sha: implementationSha, runAttempt: 1, activation: "",
+    productionRef: "refs/heads/lionlog-production", productionSha: implementationSha,
+    writerId: 123, expectedRunId: runId, expectedRootSha: "02b8c312e8ce22f03dd91b96481a416571f519d1",
+    expectedSourceSha: promotionSha,
+  };
+  assert.doesNotThrow(() => assertTrustedBootstrapEnvironment(authority));
+  const run = { id: runId, run_attempt: 1, status: "completed", conclusion: "success",
+    head_sha: promotionSha, head_branch: "main", event: "workflow_dispatch",
+    path: ".github/workflows/deploy-github-pages.yml" };
+  bootstrapScript.assertManualBootstrapPromotionRun(run, runId, promotionSha);
+  assert.equal(receiptValue.workflow.runId, runId);
+  assert.equal(retainedReceipt.workflow.sha, promotionSha);
+  assert.equal(receiptValue.candidate.sourceSha, manifest.source.commitSha);
+  assert.equal(retainedReceipt.candidate.manifestSha256,
+    createHash("sha256").update(manifestBytes).digest("hex"));
+  assert.throws(() => assertTrustedBootstrapEnvironment({ ...authority, sha: promotionSha }), /pin/i);
+  assert.throws(() => bootstrapScript.assertManualBootstrapPromotionRun({ ...run, head_sha: implementationSha },
+    runId, promotionSha), /exact completed manual promotion/i);
+});
 
 test("bootstrap may carry a reviewed published incident only before a later known-good boundary", () => {
   const historical = {
@@ -543,6 +637,7 @@ test("bootstrap CLI authority permits only an inactive first-attempt pinned prod
     productionRef: "refs/heads/lionlog-production", productionSha: sha,
     writerId: 123, expectedRunId: 10, expectedRootSha: state.parentSha, expectedSourceSha: sha };
   assert.doesNotThrow(() => assertTrustedBootstrapEnvironment(valid));
+  assert.doesNotThrow(() => assertTrustedBootstrapEnvironment({ ...valid, expectedSourceSha: source }));
   for (const change of [
     { activation: "ENABLE_AUTOMATIC_LIONLOG_REFRESH" }, { runAttempt: 2 },
     { ref: "refs/heads/main" }, { sha: state.commitSha },
@@ -962,7 +1057,7 @@ function publicationFixture(options: { driftPublic?: boolean; runId?: number; re
           "Validate immutable input shapes", "Read exact GitHub provenance", "Bind the exact public predecessor before approval",
           "Download exact retained inputs", "Validate candidate and extract exact site bytes",
           "Stage exact bytes with official Pages artifact action", "Re-download and verify staged bytes",
-          "Retain compact preapproval evidence", "Normalize retained preapproval wrapper digest", "Publish human review summary",
+          "Retain compact preapproval evidence", "Normalize retained preapproval wrapper digest", "Publish release authorization summary",
         ].map((name, index) => ({ number: index + 1, name, status: "completed", conclusion: "success" })) },
       { id: 100, name: "deploy", run_id: runId, run_attempt: 1, head_sha: sha,
         status: "completed", conclusion: "success", steps: [
