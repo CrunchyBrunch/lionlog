@@ -8,7 +8,7 @@ import {
 import { branchFromProductionRef, validateKnownGoodReceipt } from "./supported-pages-release.ts";
 import { validatePublicationReleaseManifest, PROMOTION_WORKFLOW_ID } from "../infrastructure/publication/release-contract.ts";
 import { collectPagesAttemptHistory } from "./collect-pages-attempt-history.ts";
-import { isKnownGoodAttempt, isProvenPreSubmissionFailure, type PriorAttemptEvidence } from "./supported-pages-control.ts";
+import { isKnownGoodAttempt, isProvenPreSubmissionFailure, isReviewedIncidentPredecessor, type Incident, type PriorAttemptEvidence } from "./supported-pages-control.ts";
 import { observePublicRelease } from "./public-release-state.ts";
 import { verifyPublicSite } from "./verify-public-site.mjs";
 
@@ -545,18 +545,21 @@ export async function preparePublicationCheckpoint(options: {
     productionRef: options.productionRef,
   });
   if (attempts.length === 0) throw new Error("Checkpoint proposal has no completed publication attempt.");
+  const reviewedIncidents = new Map(((options.incidentHistory as { incidents: Incident[] }).incidents)
+    .map((incident) => [`${incident.runId}/${incident.runAttempt}`, incident]));
   for (const attempt of attempts) {
+    const incident = reviewedIncidents.get(`${attempt.runId}/${attempt.runAttempt}`);
+    const reviewed = incident !== undefined && isReviewedIncidentPredecessor(attempt, incident, options.now ?? new Date());
     if (attempt.workflowId !== PROMOTION_WORKFLOW_ID
       || attempt.workflowPath !== ".github/workflows/deploy-github-pages.yml"
       || attempt.event !== "workflow_dispatch" || (attempt.headBranch !== "main" && attempt.headBranch !== productionBranch)
       || !SHA.test(attempt.workflowSha) || attempt.status !== "completed" || attempt.jobsComplete !== true
-      || ((attempt.incidentEvidence !== null
-        || (attempt.publishedResolution !== null && attempt.publishedResolution !== undefined))
-        && !isResolvedPublishedPredecessor(attempt))) {
+      || ((incident !== undefined || attempt.incidentEvidence !== null || attempt.publishedResolution != null)
+        && !reviewed)) {
       throw new Error("Checkpoint proposal includes an unresolved or nonstandard attempt.");
     }
     if (!isKnownGoodAttempt(attempt) && !isProvenPreSubmissionFailure(attempt)
-      && !isResolvedPublishedPredecessor(attempt)) {
+      && !reviewed) {
       throw new Error("Checkpoint proposal includes an unknown submission outcome.");
     }
   }
