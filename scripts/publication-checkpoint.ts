@@ -17,7 +17,34 @@ const GIT_EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const HASH = /^[a-f0-9]{64}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const CHECKPOINT_MANIFEST_MAX_BYTES = 512 * 1024;
+const REVIEWED_BOOTSTRAP_ROOT = "02b8c312e8ce22f03dd91b96481a416571f519d1";
+const REVIEWED_OCT01_SHA = "5be205a42930f69424d0854443b4fa4f35c237bd";
+const REVIEWED_OCT30_SHA = "30a070a2346e3f6015be5c79e93495a9d52ba67b";
+const REVIEWED_OCT30_RELEASE = "86c0bb964368c5f0ebec53e4b68e5f955460a0a285d3a4845106d5b81992d8f7";
 export const PUBLICATION_STATE_BRANCH = "refs/heads/lionlog-publication-state";
+
+/** The historical empty-status exception is usable only before this exact verified seed. */
+export function assertReviewedEmptyPagesStatusBoundary(
+  attempts: ReadonlyArray<{ runId: number; runAttempt: number; workflowSha: string;
+    publishedResolution?: { pagesStatusCompatibility?: string } | null }>,
+  checkpoint: Pick<PublicationCheckpoint, "boundary"> & { publication: Pick<PublicationCheckpoint["publication"], "sourceSha" | "releaseId"> },
+): void {
+  const pending = attempts.filter((attempt) => attempt.publishedResolution?.pagesStatusCompatibility === "reviewed-oct01-empty");
+  if (pending.length === 0) return;
+  if (pending.length !== 1 || pending[0].runId !== 36900859358 || pending[0].runAttempt !== 1
+    || pending[0].workflowSha !== REVIEWED_OCT01_SHA) {
+    throw new Error("Checkpoint historical Pages status exception differs from the reviewed incident.");
+  }
+  const last = attempts[attempts.length - 1];
+  if (last.runId !== 41072714284 || last.runAttempt !== 1 || last.workflowSha !== REVIEWED_OCT30_SHA
+    || last.publishedResolution != null || attempts.indexOf(pending[0]) >= attempts.length - 1
+    || checkpoint.boundary.runId !== last.runId || checkpoint.boundary.runAttempt !== last.runAttempt
+    || checkpoint.boundary.workflowSha !== last.workflowSha
+    || checkpoint.publication.sourceSha !== REVIEWED_OCT30_SHA
+    || checkpoint.publication.releaseId !== REVIEWED_OCT30_RELEASE) {
+    throw new Error("Checkpoint historical Pages status exception lacks the exact later known-good boundary.");
+  }
+}
 
 /** A reviewed historical publication may precede a later genuine known-good seed. */
 export function isResolvedPublishedPredecessor(attempt: PriorAttemptEvidence): boolean {
@@ -361,7 +388,8 @@ export async function bootstrapPublicationCheckpoint(options: {
   const prepared = await preparePublicationCheckpoint({ token,
     authorizedWriterId, expectedParentSha: expectedRootSha,
     manifestBytes, incidentHistory,
-    productionRef, fetchImpl, now });
+    productionRef, fetchImpl, now,
+    reviewedEmptyPagesStatusBootstrap: expectedRootSha === REVIEWED_BOOTSTRAP_ROOT });
   if (prepared.checkpoint.boundary.runId !== expectedRunId
     || prepared.checkpoint.boundary.runAttempt !== 1
     || prepared.checkpoint.boundary.workflowSha !== expectedSourceSha
@@ -526,6 +554,7 @@ export async function preparePublicationCheckpoint(options: {
   manifestBytes: Buffer; incidentHistory: unknown; previous?: VerifiedPublicationCheckpoint;
   fetchImpl?: typeof fetch; now?: Date;
   productionRef?: string;
+  reviewedEmptyPagesStatusBootstrap?: boolean;
 }): Promise<{ checkpoint: PublicationCheckpoint; receiptBytes: Buffer }> {
   const productionBranch = options.productionRef ? branchFromProductionRef(options.productionRef) : "main";
   if (!positive(options.authorizedWriterId) || !SHA.test(options.expectedParentSha)
@@ -537,12 +566,17 @@ export async function preparePublicationCheckpoint(options: {
       throw new Error("Checkpoint migration parent is not the validated state commit.");
     }
   }
+  if (options.reviewedEmptyPagesStatusBootstrap
+    && (options.previous !== undefined || options.expectedParentSha !== REVIEWED_BOOTSTRAP_ROOT)) {
+    throw new Error("Reviewed empty Pages status is restricted to the exact bootstrap root.");
+  }
   const fetchImpl = options.fetchImpl ?? fetch;
   const attempts = await collectPagesAttemptHistory({
     repository: LIONLOG_REPOSITORY, currentRunId: Number.MAX_SAFE_INTEGER,
     token: options.token, incidentHistory: options.incidentHistory,
     checkpoint: options.previous, strictCheckpointEvidence: true, fetchImpl, now: options.now,
     productionRef: options.productionRef,
+    allowReviewedEmptyPagesStatus: options.reviewedEmptyPagesStatusBootstrap,
   });
   if (attempts.length === 0) throw new Error("Checkpoint proposal has no completed publication attempt.");
   const reviewedIncidents = new Map(((options.incidentHistory as { incidents: Incident[] }).incidents)
@@ -620,6 +654,7 @@ export async function preparePublicationCheckpoint(options: {
     state: { commitSha: options.expectedParentSha, parentSha: options.expectedParentSha,
       writerId: options.authorizedWriterId, verified: true }, authorizedWriterId: options.authorizedWriterId });
   await verifyCheckpointPublic(checkpoint, options.manifestBytes, fetchImpl);
+  assertReviewedEmptyPagesStatusBoundary(attempts, checkpoint);
   return { checkpoint, receiptBytes };
 }
 
