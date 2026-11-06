@@ -12,6 +12,7 @@ import {
   observeCheckpointPublicProof,
   assertCheckpointPublicProof,
   isResolvedPublishedPredecessor,
+  assertReviewedEmptyPagesStatusBoundary,
 } from "../scripts/publication-checkpoint.ts";
 import { isReviewedIncidentPredecessor, type Incident, type PriorAttemptEvidence } from "../scripts/supported-pages-control.ts";
 import { collectPagesAttemptHistory } from "../scripts/collect-pages-attempt-history.ts";
@@ -53,6 +54,28 @@ const checkpoint = {
   },
   history: { sha256: "2".repeat(64), coveredReruns: [] },
 };
+
+test("reviewed empty Pages status needs the exact later known-good boundary", () => {
+  const prior = { runId: 36900859358, runAttempt: 1,
+    workflowSha: "5be205a42930f69424d0854443b4fa4f35c237bd",
+    publishedResolution: { pagesStatusCompatibility: "reviewed-oct01-empty" as const } };
+  const later = { runId: 41072714284, runAttempt: 1,
+    workflowSha: "30a070a2346e3f6015be5c79e93495a9d52ba67b", publishedResolution: null };
+  const exact = { boundary: { runId: later.runId, runAttempt: 1, workflowSha: later.workflowSha },
+    publication: { sourceSha: later.workflowSha,
+      releaseId: "86c0bb964368c5f0ebec53e4b68e5f955460a0a285d3a4845106d5b81992d8f7" } };
+  assert.doesNotThrow(() => assertReviewedEmptyPagesStatusBoundary([prior, later], exact));
+  assert.throws(() => assertReviewedEmptyPagesStatusBoundary([prior], exact), /later known-good/);
+  assert.throws(() => assertReviewedEmptyPagesStatusBoundary([prior, later], {
+    ...exact, boundary: { ...exact.boundary, runId: 41072714285 },
+  }), /later known-good/);
+  assert.throws(() => assertReviewedEmptyPagesStatusBoundary([prior, later], {
+    ...exact, publication: { ...exact.publication, releaseId: "f".repeat(64) },
+  }), /later known-good/);
+  assert.throws(() => assertReviewedEmptyPagesStatusBoundary([{ ...prior, runAttempt: 2 }, later], exact),
+    /historical/);
+  assert.throws(() => assertReviewedEmptyPagesStatusBoundary([prior, prior, later], exact), /historical/);
+});
 
 test("reviewed legacy and unknown incidents require their exact historical evidence", () => {
   for (const record of incidentHistory.incidents.slice(0, 3)) {

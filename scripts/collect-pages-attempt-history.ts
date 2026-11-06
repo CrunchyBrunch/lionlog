@@ -107,6 +107,7 @@ export async function collectPagesAttemptHistory(options: {
   checkpoint?: VerifiedPublicationCheckpoint;
   strictCheckpointEvidence?: boolean;
   productionRef?: string;
+  allowReviewedEmptyPagesStatus?: boolean;
 }): Promise<CollectedAttemptEvidence[]> {
   const productionBranch = options.productionRef ? branchFromProductionRef(options.productionRef) : "main";
   if (options.repository !== "CrunchyBrunch/lionlog" || !positive(options.currentRunId) || options.token.length < 1) {
@@ -190,6 +191,7 @@ export async function collectPagesAttemptHistory(options: {
         const collected = await collectPublishedResolution({
           record: contract.published, token: options.token,
           artifactMetadata: [...artifacts, ...candidateArtifacts], fetchImpl, now: options.now,
+          allowReviewedEmptyPagesStatus: options.allowReviewedEmptyPagesStatus,
         });
         if (!receipt || receipt.artifactId !== collected.resolution.receiptArtifactId
           || receipt.artifactDigest !== collected.resolution.receiptArtifactDigest

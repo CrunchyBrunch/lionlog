@@ -189,6 +189,18 @@ export interface PublishedResolution {
   receiptArtifactDigest: string;
   logEvidence: PublishedJobLogEvidence;
   decision: VerifiedPublishedDecision;
+  pagesStatusCompatibility?: "reviewed-oct01-empty";
+}
+
+const REVIEWED_PAGES_DEPLOYMENT = "5be205a42930f69424d0854443b4fa4f35c237bd";
+
+function reviewedEmptyPagesStatus(record: PublishedIncident, value: unknown): boolean {
+  return record.runId === 36900859358 && record.runAttempt === 1
+    && record.workflowSha === REVIEWED_PAGES_DEPLOYMENT
+    && record.evidence.officialPages.deploymentId === REVIEWED_PAGES_DEPLOYMENT
+    && value !== null && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).length === 1 && Object.keys(value)[0] === "status"
+    && (value as { status: unknown }).status === "";
 }
 
 export async function collectPublishedResolution(options: {
@@ -197,6 +209,7 @@ export async function collectPublishedResolution(options: {
   artifactMetadata: unknown[];
   fetchImpl?: typeof fetch;
   now?: Date;
+  allowReviewedEmptyPagesStatus?: boolean;
 }): Promise<{ resolution: PublishedResolution; receipt: Record<string, unknown> }> {
   const { record, token, artifactMetadata } = options;
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -237,13 +250,14 @@ export async function collectPublishedResolution(options: {
   ]);
   const logEvidence = verifyExternalPublishedEvidence(record, {
     candidateRun, ciRun, pagesStatus, deployment, statuses, statusesNext, deployJob, verifyJob, deployLog, verifyLog,
-  });
+  }, options.allowReviewedEmptyPagesStatus);
   return {
     resolution: {
       evidenceDigest: record.decision.evidenceDigest, runId: record.runId, runAttempt: record.runAttempt,
       workflowSha: record.workflowSha, releaseId: record.evidence.release.id,
       receiptArtifactId: bindings.receipt.id, receiptArtifactDigest: bindings.receipt.wrapperDigest,
       logEvidence, decision,
+      ...(reviewedEmptyPagesStatus(record, pagesStatus) ? { pagesStatusCompatibility: "reviewed-oct01-empty" as const } : {}),
     },
     receipt: parsed.receipt,
   };
@@ -252,7 +266,7 @@ export async function collectPublishedResolution(options: {
 export function verifyExternalPublishedEvidence(record: PublishedIncident, value: {
   candidateRun: unknown; ciRun: unknown; pagesStatus: unknown; deployment: unknown; statuses: unknown;
   statusesNext: unknown; deployJob: unknown; verifyJob: unknown; deployLog: string; verifyLog: string;
-}): PublishedJobLogEvidence {
+}, allowReviewedEmptyPagesStatus = false): PublishedJobLogEvidence {
   const source = record.evidence.release;
   for (const [run, id] of [[value.candidateRun, source.candidateProducerRunId], [value.ciRun, source.exactSourceCiRunId]] as const) {
     const item = run as Record<string, unknown>;
@@ -261,8 +275,6 @@ export function verifyExternalPublishedEvidence(record: PublishedIncident, value
       throw new Error("Published incident source producer or CI run differs.");
     }
   }
-  const pages = value.pagesStatus as Record<string, unknown>;
-  if (pages.status !== "succeed") throw new Error("Published incident official Pages deployment status differs.");
   const environment = value.deployment as Record<string, unknown>;
   const expected = record.evidence.repositoryEnvironment;
   if (environment.id !== expected.deploymentId || environment.task !== expected.task
@@ -283,5 +295,12 @@ export function verifyExternalPublishedEvidence(record: PublishedIncident, value
     || Date.parse(expected.successAt) < Date.parse(expected.createdAt)) {
     throw new Error("Published incident environment success status differs.");
   }
-  return verifyPublishedJobLogEvidence(record, value);
+  const logEvidence = verifyPublishedJobLogEvidence(record, value);
+  const pages = value.pagesStatus;
+  if (pages === null || typeof pages !== "object" || Array.isArray(pages)
+    || ((pages as { status?: unknown }).status !== "succeed"
+      && !(allowReviewedEmptyPagesStatus && reviewedEmptyPagesStatus(record, pages)))) {
+    throw new Error("Published incident official Pages deployment status differs.");
+  }
+  return logEvidence;
 }

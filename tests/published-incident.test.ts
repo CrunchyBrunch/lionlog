@@ -232,6 +232,27 @@ test("official Pages and repository environment identities remain separate and b
     ].join("\n") + "\n",
   };
   assert.doesNotThrow(() => verifyExternalPublishedEvidence(incident, value));
+  const empty = { ...value, pagesStatus: { status: "" } };
+  assert.throws(() => verifyExternalPublishedEvidence(incident, empty), /Pages/);
+  assert.doesNotThrow(() => verifyExternalPublishedEvidence(incident, empty, true));
+  for (const pagesStatus of [null, {}, { status: null }, { status: "pending" },
+    { status: "failed" }, { status: "", extra: true }]) {
+    assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, pagesStatus }, true),
+      /Pages/, JSON.stringify(pagesStatus));
+  }
+  for (const changed of ([
+    { ...incident, runId: incident.runId + 1 },
+    { ...incident, runAttempt: 2 },
+    { ...incident, workflowSha: "f".repeat(40) },
+    { ...incident, evidence: { ...incident.evidence, officialPages: {
+      ...incident.evidence.officialPages, deploymentId: "f".repeat(40),
+    } } },
+  ] as unknown as Array<typeof incident>)) {
+    assert.throws(() => verifyExternalPublishedEvidence(changed, empty, true), /Pages|source|action|archival/);
+  }
+  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...empty, statuses: [] }, true), /statuses/);
+  assert.throws(() => verifyExternalPublishedEvidence(incident, { ...empty,
+    deployLog: value.deployLog.replace("Reported success!", "Reported failure!") }, true), /action/);
   assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, pagesStatus: { status: "failed" } }), /Pages/);
   assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, deployment: { ...value.deployment, id: incident.evidence.officialPages.deploymentId } }), /environment/);
   assert.throws(() => verifyExternalPublishedEvidence(incident, { ...value, deployLog: value.deployLog.replace("11181496634", "11181496635") }), /action/);
