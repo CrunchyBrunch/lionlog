@@ -351,7 +351,10 @@ test("state append checks public bytes, retains the exact manifest, and rereads 
     checkpointValue: () => storedCheckpoint, receiptBytes: () => storedReceipt,
     manifestBytes: () => storedManifest,
     onGraphql(body) {
-      const input = (body.variables as { input: { expectedHeadOid: string; fileChanges: { additions: Array<{ path: string; contents: string }> } } }).input;
+      const input = (body.variables as { input: { branch: unknown; expectedHeadOid: string;
+        fileChanges: { additions: Array<{ path: string; contents: string }> } } }).input;
+      assert.deepEqual(input.branch, { repositoryNameWithOwner: "CrunchyBrunch/lionlog",
+        branchName: "lionlog-publication-state" });
       assert.equal(input.expectedHeadOid, state.commitSha);
       additions = input.fileChanges.additions;
       storedCheckpoint = JSON.parse(Buffer.from(additions[0].contents, "base64").toString("utf8"));
@@ -597,7 +600,10 @@ test("App bootstrap commits one genuine known-good checkpoint on the empty root 
     checkpointValue: () => storedCheckpoint, receiptBytes: () => storedReceipt,
     manifestBytes: () => storedManifest,
     onGraphql(body) {
-      const input = (body.variables as { input: { expectedHeadOid: string; fileChanges: { additions: Array<{ path: string; contents: string }> } } }).input;
+      const input = (body.variables as { input: { branch: unknown; expectedHeadOid: string;
+        fileChanges: { additions: Array<{ path: string; contents: string }> } } }).input;
+      assert.deepEqual(input.branch, { repositoryNameWithOwner: "CrunchyBrunch/lionlog",
+        branchName: "lionlog-publication-state" });
       assert.equal(input.expectedHeadOid, state.parentSha);
       additions = input.fileChanges.additions;
       storedCheckpoint = JSON.parse(Buffer.from(additions[0].contents, "base64").toString("utf8"));
@@ -620,6 +626,54 @@ test("App bootstrap commits one genuine known-good checkpoint on the empty root 
   assert.deepEqual(additions.map((entry) => entry.path), ["checkpoint.json", "receipt.json", "manifest.json"]);
   assert.equal((storedCheckpoint as { stateParentSha: string }).stateParentSha, state.parentSha);
   assert.deepEqual(storedManifest, fixture.manifestBytes);
+});
+
+test("both checkpoint writes report bounded GraphQL diagnostics without echoing secrets", async () => {
+  const secret = "SENSITIVE_TOKEN_AND_FILE_CONTENTS_123";
+  for (const mode of ["bootstrap", "append"] as const) {
+    const fixture = mode === "bootstrap"
+      ? publicationFixture({ sourceShaValue: sha })
+      : publicationFixture({ runId: 11, releaseIdValue: "f".repeat(64) });
+    const invoke = (reply: unknown) => {
+      let mutations = 0;
+      const stateApi = stateFetch({ commitSha: mode === "bootstrap" ? state.parentSha : state.commitSha,
+        onGraphql() { mutations += 1; return json(reply); } });
+      const fetchImpl: typeof fetch = (input, init) => String(input).startsWith("https://crunchybrunch.github.io/")
+        || String(input).includes("/actions/") ? fixture.fetchImpl(input, init) : stateApi(input, init);
+      const pending = mode === "bootstrap"
+        ? checkpointExports.bootstrapPublicationCheckpoint({ token: "fixture", authorizedWriterId: 123,
+          authorizedAppSlug: "lionlog-publication", expectedRootSha: state.parentSha,
+          expectedRunId: 10, expectedSourceSha: sha, manifestBytes: fixture.manifestBytes,
+          incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] },
+          productionRef: "refs/heads/lionlog-production", fetchImpl })
+        : appendPublicationCheckpoint({ token: "fixture", authorizedWriterId: 123,
+          authorizedAppSlug: "lionlog-publication", expectedParentSha: state.commitSha,
+          manifestBytes: fixture.manifestBytes,
+          incidentHistory: { historyVersion: "lionlog.pages-incident-history.v1", incidents: [] }, fetchImpl });
+      return { pending, mutations: () => mutations };
+    };
+    const rejected = invoke({ errors: [
+      { type: "UNPROCESSABLE", message: `Field 'refName' is not defined by type CommittableBranch. ${secret}`,
+        path: ["createCommitOnBranch"], extensions: { code: "BAD_USER_INPUT", variables: secret } },
+      { type: secret, message: secret, path: [secret], extensions: { code: secret } },
+      ...Array.from({ length: 20 }, () => ({ type: secret, message: secret, path: [secret] })),
+    ], variables: secret, data: { createCommitOnBranch: { commit: { oid: "7".repeat(40) } } } });
+    const graphqlError = await rejected.pending.then(() => null, (error: Error) => error);
+    assert.ok(graphqlError, mode);
+    assert.match(graphqlError.message, /GraphQL errors/i);
+    assert.match(graphqlError.message, /branch selector field rejected/i);
+    assert.match(graphqlError.message, /UNPROCESSABLE|BAD_USER_INPUT/);
+    assert.doesNotMatch(graphqlError.message, /SENSITIVE_TOKEN_AND_FILE_CONTENTS_123/);
+    assert.ok(graphqlError.message.length < 500);
+    assert.equal(rejected.mutations(), 1);
+
+    const missing = invoke({ data: { createCommitOnBranch: { commit: {} } } });
+    const oidError = await missing.pending.then(() => null, (error: Error) => error);
+    assert.ok(oidError, mode);
+    assert.match(oidError.message, /no valid commit oid/i);
+    assert.doesNotMatch(oidError.message, /GraphQL errors/i);
+    assert.equal(missing.mutations(), 1);
+  }
 });
 
 test("App bootstrap refuses wrong identity, root, publication, or public bytes before mutation", async () => {
