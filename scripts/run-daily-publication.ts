@@ -39,7 +39,7 @@ export function scheduledOpportunity(now: Date): { serviceDate: string; mode: "p
   const value = (key: string) => parts.find((part) => part.type === key)?.value ?? "";
   const minute = Number(value("hour")) * 60 + Number(value("minute"));
   if (minute < PROPOSED_PRIMARY_MINUTE || minute >= LATEST_DAILY_START_MINUTE) {
-    throw new Error("Scheduled run is outside the approved New York morning window.");
+    throw new Error("Scheduled run is outside the approved New York start window.");
   }
   return { serviceDate: `${value("year")}-${value("month")}-${value("day")}`,
     mode: minute < PROPOSED_PRIMARY_MINUTE + PROPOSED_PRIMARY_WINDOW_MINUTES ? "primary" : "recovery" };

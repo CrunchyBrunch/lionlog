@@ -2,7 +2,7 @@
 export const REFRESH_DAILY_UPSTREAM_LIMIT = 1_680;
 export const PROPOSED_PRIMARY_MINUTE = 5 * 60 + 17;
 export const PROPOSED_PRIMARY_WINDOW_MINUTES = 30;
-export const LATEST_DAILY_START_MINUTE = 10 * 60;
+export const LATEST_DAILY_START_MINUTE = 12 * 60 + 15;
 
 const REPOSITORY = "CrunchyBrunch/lionlog";
 const PRODUCER_WORKFLOW = ".github/workflows/build-live-menu-artifact.yml";
