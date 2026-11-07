@@ -1,0 +1,29 @@
+{
+  "checkpointVersion": "lionlog.pages-publication-checkpoint.v1",
+  "repository": {
+    "id": 1346360244,
+    "name": "CrunchyBrunch/lionlog"
+  },
+  "branch": "refs/heads/lionlog-publication-state",
+  "writerId": 349336648,
+  "stateParentSha": "02b8c312e8ce22f03dd91b96481a416571f519d1",
+  "boundary": {
+    "runId": 41072714284,
+    "runAttempt": 1,
+    "workflowSha": "30a070a2346e3f6015be5c79e93495a9d52ba67b"
+  },
+  "publication": {
+    "releaseId": "86c0bb964368c5f0ebec53e4b68e5f955460a0a285d3a4845106d5b81992d8f7",
+    "sourceSha": "30a070a2346e3f6015be5c79e93495a9d52ba67b",
+    "candidateArtifactId": 12980953175,
+    "candidateArtifactDigest": "sha256:abb3ae6872ba63f23fcae9e4a780ca89035376926c93cb305f16cbd61f86317a",
+    "manifestSha256": "7b8a58a45946d7e631e8445561c5bb61b7abeb609d9e5ecc719118ea9fdf7dca",
+    "receiptArtifactId": 12985203460,
+    "receiptArtifactDigest": "sha256:db17cfd2cd037bbf54605585aecb854d92df485d3b3c5ddc1f01c399bb53ef12",
+    "receiptSha256": "ccc4687d6ecc3708512391a7effb05f2439a013c325d6f4e81f1cf9724433b6b"
+  },
+  "history": {
+    "sha256": "35ada6a1161cdea0bcfd8eea063d59295cb4a393c5e62664efa6b1bd64baa400",
+    "coveredReruns": []
+  }
+}
