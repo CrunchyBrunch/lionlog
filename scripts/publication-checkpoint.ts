@@ -21,7 +21,52 @@ const REVIEWED_BOOTSTRAP_ROOT = "02b8c312e8ce22f03dd91b96481a416571f519d1";
 const REVIEWED_OCT01_SHA = "5be205a42930f69424d0854443b4fa4f35c237bd";
 const REVIEWED_OCT30_SHA = "30a070a2346e3f6015be5c79e93495a9d52ba67b";
 const REVIEWED_OCT30_RELEASE = "86c0bb964368c5f0ebec53e4b68e5f955460a0a285d3a4845106d5b81992d8f7";
-export const PUBLICATION_STATE_BRANCH = "refs/heads/lionlog-publication-state";
+const PUBLICATION_STATE_BRANCH_NAME = "lionlog-publication-state";
+export const PUBLICATION_STATE_BRANCH = `refs/heads/${PUBLICATION_STATE_BRANCH_NAME}`;
+
+const GRAPHQL_ERROR_TYPES = new Set(["UNPROCESSABLE", "FORBIDDEN", "NOT_FOUND", "BAD_USER_INPUT"]);
+const GRAPHQL_ERROR_CODES = new Set(["BAD_USER_INPUT", "UNPROCESSABLE", "FORBIDDEN", "NOT_FOUND", "VALIDATION_FAILED"]);
+const GRAPHQL_ERROR_PATH = new Set(["createCommitOnBranch", "commit", "oid"]);
+
+function checkpointMutationErrorSummary(value: unknown): string {
+  const item = value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown> : {};
+  const message = typeof item.message === "string" ? item.message : "";
+  const summary = /CommittableBranch/.test(message) && /(?:refName|branchName)/.test(message)
+    ? "branch selector field rejected"
+    : /expectedHeadOid/.test(message) ? "expected parent rejected"
+      : /(?:permission|not authorized|resource not accessible)/i.test(message) ? "authorization rejected"
+        : "unclassified";
+  const parts = [`summary=${summary}`];
+  if (typeof item.type === "string" && GRAPHQL_ERROR_TYPES.has(item.type)) parts.push(`type=${item.type}`);
+  const extensions = item.extensions !== null && typeof item.extensions === "object" && !Array.isArray(item.extensions)
+    ? item.extensions as Record<string, unknown> : {};
+  if (typeof extensions.code === "string" && GRAPHQL_ERROR_CODES.has(extensions.code)) {
+    parts.push(`code=${extensions.code}`);
+  }
+  if (Array.isArray(item.path) && item.path.length > 0 && item.path.length <= 3
+    && item.path[0] === "createCommitOnBranch"
+    && item.path.every((segment) => typeof segment === "string" && GRAPHQL_ERROR_PATH.has(segment))) {
+    parts.push(`path=${item.path.join(".")}`);
+  }
+  return parts.join(" ");
+}
+
+function checkpointMutationOid(result: unknown, operation: "bootstrap" | "append"): string {
+  const label = operation === "bootstrap" ? "Checkpoint bootstrap" : "Checkpoint";
+  const value = result !== null && typeof result === "object" && !Array.isArray(result)
+    ? result as Record<string, unknown> : {};
+  if (Object.hasOwn(value, "errors")) {
+    const errors = Array.isArray(value.errors) ? value.errors.slice(0, 3).map(checkpointMutationErrorSummary) : [];
+    throw new Error(`${label} expected-parent state update rejected (GraphQL errors: ${errors.join("; ") || "unclassified"}).`);
+  }
+  const mutation = (value.data as Record<string, unknown> | undefined)?.createCommitOnBranch as Record<string, unknown> | undefined;
+  const commit = mutation?.commit as Record<string, unknown> | undefined;
+  if (typeof commit?.oid !== "string" || !SHA.test(commit.oid)) {
+    throw new Error(`${label} expected-parent state update returned no valid commit oid.`);
+  }
+  return commit.oid;
+}
 
 /** The historical empty-status exception is usable only before this exact verified seed. */
 export function assertReviewedEmptyPagesStatusBoundary(
@@ -401,7 +446,7 @@ export async function bootstrapPublicationCheckpoint(options: {
   await assertRoot();
   const query = `mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }`;
   const variables = { input: {
-    branch: { repositoryNameWithOwner: LIONLOG_REPOSITORY, refName: PUBLICATION_STATE_BRANCH },
+    branch: { repositoryNameWithOwner: LIONLOG_REPOSITORY, branchName: PUBLICATION_STATE_BRANCH_NAME },
     expectedHeadOid: expectedRootSha,
     message: { headline: `Seed verified Pages checkpoint ${expectedRunId}/1` },
     fileChanges: { additions: [
@@ -411,14 +456,10 @@ export async function bootstrapPublicationCheckpoint(options: {
     ] },
   } };
   const result = await githubJson(fetchImpl, token, `${API}/graphql`, { query, variables }) as Record<string, unknown>;
-  const mutation = (result.data as Record<string, unknown> | undefined)?.createCommitOnBranch as Record<string, unknown> | undefined;
-  const commit = mutation?.commit as Record<string, unknown> | undefined;
-  if (result.errors || typeof commit?.oid !== "string" || !SHA.test(commit.oid)) {
-    throw new Error("Checkpoint bootstrap expected-parent state update failed.");
-  }
+  const commitOid = checkpointMutationOid(result, "bootstrap");
   const loaded = await loadPublicationCheckpoint({ token,
     authorizedWriterId, fetchImpl });
-  if (loaded.commitSha !== commit.oid
+  if (loaded.commitSha !== commitOid
     || JSON.stringify(loaded.checkpoint) !== JSON.stringify(prepared.checkpoint)
     || !loaded.receiptBytes.equals(prepared.receiptBytes)
     || !loaded.manifestBytes?.equals(manifestBytes)) {
@@ -487,7 +528,7 @@ export async function appendPublicationCheckpoint(options: {
   }
   const query = `mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }`;
   const variables = { input: {
-    branch: { repositoryNameWithOwner: LIONLOG_REPOSITORY, refName: PUBLICATION_STATE_BRANCH },
+    branch: { repositoryNameWithOwner: LIONLOG_REPOSITORY, branchName: PUBLICATION_STATE_BRANCH_NAME },
     expectedHeadOid: expectedParentSha,
     message: { headline: `Record verified Pages checkpoint ${prepared.checkpoint.boundary.runId}/${prepared.checkpoint.boundary.runAttempt}` },
     fileChanges: { additions: [
@@ -497,14 +538,9 @@ export async function appendPublicationCheckpoint(options: {
     ] },
   } };
   const result = await githubJson(fetchImpl, token, `${API}/graphql`, { query, variables }) as Record<string, unknown>;
-  const data = result.data as Record<string, unknown> | undefined;
-  const mutation = data?.createCommitOnBranch as Record<string, unknown> | undefined;
-  const commit = mutation?.commit as Record<string, unknown> | undefined;
-  if (result.errors || typeof commit?.oid !== "string" || !SHA.test(commit.oid)) {
-    throw new Error("Checkpoint expected-parent state update failed.");
-  }
+  const commitOid = checkpointMutationOid(result, "append");
   const loaded = await loadPublicationCheckpoint({ token, authorizedWriterId, fetchImpl });
-  if (loaded.commitSha !== commit.oid
+  if (loaded.commitSha !== commitOid
     || JSON.stringify(loaded.checkpoint) !== JSON.stringify(prepared.checkpoint)
     || !loaded.receiptBytes.equals(prepared.receiptBytes)
     || !loaded.manifestBytes?.equals(manifestBytes)) {
@@ -545,7 +581,14 @@ async function githubJson(fetchImpl: typeof fetch, token: string, url: string, b
   }
   const bytes = Buffer.from(await response.arrayBuffer());
   if (bytes.length === 0 || bytes.length > maxBytes) throw new Error("Checkpoint GitHub response size is invalid.");
-  return JSON.parse(bytes.toString("utf8")) as unknown;
+  try {
+    return JSON.parse(bytes.toString("utf8")) as unknown;
+  } catch {
+    if (url === `${API}/graphql` && body !== undefined) {
+      throw new Error("Checkpoint GraphQL response JSON is invalid; state update outcome unknown.");
+    }
+    throw new Error("Checkpoint GitHub response JSON is invalid.");
+  }
 }
 
 /** Offline proposal only. Call after the official workflow has reached a terminal state. */
