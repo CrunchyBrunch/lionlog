@@ -30,12 +30,17 @@ const emptyDailyHistory = (route: string): unknown => {
   return undefined;
 };
 
-test("native New York schedule handles EST, EDT, spring transition, and the missed-primary window", () => {
+test("native New York schedule admits a delayed first start before 12:15 across DST", () => {
   assert.deepEqual(scheduledOpportunity(new Date("2026-01-15T10:17:00Z")), { serviceDate: "2026-01-15", mode: "primary" });
   assert.deepEqual(scheduledOpportunity(new Date("2026-07-15T09:17:00Z")), { serviceDate: "2026-07-15", mode: "primary" });
   assert.deepEqual(scheduledOpportunity(new Date("2026-03-08T09:55:00Z")), { serviceDate: "2026-03-08", mode: "recovery" });
+  assert.deepEqual(scheduledOpportunity(new Date("2026-03-08T16:14:59Z")), { serviceDate: "2026-03-08", mode: "recovery" });
+  assert.deepEqual(scheduledOpportunity(new Date("2026-11-01T17:14:59Z")), { serviceDate: "2026-11-01", mode: "recovery" });
+  assert.deepEqual(scheduledOpportunity(new Date("2026-07-15T14:00:00Z")), { serviceDate: "2026-07-15", mode: "recovery" });
   assert.throws(() => scheduledOpportunity(new Date("2026-07-15T09:16:00Z")), /outside/);
-  assert.throws(() => scheduledOpportunity(new Date("2026-07-15T14:00:00Z")), /outside/);
+  assert.throws(() => scheduledOpportunity(new Date("2026-07-15T16:15:00Z")), /outside/);
+  assert.throws(() => scheduledOpportunity(new Date("2026-07-15T16:15:01Z")), /outside/);
+  assert.throws(() => scheduledOpportunity(new Date("2026-11-01T17:15:00Z")), /outside/);
 });
 
 test("standing publication policy rejects partial coverage, omissions, rollback, and missing authority", () => {
@@ -71,7 +76,7 @@ test("a queued schedule from the previous service day cannot request today's men
 
 test("a later same-day schedule cannot consume a second retrieval opportunity", async () => {
   let dispatches = 0;
-  const lateRun = { ...scheduleRun, id: 10, created_at: "2026-10-19T09:50:00Z" };
+  const lateRun = { ...scheduleRun, id: 10, created_at: "2026-10-19T16:14:59Z" };
   const earlier = { ...scheduleRun, id: 9, status: "completed", created_at: "2026-10-19T09:17:00Z" };
   const api: DailyApi = {
     get: async (route) => {
@@ -91,14 +96,14 @@ test("a later same-day schedule cannot consume a second retrieval opportunity", 
     dispatch: async () => { dispatches += 1; return 100; },
   };
   await assert.rejects(runDailyPublication({ ...fixed, schedulerRunId: 10, api,
-    now: new Date("2026-10-19T09:50:00Z"),
+    now: new Date("2026-10-19T16:14:59Z"),
     loadCheckpoint: async () => ({ checkpoint: { publication: { releaseId: "c".repeat(64) } } }) as unknown as Awaited<ReturnType<typeof loadPublicationCheckpoint>>,
     observePublic: async () => ({ state: "present", releaseId: "c".repeat(64) }) }), /already|consumed|attempt/i);
   assert.equal(dispatches, 0);
 });
 
 test("a delayed first schedule uses its one recovery window only with empty authenticated history", async () => {
-  const lateRun = { ...scheduleRun, id: 10, created_at: "2026-10-19T09:50:00Z" };
+  const lateRun = { ...scheduleRun, id: 10, created_at: "2026-10-19T16:14:59Z" };
   const dispatched: Array<Record<string, string>> = [];
   let existingProducer = false;
   const api: DailyApi = {
@@ -123,7 +128,7 @@ test("a delayed first schedule uses its one recovery window only with empty auth
     bytes: async () => Buffer.alloc(0),
     dispatch: async (_workflow, _branch, inputs) => { dispatched.push(inputs); return 100; },
   };
-  const options = { ...fixed, schedulerRunId: 10, api, now: new Date("2026-10-19T09:50:00Z"),
+  const options = { ...fixed, schedulerRunId: 10, api, now: new Date("2026-10-19T16:14:59Z"),
     loadCheckpoint: async () => ({ checkpoint: { publication: { releaseId: "c".repeat(64) } } }) as unknown as Awaited<ReturnType<typeof loadPublicationCheckpoint>>,
     observePublic: async () => ({ state: "present" as const, releaseId: "c".repeat(64) }) };
   await assert.rejects(runDailyPublication(options), /ended failure/);

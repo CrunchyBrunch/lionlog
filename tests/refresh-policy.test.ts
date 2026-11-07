@@ -57,6 +57,29 @@ test("New York service day and proposed 05:17 primary boundary are exact across 
   assert.equal(decide({ invocation: winter, now: new Date("2026-12-15T10:17:00.000Z") }).kind, "primary");
 });
 
+test("producer admits a recovery start through 12:14:59 and closes at 12:15 New York time", () => {
+  for (const admitted of ["2026-03-08T16:14:59.000Z", "2026-11-01T17:14:59.000Z"]) {
+    const now = new Date(admitted);
+    const serviceDate = admitted.slice(0, 10);
+    assert.equal(decide({ invocation: { ...invocation, serviceDate }, now, trigger: "recovery" }).kind, "recovery");
+  }
+  for (const closed of ["2026-03-08T16:15:00.000Z", "2026-03-08T16:15:01.000Z",
+    "2026-11-01T17:15:00.000Z"]) {
+    const now = new Date(closed);
+    const serviceDate = closed.slice(0, 10);
+    assert.throws(() => decide({ invocation: { ...invocation, serviceDate }, now, trigger: "recovery" }), /start window has closed/);
+  }
+});
+
+test("automatic producer preflight admits an unconsumed delayed first start", async () => {
+  const api = { getJson: async () => ({ total_count: 0, workflow_runs: [] }),
+    getBytes: async () => { throw new Error("unexpected artifact download"); } };
+  assert.equal(await preflightAutomaticRefresh({ api, configuration: config,
+    repository: invocation.repository, workflowRef: invocation.workflowRef, workflowSha: sourceSha,
+    runId: 900, runAttempt: 1, serviceDate: "2026-10-15", trigger: "recovery",
+    now: new Date("2026-10-15T16:14:59.000Z") }), 1_680);
+});
+
 test("one missed or transient prepublication attempt permits one recovery, never a duplicate", () => {
   assert.equal(decide({ now: new Date("2026-10-15T09:47:00.000Z"), trigger: "recovery" }).kind, "recovery");
   assert.throws(() => decide({ now: new Date("2026-10-15T09:47:00.000Z") }), /primary|recovery/i);
