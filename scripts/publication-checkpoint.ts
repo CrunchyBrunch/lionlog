@@ -581,7 +581,14 @@ async function githubJson(fetchImpl: typeof fetch, token: string, url: string, b
   }
   const bytes = Buffer.from(await response.arrayBuffer());
   if (bytes.length === 0 || bytes.length > maxBytes) throw new Error("Checkpoint GitHub response size is invalid.");
-  return JSON.parse(bytes.toString("utf8")) as unknown;
+  try {
+    return JSON.parse(bytes.toString("utf8")) as unknown;
+  } catch {
+    if (url === `${API}/graphql` && body !== undefined) {
+      throw new Error("Checkpoint GraphQL response JSON is invalid; state update outcome unknown.");
+    }
+    throw new Error("Checkpoint GitHub response JSON is invalid.");
+  }
 }
 
 /** Offline proposal only. Call after the official workflow has reached a terminal state. */

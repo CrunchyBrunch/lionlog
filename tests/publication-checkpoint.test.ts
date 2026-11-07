@@ -637,7 +637,7 @@ test("both checkpoint writes report bounded GraphQL diagnostics without echoing 
     const invoke = (reply: unknown) => {
       let mutations = 0;
       const stateApi = stateFetch({ commitSha: mode === "bootstrap" ? state.parentSha : state.commitSha,
-        onGraphql() { mutations += 1; return json(reply); } });
+        onGraphql() { mutations += 1; return reply instanceof Response ? reply : json(reply); } });
       const fetchImpl: typeof fetch = (input, init) => String(input).startsWith("https://crunchybrunch.github.io/")
         || String(input).includes("/actions/") ? fixture.fetchImpl(input, init) : stateApi(input, init);
       const pending = mode === "bootstrap"
@@ -673,6 +673,16 @@ test("both checkpoint writes report bounded GraphQL diagnostics without echoing 
     assert.match(oidError.message, /no valid commit oid/i);
     assert.doesNotMatch(oidError.message, /GraphQL errors/i);
     assert.equal(missing.mutations(), 1);
+
+    const malformed = invoke(new Response("ECHO_KEY", { status: 200,
+      headers: { "content-type": "application/json" } }));
+    const decodeError = await malformed.pending.then(() => null, (error: Error) => error);
+    assert.ok(decodeError, mode);
+    assert.equal(decodeError.message, "Checkpoint GraphQL response JSON is invalid; state update outcome unknown.");
+    assert.doesNotMatch(`${decodeError.name}: ${decodeError.message}\n${decodeError.stack ?? ""}`,
+      /ECHO_KEY|Unexpected token|not valid JSON/);
+    assert.equal(Object.hasOwn(decodeError, "cause"), false);
+    assert.equal(malformed.mutations(), 1);
   }
 });
 
