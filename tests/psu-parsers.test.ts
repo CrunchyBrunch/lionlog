@@ -120,6 +120,17 @@ test("zero-item structural failures carry bounded counts for distinct sanitized 
   }
 });
 
+test("an early recognized empty marker accepts nested later markers but rejects contradictory items", async () => {
+  const html = await fixture("menu-east-lunch.sanitized.html");
+  const expected = { sourceCampusId: "11", sourceDate: "8/31/26", sourceMeal: "Lunch" };
+  const controls = html.slice(0, html.indexOf("<details class=\"menu-category-section\""));
+  const nested = "<div data-menu-empty>".repeat(64) + "x".repeat(64 * 1024) + "</div>".repeat(64);
+  const emptyHtml = `${controls}<p data-menu-empty>No menu items are available</p>${nested}`;
+  assert.equal(parsePsuMenuHtml(emptyHtml, expected).empty, true);
+  assert.throws(() => parsePsuMenuHtml(`${emptyHtml}<div class="daily-menu-item">Item</div>`, expected),
+    /claimed an empty state while containing source items/);
+});
+
 test("name validation distinguishes missing and over-limit values without retaining unsafe text", async () => {
   const html = await fixture("menu-east-lunch.sanitized.html");
   const expected = { sourceCampusId: "11", sourceDate: "8/31/26", sourceMeal: "Lunch" };

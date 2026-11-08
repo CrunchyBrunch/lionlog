@@ -1,6 +1,6 @@
 import type { MenuQuery } from "../../domain/dining.ts";
 import { getPsuHall, getPsuMealPeriod, sourceDateFromIso } from "./constants.ts";
-import { parsePsuMenuHtml } from "./menu-parser.ts";
+import { parsePsuMenuHtml, PsuMenuStructureError } from "./menu-parser.ts";
 import { parsePsuNutritionHtml, type ParsedPsuNutrition } from "./nutrition-parser.ts";
 import type { PsuHttpRetriever } from "./retriever.ts";
 import {
@@ -120,12 +120,13 @@ export class PsuIngestionPipeline {
       try {
         const storedSnapshot = await this.store.readMenu(query);
         lastKnownGood = storedSnapshot ? validatePsuSnapshot(storedSnapshot) : null;
-      } catch (cacheError) {
-        const cacheMessage = cacheError instanceof Error ? cacheError.message : String(cacheError);
+      } catch {
         return {
           state: "unavailable",
           snapshot: null,
-          error: new Error(`${normalizedError.message} Saved snapshot validation also failed: ${cacheMessage}`),
+          error: normalizedError instanceof PsuMenuStructureError
+            ? new PsuMenuStructureError(normalizedError.counts, true)
+            : new Error("PSU ingestion failed. Saved snapshot validation also failed."),
         };
       }
       if (lastKnownGood && this.now().getTime() <= Date.parse(lastKnownGood.retainUntil)) {

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { parsePsuMealOptionsHtml } from "../infrastructure/psu/menu-parser.ts";
@@ -46,6 +48,60 @@ test("producer entry point logs bounded query diagnostics and still rejects sani
     assert.deepEqual(JSON.parse(line), { event: "lionlog.psu-menu-structure.v1",
       serviceDate: "2026-11-08", campus: "11", meal: "Lunch", queryOrdinal: 1,
       stationSections, itemElements, validatedItems: 0, recognizedEmptyMarkers: 0 });
+  }
+});
+
+test("producer retains the structure diagnostic when a matching saved snapshot is corrupt", async () => {
+  const testDirectory = path.resolve("work/offline-structure-tests");
+  await mkdir(testDirectory, { recursive: true });
+  for (const corrupt of [false, true]) {
+    const root = await mkdtemp(path.join(testDirectory, "lionlog-offline-structure-"));
+    try {
+      const cacheDirectory = path.join(root, "cache");
+      if (corrupt) {
+        const key = createHash("sha256").update(["2026-11-08", "psu:campus:13", "dinner"].join("\x1f"))
+          .digest("hex");
+        const directory = path.join(cacheDirectory, "lionlog.psu-menu.v2");
+        await mkdir(directory, { recursive: true });
+        await writeFile(path.join(directory, `${key}.json`), "ECHO_KEY", "utf8");
+      }
+      const reportPath = path.join(root, "report.json");
+      const accountingPath = path.join(root, "accounting.json");
+      const productionRef = "refs/heads/production/daily-menus";
+      const result = spawnSync(process.execPath, ["--experimental-strip-types",
+        "--import=./tests/fixtures/psu/producer-fetch-fixture.mjs", "scripts/prepare-live-field-release.ts",
+        "--date=2026-11-08", `--cache-dir=${cacheDirectory}`, `--report=${reportPath}`],
+      { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, ...authorizedEnvironment,
+        LIONLOG_TEST_SHAPE: "fallback", GITHUB_REF: productionRef,
+        GITHUB_WORKFLOW_REF: `CrunchyBrunch/lionlog/.github/workflows/build-live-menu-artifact.yml@${productionRef}`,
+        GITHUB_RUN_ID: "123", LIONLOG_REFRESH_MODE: "automatic", LIONLOG_REFRESH_OPPORTUNITY: "recovery",
+        LIONLOG_REFRESH_ACTIVATION: "ENABLE_AUTOMATIC_LIONLOG_REFRESH",
+        LIONLOG_REFRESH_SOURCE_AUTHORIZATION: "I_APPROVE_AUTOMATIC_PSU_REQUESTS",
+        LIONLOG_PRODUCTION_REF: productionRef, LIONLOG_PRODUCTION_SHA: "a".repeat(40),
+        LIONLOG_REMAINING_REQUESTS: "22", LIONLOG_REFRESH_ACCOUNTING_PATH: accountingPath } });
+      assert.equal(result.status, 1);
+      const rendered = result.stdout + result.stderr;
+      assert.doesNotMatch(rendered, /ECHO_KEY|PRIVATE_SENTINEL_NEVER_LOG/);
+      assert.match(result.stderr, /neither validated items nor a recognized empty state/);
+      assert.equal(result.stderr.includes("Saved snapshot validation also failed."), corrupt);
+      const events = result.stderr.split(/\r?\n/).filter((line) =>
+        line.startsWith('{"event":"lionlog.psu-menu-structure.v1"')).map((line) => JSON.parse(line));
+      assert.deepEqual(events, [{ event: "lionlog.psu-menu-structure.v1", serviceDate: "2026-11-08",
+        campus: "13", meal: "Dinner", queryOrdinal: 2, stationSections: 1, itemElements: 1,
+        validatedItems: 0, recognizedEmptyMarkers: 0 }]);
+      const progress = result.stdout.split(/\r?\n/).filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line)).at(-1);
+      assert.equal(progress.phase, "failed");
+      assert.equal(progress.completedQueries, 1);
+      assert.deepEqual(progress.upstream, { requestCount: 7, mealOptionRequests: 5, menuRequests: 2,
+        nutritionRequests: 0, retryRequests: 0 });
+      const accounting = JSON.parse(await readFile(accountingPath, "utf8"));
+      assert.equal(accounting.upstreamAttempts, 7);
+      assert.equal(accounting.outcome, "structural-failure");
+      assert.equal(existsSync(reportPath), false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });
 
