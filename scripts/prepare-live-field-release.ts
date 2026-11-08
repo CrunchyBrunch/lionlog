@@ -1,8 +1,8 @@
 import { mkdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { getPsuHall, sourceDateFromIso } from "../infrastructure/psu/constants.ts";
+import { getPsuHall, getPsuMealPeriod, sourceDateFromIso } from "../infrastructure/psu/constants.ts";
 import { PsuIngestionPipeline } from "../infrastructure/psu/ingestion-pipeline.ts";
-import { parsePsuMealOptionsHtml } from "../infrastructure/psu/menu-parser.ts";
+import { parsePsuMealOptionsHtml, PsuMenuStructureError } from "../infrastructure/psu/menu-parser.ts";
 import {
   buildReleaseQueries,
   PSU_RELEASE_HALL_IDS,
@@ -78,9 +78,17 @@ let nutritionRequests = 0;
 let nutritionCacheHits = 0;
 writeAggregateProgress("planned", queries.length);
 try {
-  for (const query of queries) {
+  for (const [index, query] of queries.entries()) {
     const result = await pipeline.run(query);
-    if (result.state !== "live") throw result.error;
+    if (result.state !== "live") {
+      if (result.error instanceof PsuMenuStructureError) {
+        process.stderr.write(`${JSON.stringify({ event: "lionlog.psu-menu-structure.v1",
+          serviceDate: query.serviceDate, campus: getPsuHall(query.hallId).sourceCampusId,
+          meal: getPsuMealPeriod(query.mealPeriodId).sourceValue, queryOrdinal: index + 1,
+          ...result.error.counts })}\n`);
+      }
+      throw result.error;
+    }
     itemCount += result.report.itemCount;
     sourceObservationCount += result.report.sourceObservationCount;
     invalidNameOmissions += result.report.omissions["invalid-name"];

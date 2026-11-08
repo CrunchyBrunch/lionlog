@@ -3,7 +3,7 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { PsuStructuralError } from "../infrastructure/psu/errors.ts";
-import { parsePsuMenuHtml } from "../infrastructure/psu/menu-parser.ts";
+import { parsePsuMenuHtml, PsuMenuStructureError } from "../infrastructure/psu/menu-parser.ts";
 import { parsePsuNutritionHtml } from "../infrastructure/psu/nutrition-parser.ts";
 
 const fixtureDirectory = path.resolve("tests/fixtures/psu");
@@ -102,6 +102,22 @@ test("menu fixture changes fail closed at category, item, link, and dietary boun
     () => parsePsuMenuHtml(html.replace("alt=\"Halal Friendly\"", "alt=\"Dietary Marker Changed\""), expected),
     /unknown PSU dietary marker/i,
   );
+});
+
+test("zero-item structural failures carry bounded counts for distinct sanitized markup changes", async () => {
+  const html = await fixture("menu-east-lunch.sanitized.html");
+  const expected = { sourceCampusId: "11", sourceDate: "8/31/26", sourceMeal: "Lunch" };
+  for (const [changed, stations, items] of [
+    [html.replaceAll("menu-category-section", "menu-category-changed"), 0, 2],
+    [html.replaceAll("menu-items daily-menu-item", "menu-items daily-menu-changed"), 2, 0],
+  ] as const) {
+    assert.throws(() => parsePsuMenuHtml(changed, expected), (error: unknown) => {
+      assert.ok(error instanceof PsuMenuStructureError);
+      assert.deepEqual(error.counts, { stationSections: stations, itemElements: items,
+        validatedItems: 0, recognizedEmptyMarkers: 0 });
+      return true;
+    });
+  }
 });
 
 test("name validation distinguishes missing and over-limit values without retaining unsafe text", async () => {

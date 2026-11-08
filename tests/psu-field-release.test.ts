@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -28,6 +29,25 @@ const authorizedEnvironment = {
   GITHUB_RUN_ATTEMPT: "1",
   EXPECTED_RUN_ATTEMPT: "1",
 } as const;
+
+test("producer entry point logs bounded query diagnostics and still rejects sanitized structural failures", () => {
+  for (const [shape, stationSections, itemElements] of [["category", 0, 1], ["item", 1, 0]] as const) {
+    const result = spawnSync(process.execPath, ["--experimental-strip-types",
+      "--import=./tests/fixtures/psu/producer-fetch-fixture.mjs", "scripts/prepare-live-field-release.ts",
+      "--date=2026-11-08", "--cache-dir=work/offline-diagnostic-cache", "--report=work/offline-diagnostic-report.json"],
+    { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, ...authorizedEnvironment,
+      LIONLOG_TEST_SHAPE: shape } });
+    assert.equal(result.status, 1);
+    const rendered = result.stdout + result.stderr;
+    assert.doesNotMatch(rendered, /PRIVATE_SENTINEL_NEVER_LOG/);
+    assert.match(rendered, /neither validated items nor a recognized empty state/);
+    const line = result.stderr.split(/\r?\n/).find((entry) => entry.startsWith('{"event":"lionlog.psu-menu-structure.v1"'));
+    assert.ok(line);
+    assert.deepEqual(JSON.parse(line), { event: "lionlog.psu-menu-structure.v1",
+      serviceDate: "2026-11-08", campus: "11", meal: "Lunch", queryOrdinal: 1,
+      stationSections, itemElements, validatedItems: 0, recognizedEmptyMarkers: 0 });
+  }
+});
 
 test("trusted release guard requires the exact workflow, repository, ref, event, and confirmation", () => {
   assert.doesNotThrow(() => assertTrustedReleaseIngestionEnvironment(authorizedEnvironment));

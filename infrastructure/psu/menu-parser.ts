@@ -49,6 +49,17 @@ const dietaryMarkerMap = new Map<string, DietaryTrait>([
   ["Contains Pork", "contains-pork"],
 ]);
 
+export class PsuMenuStructureError extends PsuStructuralError {
+  readonly counts: Readonly<{ stationSections: number; itemElements: number;
+    validatedItems: number; recognizedEmptyMarkers: number }>;
+
+  constructor(counts: PsuMenuStructureError["counts"]) {
+    super("PSU menu response contained neither validated items nor a recognized empty state.");
+    this.name = "PsuMenuStructureError";
+    this.counts = counts;
+  }
+}
+
 export function parsePsuMenuHtml(html: string, expected: PsuMenuParseContext): ParsedPsuMenu {
   const document = parseHtml(html);
   assertSelectedValue(document, "selCampus", expected.sourceCampusId);
@@ -58,9 +69,10 @@ export function parsePsuMenuHtml(html: string, expected: PsuMenuParseContext): P
   const categoryElements = descendants(document, (element) => hasClass(element, "menu-category-section"));
   const stations = categoryElements.map(parseStation);
   const itemCount = stations.reduce((total, station) => total + station.items.length, 0);
-  const recognizedEmpty = descendants(document, (element) =>
+  const recognizedEmptyMarkers = descendants(document, (element) =>
     hasClass(element, "daily-menu-empty") || getAttribute(element, "data-menu-empty") !== undefined
-  ).some((element) => /no (?:menu items|items|menu) (?:are )?available/i.test(normalizedText(element)));
+  ).filter((element) => /no (?:menu items|items|menu) (?:are )?available/i.test(normalizedText(element)));
+  const recognizedEmpty = recognizedEmptyMarkers.length > 0;
 
   if (recognizedEmpty && descendants(document, (element) =>
     hasClass(element, "daily-menu-item") || hasClass(element, "daily-menu-item__link")
@@ -69,7 +81,10 @@ export function parsePsuMenuHtml(html: string, expected: PsuMenuParseContext): P
   }
 
   if (itemCount === 0 && !recognizedEmpty) {
-    throw new PsuStructuralError("PSU menu response contained neither validated items nor a recognized empty state.");
+    const bound = (count: number) => Math.min(count, 1000);
+    throw new PsuMenuStructureError({ stationSections: bound(categoryElements.length),
+      itemElements: bound(descendants(document, (element) => hasClass(element, "daily-menu-item")).length),
+      validatedItems: bound(itemCount), recognizedEmptyMarkers: bound(recognizedEmptyMarkers.length) });
   }
 
   return { context: expected, stations, empty: itemCount === 0 };
