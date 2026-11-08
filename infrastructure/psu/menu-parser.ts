@@ -49,6 +49,18 @@ const dietaryMarkerMap = new Map<string, DietaryTrait>([
   ["Contains Pork", "contains-pork"],
 ]);
 
+export class PsuMenuStructureError extends PsuStructuralError {
+  readonly counts: Readonly<{ stationSections: number; itemElements: number;
+    validatedItems: number; recognizedEmptyMarkers: number }>;
+
+  constructor(counts: PsuMenuStructureError["counts"], savedSnapshotFailed = false) {
+    super(`PSU menu response contained neither validated items nor a recognized empty state.${savedSnapshotFailed
+      ? " Saved snapshot validation also failed." : ""}`);
+    this.name = "PsuMenuStructureError";
+    this.counts = counts;
+  }
+}
+
 export function parsePsuMenuHtml(html: string, expected: PsuMenuParseContext): ParsedPsuMenu {
   const document = parseHtml(html);
   assertSelectedValue(document, "selCampus", expected.sourceCampusId);
@@ -69,7 +81,10 @@ export function parsePsuMenuHtml(html: string, expected: PsuMenuParseContext): P
   }
 
   if (itemCount === 0 && !recognizedEmpty) {
-    throw new PsuStructuralError("PSU menu response contained neither validated items nor a recognized empty state.");
+    const bound = (count: number) => Math.min(count, 1000);
+    throw new PsuMenuStructureError({ stationSections: bound(categoryElements.length),
+      itemElements: bound(descendants(document, (element) => hasClass(element, "daily-menu-item")).length),
+      validatedItems: bound(itemCount), recognizedEmptyMarkers: 0 });
   }
 
   return { context: expected, stations, empty: itemCount === 0 };
