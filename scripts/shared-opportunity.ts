@@ -58,12 +58,15 @@ export async function assertSharedOpportunity(options: {
     if (run.actor?.id !== options.botId || run.actor?.login !== options.botLogin) {
       throw new Error("Filtered bot receiver history changed identity.");
     }
-    const match = /^LionLog wake ([1-9]\d*) (DC_[A-Za-z0-9_-]+) (D_[A-Za-z0-9_-]+) (lionlog-dispatch\.v1:\d{4}-\d{2}-\d{2})$/.exec(run.display_title ?? "");
+    const match = /^LionLog wake ([1-9]\d*) (DC_[A-Za-z0-9_-]+) (D_[A-Za-z0-9_-]+) ([\s\S]*)$/.exec(run.display_title ?? "");
     if (!match) {
       if ((run.display_title ?? "").startsWith("LionLog wake ")) {
         throw new Error("Bot receiver title cannot authenticate its comment.");
       }
-      continue; // An unrelated bot-triggered workflow has no dispatch-shaped title.
+      continue; // An unrelated bot-triggered workflow has no receiver title.
+    }
+    if (match[3] !== options.discussionNodeId || match[4] !== `lionlog-dispatch.v1:${serviceDate}`) {
+      continue; // The bot commented on another Discussion or with another body.
     }
     const id = Number(match[1]);
     if (!positive(id)) throw new Error("Bot comment ID is invalid.");
@@ -77,8 +80,7 @@ export async function assertSharedOpportunity(options: {
     if (readback?.errors !== undefined || node?.id !== match[2] || node.databaseId !== id
       || node.author?.login !== options.botLogin || !canonical(node.createdAt)
       || !canonical(node.updatedAt)) throw new Error("Bot comment history readback is incomplete.");
-    if (match[3] !== options.discussionNodeId || match[4] !== `lionlog-dispatch.v1:${serviceDate}`
-      || node.discussion?.id !== options.discussionNodeId
+    if (node.discussion?.id !== options.discussionNodeId
       || node.discussion.repository?.databaseId !== 1346360244
       || node.discussion.repository.nameWithOwner !== REPOSITORY
       || node.body !== `lionlog-dispatch.v1:${serviceDate}`

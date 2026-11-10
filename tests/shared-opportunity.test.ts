@@ -79,7 +79,8 @@ test("simultaneously visible schedule and App opportunities both fail closed", a
 test("unrelated comments and terminal skipped cron runs do not consume the day", async () => {
   const skipped = { ...schedule, status: "completed", conclusion: "skipped" };
   const other = { ...external, id: 78, display_title: `LionLog wake 67890 DC_kwOTHER D_kwOTHER ${body}` };
-  const unrelated = { ...external, id: 79, display_title: "Unrelated bot discussion" };
+  const unrelated = { ...external, id: 79,
+    display_title: `LionLog wake 67891 DC_kwOTHER ${discussion} Ordinary status comment` };
   const f = fixture([skipped], [external, other, unrelated]);
   f.api.graphql = async (_query, variables) => ({ data: { node: variables.id === commentNode ? node :
     { ...node, id: "DC_kwOTHER", databaseId: 67890,
