@@ -36,12 +36,18 @@ test("preactivation bootstrap requires the same protected App environment and ex
   assert.doesNotMatch(source, /\.head_branch == \$branch/);
 });
 
-test("default-branch scheduler only checks out and installs the immutable production revision", async () => {
+test("default-branch discussion receiver checks out its audited commit and separately pins production", async () => {
   const source = await workflow("daily-publication.yml");
-  assert.match(source, /ref: \$\{\{ vars\.LIONLOG_PRODUCTION_SHA \}\}/);
+  assert.match(source, /discussion_comment:\r?\n\s+types: \[created\]/);
+  assert.doesNotMatch(source, /\bcron:/);
+  assert.match(source, /vars\.LIONLOG_EXTERNAL_DISPATCH_ACTIVATION == 'ENABLE_LIONLOG_EXTERNAL_DISPATCH'/);
+  assert.match(source, /vars\.LIONLOG_DISPATCH_RECEIVER_SHA == github\.sha/);
+  assert.match(source, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(source, /discussions: read/);
   assert.match(source, /git\/ref\/\$\{PRODUCTION_REF#refs\/\}/);
   assert.match(source, /git rev-parse HEAD/);
   assert.match(source, /npm ci --ignore-scripts --omit=dev/);
   assert.match(source, /node --experimental-strip-types scripts\/run-daily-publication\.ts/);
+  assert.match(source, /lionlog-discussion-binding-\$\{\{ github\.run_id \}\}-1/);
   assert.doesNotMatch(source, /persist-credentials: true/);
 });

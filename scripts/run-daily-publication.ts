@@ -1,10 +1,11 @@
 /** One scheduled, fail-closed handoff across the pinned production workflows. */
 import { createHash } from "node:crypto";
-import { appendFile } from "node:fs/promises";
+import { appendFile, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArtifactZip } from "./artifact-zip.ts";
 import { assertNoScheduledCandidateConflict } from "./refresh-preflight.ts";
+import { verifyDiscussionAdmission, type DiscussionWake } from "./discussion-admission.ts";
 import { loadPublicationCheckpoint } from "./publication-checkpoint.ts";
 import { observePublicRelease } from "./public-release-state.ts";
 import { assertRefreshConfiguration, LATEST_DAILY_START_MINUTE, PROPOSED_PRIMARY_MINUTE,
@@ -24,6 +25,7 @@ const MAX_DAILY_SCHEDULE_RUNS = 1_000;
 
 export interface DailyApi {
   get(path: string, budgetMs?: number): Promise<unknown>;
+  graphql?(query: string, variables: Record<string, string>, budgetMs?: number): Promise<unknown>;
   bytes(path: string, budgetMs?: number): Promise<Buffer>;
   dispatch(workflow: string, branch: string, inputs: Record<string, string>, budgetMs?: number): Promise<number>;
 }
@@ -156,14 +158,19 @@ export async function runDailyPublication(options: {
   wallNowMs?: () => number; elapsedNowMs?: () => number;
   loadCheckpoint?: typeof loadPublicationCheckpoint;
   observePublic?: typeof observePublicRelease;
+  discussionWake?: DiscussionWake; botUserId?: number; discussionNodeId?: string;
+  binding?: (value: Record<string, unknown>) => Promise<void>;
 }): Promise<{ candidateRunId: number; promotionRunId: number; checkpointRunId: number }> {
   const { configuration: config, api } = options;
   assertRefreshConfiguration(config);
-  if (options.repository !== REPOSITORY || options.event !== "schedule" || options.attempt !== 1
+  const discussion = options.event === "discussion_comment";
+  if (options.repository !== REPOSITORY || (!discussion && options.event !== "schedule") || options.attempt !== 1
     || options.workflowRef !== `${REPOSITORY}/.github/workflows/daily-publication.yml@refs/heads/main`
     || !Number.isSafeInteger(options.schedulerRunId) || options.schedulerRunId < 1 || !SHA.test(options.schedulerSha)
     || options.standingPolicy !== STANDING_PUBLICATION_POLICY
-    || !Number.isSafeInteger(options.writerId) || options.writerId < 1 || !options.token) {
+    || !Number.isSafeInteger(options.writerId) || options.writerId < 1 || !options.token
+    || (discussion && (!options.discussionWake || !Number.isSafeInteger(options.botUserId)
+      || !options.discussionNodeId || !api.graphql))) {
     throw new Error("Daily schedule or standing authority is inactive or changed.");
   }
   const wallNowMs = options.wallNowMs ?? Date.now;
@@ -187,6 +194,11 @@ export async function runDailyPublication(options: {
       remainingMs();
       return result;
     },
+    graphql: api.graphql ? async (query, variables) => {
+      const result = await api.graphql!(query, variables, remainingMs());
+      remainingMs();
+      return result;
+    } : undefined,
     bytes: async (route) => {
       const result = await api.bytes(route, remainingMs());
       remainingMs();
@@ -198,15 +210,25 @@ export async function runDailyPublication(options: {
   const boundedFetch: typeof fetch = (input, init) => fetch(input, { ...init,
     signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), AbortSignal.timeout(remainingMs())]) });
   const { serviceDate, mode } = scheduledOpportunity(options.now);
-  const scheduledRun = await boundedApi.get(`repos/${REPOSITORY}/actions/runs/${options.schedulerRunId}`) as GitHubRun;
-  if (scheduledRun?.id !== options.schedulerRunId || scheduledRun.path !== ".github/workflows/daily-publication.yml"
-    || scheduledRun.event !== "schedule" || scheduledRun.run_attempt !== 1
-    || scheduledRun.head_branch !== "main" || scheduledRun.head_sha !== options.schedulerSha
-    || scheduledRun.status !== "in_progress") {
-    throw new Error("Scheduler run identity or creation time is invalid.");
-  }
-  if (newYorkDate(canonicalUtc(scheduledRun.created_at)) !== serviceDate) {
-    throw new Error("Delayed schedule crossed the New York service-day boundary.");
+  if (discussion) {
+    const admitted = await verifyDiscussionAdmission({ api: boundedApi as Required<Pick<DailyApi, "get" | "graphql">>,
+      event: options.discussionWake!, botUserId: options.botUserId!, discussionNodeId: options.discussionNodeId!,
+      receiverRunId: options.schedulerRunId, receiverSha: options.schedulerSha, now: options.now });
+    if (admitted.serviceDate !== serviceDate) throw new Error("Discussion service date differs from admission.");
+    await options.binding?.({ version: "lionlog.discussion-binding.v1", stage: "admitted", serviceDate,
+      commentId: admitted.commentId, commentNodeId: admitted.commentNodeId,
+      receiverRunId: options.schedulerRunId, receiverSha: options.schedulerSha });
+  } else {
+    const scheduledRun = await boundedApi.get(`repos/${REPOSITORY}/actions/runs/${options.schedulerRunId}`) as GitHubRun;
+    if (scheduledRun?.id !== options.schedulerRunId || scheduledRun.path !== ".github/workflows/daily-publication.yml"
+      || scheduledRun.event !== "schedule" || scheduledRun.run_attempt !== 1
+      || scheduledRun.head_branch !== "main" || scheduledRun.head_sha !== options.schedulerSha
+      || scheduledRun.status !== "in_progress") {
+      throw new Error("Scheduler run identity or creation time is invalid.");
+    }
+    if (newYorkDate(canonicalUtc(scheduledRun.created_at)) !== serviceDate) {
+      throw new Error("Delayed schedule crossed the New York service-day boundary.");
+    }
   }
   const branch = config.productionRef.slice("refs/heads/".length);
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -223,7 +245,7 @@ export async function runDailyPublication(options: {
   if (publicBefore.state !== "present" || publicBefore.releaseId !== checkpoint.checkpoint.publication.releaseId) {
     throw new Error("Public predecessor differs from the authenticated checkpoint.");
   }
-  await assertOnlyScheduledOpportunity(boundedApi, serviceDate, options.schedulerRunId);
+  if (!discussion) await assertOnlyScheduledOpportunity(boundedApi, serviceDate, options.schedulerRunId);
   await assertNoScheduledCandidateConflict({ api: { getJson: (route) => boundedApi.get(route), getBytes: (route) => boundedApi.bytes(route) },
     serviceDate });
   remainingMs();
@@ -231,9 +253,11 @@ export async function runDailyPublication(options: {
     refresh_mode: mode, service_date: serviceDate, confirmation: "PREPARE_LIVE_PAGES_FIELD_RELEASE",
     expected_source_sha: config.productionSha, expected_run_attempt: "1",
   });
+  await options.binding?.({ stage: "candidate-dispatched", candidateRunId });
   await summary(`Candidate run: [${candidateRunId}](https://github.com/${REPOSITORY}/actions/runs/${candidateRunId})`);
   remainingMs();
   await waitForRun(boundedApi, candidateRunId, PRODUCER, LIVE_CANDIDATE_WORKFLOW_ID, config, sleep, remainingMs);
+  await options.binding?.({ stage: "candidate-complete" });
   const receipts = exactArtifact(await boundedApi.get(`repos/${REPOSITORY}/actions/runs/${candidateRunId}/artifacts?per_page=100`),
     `lionlog-candidate-receipts-${candidateRunId}-1`, candidateRunId, config.productionSha);
   const receiptFiles = await artifactEntries(boundedApi, receipts, ["live.json", "first-release-recovery.json"]);
@@ -282,12 +306,15 @@ export async function runDailyPublication(options: {
     approval_expires_at: new Date(expiresAt).toISOString(), rollback_receipt_artifact_id: "NONE",
     rollback_receipt_artifact_digest: "NONE", confirmation: "PROMOTE_EXACT_LIONLOG_RELEASE",
   });
+  await options.binding?.({ stage: "promotion-dispatched", promotionRunId });
   await summary(`Publication run: [${promotionRunId}](https://github.com/${REPOSITORY}/actions/runs/${promotionRunId})`);
   remainingMs();
   await waitForRun(boundedApi, promotionRunId, PROMOTION, PROMOTION_WORKFLOW_ID, config, sleep, remainingMs);
+  await options.binding?.({ stage: "promotion-complete" });
   await checkPin();
   remainingMs();
   const checkpointRunId = await boundedApi.dispatch(CHECKPOINT, branch, { expected_promotion_run_id: String(promotionRunId) });
+  await options.binding?.({ stage: "checkpoint-dispatched", checkpointRunId });
   await summary(`Checkpoint run: [${checkpointRunId}](https://github.com/${REPOSITORY}/actions/runs/${checkpointRunId})`);
   remainingMs();
   await waitForRun(boundedApi, checkpointRunId, CHECKPOINT, undefined, config, sleep, remainingMs);
@@ -299,6 +326,7 @@ export async function runDailyPublication(options: {
     throw new Error("Terminal checkpoint does not bind the verified publication.");
   }
   await summary(`Verified service date ${serviceDate}; release ${manifest.releaseId}`);
+  await options.binding?.({ stage: "complete", releaseId: manifest.releaseId });
   remainingMs();
   return { candidateRunId, promotionRunId, checkpointRunId };
 }
@@ -317,6 +345,9 @@ class GitHubApi implements DailyApi {
     return response;
   }
   async get(route: string, budgetMs?: number): Promise<unknown> { return (await this.request(route, undefined, budgetMs)).json(); }
+  async graphql(query: string, variables: Record<string, string>, budgetMs?: number): Promise<unknown> {
+    return (await this.request("graphql", { query, variables }, budgetMs)).json();
+  }
   async bytes(route: string, budgetMs?: number): Promise<Buffer> {
     const timeout = Math.min(120_000, budgetMs ?? 120_000);
     if (!Number.isFinite(timeout) || timeout < 1) throw new Error("Artifact request has no daily window remaining.");
@@ -349,7 +380,17 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const token = process.env.GH_TOKEN ?? "";
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   const summary = async (line: string) => { if (summaryPath) await appendFile(summaryPath, `- ${line}\n`); };
+  const bindingPath = process.env.LIONLOG_DISCUSSION_BINDING_PATH;
+  let binding: Record<string, unknown> = {};
+  const updateBinding = async (value: Record<string, unknown>) => {
+    if (!bindingPath) return;
+    binding = { ...binding, ...value };
+    await writeFile(`${bindingPath}.tmp`, `${JSON.stringify(binding)}\n`, { flag: "w" });
+    await rename(`${bindingPath}.tmp`, bindingPath);
+  };
   try {
+    const wake = process.env.GITHUB_EVENT_NAME === "discussion_comment"
+      ? JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH ?? "", "utf8")) as DiscussionWake : undefined;
     await runDailyPublication({ api: new GitHubApi(token), token, repository: process.env.GITHUB_REPOSITORY ?? "",
       event: process.env.GITHUB_EVENT_NAME ?? "", workflowRef: process.env.GITHUB_WORKFLOW_REF ?? "",
       attempt: Number(process.env.GITHUB_RUN_ATTEMPT), now: new Date(), summary,
@@ -358,7 +399,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
         sourceAuthorization: process.env.LIONLOG_REFRESH_SOURCE_AUTHORIZATION ?? "",
         productionRef: process.env.LIONLOG_PRODUCTION_REF ?? "", productionSha: process.env.LIONLOG_PRODUCTION_SHA ?? "" },
       standingPolicy: process.env.LIONLOG_STANDING_PUBLICATION_POLICY ?? "",
-      writerId: Number(process.env.LIONLOG_PUBLICATION_WRITER_ID), });
+      writerId: Number(process.env.LIONLOG_PUBLICATION_WRITER_ID), discussionWake: wake,
+      botUserId: Number(process.env.LIONLOG_DISPATCHER_BOT_USER_ID),
+      discussionNodeId: process.env.LIONLOG_DISPATCH_DISCUSSION_NODE_ID,
+      binding: updateBinding });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     await summary(`Daily publication stopped: ${reason}`);

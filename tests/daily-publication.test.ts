@@ -41,6 +41,8 @@ test("native New York schedule admits a delayed first start before 12:15 across 
   assert.throws(() => scheduledOpportunity(new Date("2026-07-15T16:15:00Z")), /outside/);
   assert.throws(() => scheduledOpportunity(new Date("2026-07-15T16:15:01Z")), /outside/);
   assert.throws(() => scheduledOpportunity(new Date("2026-11-01T17:15:00Z")), /outside/);
+  // Legacy scheduler run 42696495026 arrived at 15:48 New York on November 9.
+  assert.throws(() => scheduledOpportunity(new Date("2026-11-09T20:48:00Z")), /outside/);
 });
 
 test("standing publication policy rejects partial coverage, omissions, rollback, and missing authority", () => {

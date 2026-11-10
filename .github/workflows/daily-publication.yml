@@ -1,9 +1,10 @@
 name: Daily verified LionLog publication
 
 on:
-  schedule:
-    - cron: '17 5 * * *'
-      timezone: 'America/New_York'
+  discussion_comment:
+    types: [created]
+
+run-name: LionLog wake ${{ github.event.comment.id }}
 
 permissions: {}
 
@@ -14,12 +15,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  probe:
+    if: >-
+      github.repository == 'CrunchyBrunch/lionlog' &&
+      github.event_name == 'discussion_comment' &&
+      github.ref == 'refs/heads/main' &&
+      vars.LIONLOG_DISPATCH_PROBE_ACTIVATION == 'ENABLE_LIONLOG_DISPATCH_PROBE'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Record inert receiver event identity
+        env:
+          COMMENT_ID: ${{ github.event.comment.id }}
+          SENDER_ID: ${{ github.event.sender.id }}
+          DISCUSSION_ID: ${{ github.event.discussion.node_id }}
+        run: |
+          test -n "$COMMENT_ID"
+          test -n "$SENDER_ID"
+          test -n "$DISCUSSION_ID"
+          printf 'Inert discussion event: comment=%s sender=%s discussion=%s\n' "$COMMENT_ID" "$SENDER_ID" "$DISCUSSION_ID"
   publish:
     if: >-
       github.repository == 'CrunchyBrunch/lionlog' &&
-      github.event_name == 'schedule' &&
+      github.event_name == 'discussion_comment' &&
       github.ref == 'refs/heads/main' &&
       github.run_attempt == 1 &&
+      vars.LIONLOG_EXTERNAL_DISPATCH_ACTIVATION == 'ENABLE_LIONLOG_EXTERNAL_DISPATCH' &&
+      vars.LIONLOG_DISPATCH_RECEIVER_SHA == github.sha &&
+      vars.LIONLOG_DISPATCHER_BOT_USER_ID != '' &&
+      vars.LIONLOG_DISPATCH_DISCUSSION_NODE_ID != '' &&
       vars.LIONLOG_REFRESH_ACTIVATION == 'ENABLE_AUTOMATIC_LIONLOG_REFRESH' &&
       vars.LIONLOG_REFRESH_SOURCE_AUTHORIZATION == 'I_APPROVE_AUTOMATIC_PSU_REQUESTS' &&
       vars.LIONLOG_STANDING_PUBLICATION_POLICY == 'COMPLETE_COVERAGE_V1' &&
@@ -31,6 +56,7 @@ jobs:
     permissions:
       actions: write
       contents: read
+      discussions: read
     steps:
       - name: Verify approved immutable production revision before checkout
         shell: bash
@@ -50,15 +76,15 @@ jobs:
           test "$REF_IDENTITY" = "$PRODUCTION_REF commit $PRODUCTION_SHA"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ vars.LIONLOG_PRODUCTION_SHA }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Verify checked-out orchestration and dependency revision
         shell: bash
         env:
-          PRODUCTION_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
+          RECEIVER_SHA: ${{ vars.LIONLOG_DISPATCH_RECEIVER_SHA }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$PRODUCTION_SHA"
+          test "$(git rev-parse HEAD)" = "$RECEIVER_SHA"
           test -f scripts/run-daily-publication.ts
           test -f package-lock.json
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -75,4 +101,15 @@ jobs:
           LIONLOG_PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
           LIONLOG_PRODUCTION_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
           LIONLOG_PUBLICATION_WRITER_ID: ${{ vars.LIONLOG_PUBLICATION_WRITER_ID }}
+          LIONLOG_DISPATCHER_BOT_USER_ID: ${{ vars.LIONLOG_DISPATCHER_BOT_USER_ID }}
+          LIONLOG_DISPATCH_DISCUSSION_NODE_ID: ${{ vars.LIONLOG_DISPATCH_DISCUSSION_NODE_ID }}
+          LIONLOG_DISCUSSION_BINDING_PATH: discussion-binding.json
         run: node --experimental-strip-types scripts/run-daily-publication.ts
+      - name: Retain run-bound dispatch correlation
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lionlog-discussion-binding-${{ github.run_id }}-1
+          path: discussion-binding.json
+          if-no-files-found: ignore
+          retention-days: 30
