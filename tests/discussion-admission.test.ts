@@ -18,7 +18,8 @@ const wake: DiscussionWake = { action: "created", repository: { id: 1346360244, 
     user: { id: botId, login: "lionlog-dispatch[bot]" } } };
 const receiver = { id: 77, path: ".github/workflows/daily-publication.yml", event: "discussion_comment",
   run_attempt: 1, head_sha: receiverSha, head_branch: "main", status: "in_progress",
-  actor: { id: botId }, display_title: `LionLog wake ${commentId}`, created_at: "2026-11-10T10:18:00Z" };
+  actor: { id: botId }, display_title: `LionLog wake ${commentId} DC_kwABC123 ${discussionId} ${body}`,
+  created_at: "2026-11-10T10:18:00Z" };
 const readback = { data: { node: { id: "DC_kwABC123", databaseId: commentId, body,
   createdAt: created, updatedAt: created, discussion: { id: discussionId },
   author: { login: "lionlog-dispatch[bot]" } } } };
@@ -46,7 +47,7 @@ function fixture(change: { event?: DiscussionWake; receiver?: Record<string, unk
   return { options, reads: () => reads };
 }
 
-test("exact bot comment, readback, receiver run and complete empty history admit once", async () => {
+test("exact bot comment, readback and receiver run authenticate", async () => {
   assert.deepEqual(await verifyDiscussionAdmission(fixture().options),
     { commentId, commentNodeId: "DC_kwABC123", serviceDate: day });
 });
@@ -64,28 +65,14 @@ test("spoofed or edited event is rejected before network reads", async () => {
   }
 });
 
-test("edited readback, rerun, duplicate opportunity, legacy schedule and history gaps all fail closed", async () => {
+test("edited readback and rerun fail closed", async () => {
   const changes = [
     { readback: { data: { node: { ...readback.data.node, body: "changed" } } } },
     { receiver: { ...receiver, run_attempt: 2 } },
-    { discussionHistory: { total_count: 2, workflow_runs: [current,
-      { ...current, id: 78, created_at: "2026-11-10T10:19:00Z" }] } },
-    { scheduleHistory: { total_count: 1, workflow_runs: [
-      { ...current, id: 70, event: "schedule" }] } },
-    { discussionHistory: { total_count: 2, workflow_runs: [current] } },
   ];
   for (const change of changes) {
     await assert.rejects(verifyDiscussionAdmission(fixture(change).options));
   }
-});
-
-test("only a terminal skipped cron run at the exact receiver SHA is harmless in external mode", async () => {
-  const listed = { ...current, id: 70, event: "schedule" };
-  const skipped = { ...receiver, id: 70, event: "schedule", status: "completed", conclusion: "skipped" };
-  const f = fixture({ scheduleHistory: { total_count: 1, workflow_runs: [listed] }, skippedScheduleRun: skipped });
-  assert.equal((await verifyDiscussionAdmission(f.options)).commentId, commentId);
-  await assert.rejects(verifyDiscussionAdmission(fixture({ scheduleHistory: { total_count: 1, workflow_runs: [listed] },
-    skippedScheduleRun: { ...skipped, head_sha: "b".repeat(40) } }).options), /legacy schedule/);
 });
 
 test("comment received on a later New York date cannot dispatch", async () => {
@@ -121,7 +108,7 @@ test("orchestrator binds an admitted comment before checkpoint read and never di
     standingPolicy: STANDING_PUBLICATION_POLICY, writerId: 42,
     now: new Date("2026-11-10T10:20:00Z"), discussionWake: wake,
     dispatchMode: "external",
-    botUserId: botId, discussionNodeId: discussionId,
+    botUserId: botId, botLogin: "lionlog-dispatch[bot]", discussionNodeId: discussionId,
     binding: async (value) => { binding.push(value); },
     loadCheckpoint: async () => { throw new Error("seed absent"); }
   }), /seed absent/);

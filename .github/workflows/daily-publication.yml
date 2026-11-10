@@ -7,15 +7,9 @@ on:
   discussion_comment:
     types: [created]
 
-run-name: ${{ github.event_name == 'discussion_comment' && format('LionLog wake {0}', github.event.comment.id) || 'LionLog scheduled publication' }}
+run-name: ${{ github.event_name == 'discussion_comment' && format('LionLog wake {0} {1} {2} {3}', github.event.comment.id, github.event.comment.node_id, github.event.discussion.node_id, github.event.comment.body) || 'LionLog scheduled publication' }}
 
 permissions: {}
-
-# This group belongs only to dispatchers. Candidate, promotion, and checkpoint
-# share github-pages-production and must be free to complete while we wait.
-concurrency:
-  group: lionlog-daily-dispatch
-  cancel-in-progress: false
 
 jobs:
   probe:
@@ -23,6 +17,13 @@ jobs:
       github.repository == 'CrunchyBrunch/lionlog' &&
       github.event_name == 'discussion_comment' &&
       github.ref == 'refs/heads/main' &&
+      vars.LIONLOG_DISPATCH_MODE != 'external' &&
+      vars.LIONLOG_EXTERNAL_DISPATCH_ACTIVATION != 'ENABLE_LIONLOG_EXTERNAL_DISPATCH' &&
+      (vars.LIONLOG_DISPATCHER_BOT_USER_ID == '' ||
+        (github.event.sender.id == vars.LIONLOG_DISPATCHER_BOT_USER_ID &&
+          github.event.comment.user.id == vars.LIONLOG_DISPATCHER_BOT_USER_ID)) &&
+      (vars.LIONLOG_DISPATCH_DISCUSSION_NODE_ID == '' ||
+        github.event.discussion.node_id == vars.LIONLOG_DISPATCH_DISCUSSION_NODE_ID) &&
       vars.LIONLOG_DISPATCH_PROBE_ACTIVATION == 'ENABLE_LIONLOG_DISPATCH_PROBE'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -43,13 +44,26 @@ jobs:
       github.repository == 'CrunchyBrunch/lionlog' &&
       github.ref == 'refs/heads/main' &&
       github.run_attempt == 1 &&
+      vars.LIONLOG_DISPATCH_PROBE_ACTIVATION != 'ENABLE_LIONLOG_DISPATCH_PROBE' &&
       (
         (github.event_name == 'schedule' && vars.LIONLOG_DISPATCH_MODE != 'external') ||
         (github.event_name == 'discussion_comment' && vars.LIONLOG_DISPATCH_MODE == 'external' &&
+          github.event.action == 'created' &&
+          github.event.repository.id == 1346360244 &&
+          github.event.repository.full_name == 'CrunchyBrunch/lionlog' &&
           vars.LIONLOG_EXTERNAL_DISPATCH_ACTIVATION == 'ENABLE_LIONLOG_EXTERNAL_DISPATCH' &&
           vars.LIONLOG_DISPATCH_RECEIVER_SHA == github.sha &&
           vars.LIONLOG_DISPATCHER_BOT_USER_ID != '' &&
-          vars.LIONLOG_DISPATCH_DISCUSSION_NODE_ID != '')
+          vars.LIONLOG_DISPATCHER_BOT_LOGIN != '' &&
+          vars.LIONLOG_DISPATCH_DISCUSSION_NODE_ID != '' &&
+          github.event.sender.id == vars.LIONLOG_DISPATCHER_BOT_USER_ID &&
+          github.event.comment.user.id == vars.LIONLOG_DISPATCHER_BOT_USER_ID &&
+          github.actor_id == vars.LIONLOG_DISPATCHER_BOT_USER_ID &&
+          github.event.sender.login == vars.LIONLOG_DISPATCHER_BOT_LOGIN &&
+          github.event.comment.user.login == vars.LIONLOG_DISPATCHER_BOT_LOGIN &&
+          github.event.discussion.node_id == vars.LIONLOG_DISPATCH_DISCUSSION_NODE_ID &&
+          github.event.comment.updated_at == github.event.comment.created_at &&
+          startsWith(github.event.comment.body, 'lionlog-dispatch.v1:'))
       ) &&
       vars.LIONLOG_REFRESH_ACTIVATION == 'ENABLE_AUTOMATIC_LIONLOG_REFRESH' &&
       vars.LIONLOG_REFRESH_SOURCE_AUTHORIZATION == 'I_APPROVE_AUTOMATIC_PSU_REQUESTS' &&
@@ -59,11 +73,44 @@ jobs:
       vars.LIONLOG_PUBLICATION_WRITER_ID != ''
     runs-on: ubuntu-latest
     timeout-minutes: 220
+    # A job gate above excludes ordinary comments and probe runs before this queue.
+    concurrency:
+      group: lionlog-daily-dispatch
+      queue: max
+      cancel-in-progress: false
     permissions:
       actions: write
       contents: read
       discussions: read
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: receiver
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: receiver/package-lock.json
+      - name: Authenticate and reserve the shared New York day
+        id: opportunity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LIONLOG_DISPATCH_MODE: ${{ vars.LIONLOG_DISPATCH_MODE }}
+          LIONLOG_EXTERNAL_DISPATCH_ACTIVATION: ${{ vars.LIONLOG_EXTERNAL_DISPATCH_ACTIVATION }}
+          LIONLOG_DISPATCHER_BOT_USER_ID: ${{ vars.LIONLOG_DISPATCHER_BOT_USER_ID }}
+          LIONLOG_DISPATCHER_BOT_LOGIN: ${{ vars.LIONLOG_DISPATCHER_BOT_LOGIN }}
+          LIONLOG_DISPATCH_DISCUSSION_NODE_ID: ${{ vars.LIONLOG_DISPATCH_DISCUSSION_NODE_ID }}
+          LIONLOG_OPPORTUNITY_PHASE: prepare
+        run: node --experimental-strip-types receiver/scripts/shared-opportunity.ts
+      - name: Persist the day reservation before any producer request
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lionlog-day-reservation-${{ steps.opportunity.outputs.service_date }}
+          path: receiver/day-reservation.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Verify approved immutable production revision before checkout
         shell: bash
         env:
@@ -83,6 +130,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event_name == 'schedule' && vars.LIONLOG_PRODUCTION_SHA || github.sha }}
+          path: production
           persist-credentials: false
       - name: Verify checked-out orchestration and dependency revision
         shell: bash
@@ -90,14 +138,21 @@ jobs:
           CHECKOUT_SHA: ${{ github.event_name == 'schedule' && vars.LIONLOG_PRODUCTION_SHA || vars.LIONLOG_DISPATCH_RECEIVER_SHA }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$CHECKOUT_SHA"
-          test -f scripts/run-daily-publication.ts
-          test -f package-lock.json
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 22
-          cache: npm
+          test "$(git -C production rev-parse HEAD)" = "$CHECKOUT_SHA"
+          test -f production/scripts/run-daily-publication.ts
+          test -f production/package-lock.json
       - run: npm ci --ignore-scripts --omit=dev
+        working-directory: production
+      - name: Recheck the shared day before producer dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LIONLOG_DISPATCH_MODE: ${{ vars.LIONLOG_DISPATCH_MODE }}
+          LIONLOG_EXTERNAL_DISPATCH_ACTIVATION: ${{ vars.LIONLOG_EXTERNAL_DISPATCH_ACTIVATION }}
+          LIONLOG_DISPATCHER_BOT_USER_ID: ${{ vars.LIONLOG_DISPATCHER_BOT_USER_ID }}
+          LIONLOG_DISPATCHER_BOT_LOGIN: ${{ vars.LIONLOG_DISPATCHER_BOT_LOGIN }}
+          LIONLOG_DISPATCH_DISCUSSION_NODE_ID: ${{ vars.LIONLOG_DISPATCH_DISCUSSION_NODE_ID }}
+          LIONLOG_OPPORTUNITY_PHASE: confirm
+        run: node --experimental-strip-types receiver/scripts/shared-opportunity.ts
       - name: Dispatch and verify the one pinned daily sequence
         env:
           GH_TOKEN: ${{ github.token }}
@@ -109,14 +164,16 @@ jobs:
           LIONLOG_PUBLICATION_WRITER_ID: ${{ vars.LIONLOG_PUBLICATION_WRITER_ID }}
           LIONLOG_DISPATCH_MODE: ${{ vars.LIONLOG_DISPATCH_MODE }}
           LIONLOG_DISPATCHER_BOT_USER_ID: ${{ vars.LIONLOG_DISPATCHER_BOT_USER_ID }}
+          LIONLOG_DISPATCHER_BOT_LOGIN: ${{ vars.LIONLOG_DISPATCHER_BOT_LOGIN }}
           LIONLOG_DISPATCH_DISCUSSION_NODE_ID: ${{ vars.LIONLOG_DISPATCH_DISCUSSION_NODE_ID }}
           LIONLOG_DISCUSSION_BINDING_PATH: discussion-binding.json
         run: node --experimental-strip-types scripts/run-daily-publication.ts
+        working-directory: production
       - name: Retain run-bound dispatch correlation
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: lionlog-discussion-binding-${{ github.run_id }}-1
-          path: discussion-binding.json
+          path: production/discussion-binding.json
           if-no-files-found: ignore
           retention-days: 30

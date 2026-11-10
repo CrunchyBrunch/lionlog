@@ -61,64 +61,13 @@ export async function verifyDiscussionAdmission(options: {
     head_branch?: string; status?: string; actor?: { id?: number }; display_title?: string; created_at?: string };
   if (run?.id !== options.receiverRunId || run.path !== RECEIVER_PATH || run.event !== "discussion_comment"
     || run.run_attempt !== 1 || run.head_sha !== options.receiverSha || run.head_branch !== "main"
-    || run.actor?.id !== options.botUserId || run.display_title !== `LionLog wake ${comment.id}`
+    || run.actor?.id !== options.botUserId
+    || run.display_title !== `LionLog wake ${comment.id} ${comment.node_id} ${options.discussionNodeId} ${comment.body}`
     || run.status !== "in_progress" || !canonical(run.created_at)
     || newYork(new Date(run.created_at!)).day !== serviceDate) {
     throw new Error("Discussion receiver run identity is invalid.");
   }
-  await oneReceiverRun(api, serviceDate, options.receiverRunId);
-  await noSameDaySchedule(api, serviceDate, options.receiverSha);
   return { commentId: comment.id!, commentNodeId: comment.node_id!, serviceDate };
-}
-
-async function paginatedRuns(api: DiscussionEvidenceApi, event: string, serviceDate: string): Promise<Array<{
-  id: number; event: string; path: string; created_at: string; run_attempt: number }>> {
-  const start = new Date(Date.parse(`${serviceDate}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
-  const end = new Date(Date.parse(`${serviceDate}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
-  const runs: Array<{ id: number; event: string; path: string; created_at: string; run_attempt: number }> = [];
-  const seen = new Set<number>();
-  let total: number | undefined;
-  for (let page = 1; page <= 10; page += 1) {
-    const value = await api.get(`repos/${REPOSITORY}/actions/workflows/daily-publication.yml/runs?event=${event}&created=${start}..${end}&per_page=100&page=${page}`) as {
-      total_count?: number; workflow_runs?: typeof runs };
-    if (!Number.isSafeInteger(value?.total_count) || value.total_count! < 0 || value.total_count! > 1000
-      || (total !== undefined && total !== value.total_count) || !Array.isArray(value.workflow_runs)
-      || value.workflow_runs.length !== Math.min(100, value.total_count! - runs.length)) {
-      throw new Error("Receiver history is incomplete.");
-    }
-    total = value.total_count;
-    for (const run of value.workflow_runs) {
-      if (!positive(run.id) || seen.has(run.id) || run.event !== event || run.path !== RECEIVER_PATH
-        || !positive(run.run_attempt) || !canonical(run.created_at)) {
-        throw new Error("Receiver history identity is invalid.");
-      }
-      seen.add(run.id);
-      runs.push(run);
-    }
-    if (runs.length === total) return runs.filter((run) => newYork(new Date(run.created_at)).day === serviceDate);
-  }
-  throw new Error("Receiver history pagination did not complete.");
-}
-
-async function oneReceiverRun(api: DiscussionEvidenceApi, day: string, id: number): Promise<void> {
-  const runs = await paginatedRuns(api, "discussion_comment", day);
-  if (runs.length !== 1 || runs[0].id !== id || runs[0].run_attempt !== 1) {
-    throw new Error("The service day's discussion opportunity was already consumed or is ambiguous.");
-  }
-}
-async function noSameDaySchedule(api: DiscussionEvidenceApi, day: string, receiverSha: string): Promise<void> {
-  for (const listed of await paginatedRuns(api, "schedule", day)) {
-    // The retained cron trigger creates a skipped workflow run in external mode.
-    // Only a terminal skip on this exact audited receiver revision is harmless.
-    const run = await api.get(`repos/${REPOSITORY}/actions/runs/${listed.id}`) as {
-      id?: number; path?: string; event?: string; run_attempt?: number; head_sha?: string;
-      head_branch?: string; status?: string; conclusion?: string };
-    if (run?.id !== listed.id || run.path !== RECEIVER_PATH || run.event !== "schedule"
-      || run.run_attempt !== 1 || run.head_sha !== receiverSha || run.head_branch !== "main"
-      || run.status !== "completed" || run.conclusion !== "skipped") {
-      throw new Error("A legacy schedule already consumed or may consume the service day's opportunity.");
-    }
-  }
 }
 function positive(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) > 0; }
 function canonical(value: unknown): value is string {

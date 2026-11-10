@@ -11,17 +11,28 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
   if (!token) throw new Error('Read-only monitor token missing.');
   const expectedSha = props.getProperty('LIONLOG_MONITOR_RECEIVER_SHA');
   const botId = Number(props.getProperty('LIONLOG_MONITOR_BOT_USER_ID'));
+  const botLogin = props.getProperty('LIONLOG_MONITOR_BOT_LOGIN');
+  const discussionId = props.getProperty('LIONLOG_MONITOR_DISCUSSION_NODE_ID');
   const productionSha = props.getProperty('LIONLOG_MONITOR_PRODUCTION_SHA');
   const productionBranch = props.getProperty('LIONLOG_MONITOR_PRODUCTION_BRANCH');
   if (mode === 'external' && (!/^[a-f0-9]{40}$/.test(expectedSha || '')
     || !Number.isSafeInteger(botId) || botId < 1 || !/^[a-f0-9]{40}$/.test(productionSha || '')
+    || !/^[-A-Za-z0-9]+\[bot\]$/.test(botLogin || '')
+    || !/^D_[A-Za-z0-9_-]+$/.test(discussionId || '')
     || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(productionBranch || ''))) {
     throw new Error('External monitor pins are incomplete.');
   }
   const day = Utilities.formatDate(now, 'America/New_York', 'yyyy-MM-dd');
   const api = function (route) { return llMonitorGetJson('https://api.github.com/' + route, token); };
   const event = mode === 'schedule' ? 'schedule' : 'discussion_comment';
-  const runs = llMonitorRuns(api, event, day, LL_MONITOR_PATH);
+  const observed = llMonitorRuns(api, event, day, LL_MONITOR_PATH, mode === 'external' ? botLogin : null);
+  const runs = mode === 'external' ? observed.filter(function (candidate) {
+    if (candidate.actor?.id !== botId || candidate.actor.login !== botLogin) {
+      throw new Error('Filtered monitor actor identity changed.');
+    }
+    return /^LionLog wake [1-9]\d* DC_[A-Za-z0-9_-]+ D_[A-Za-z0-9_-]+ lionlog-dispatch\.v1:\d{4}-\d{2}-\d{2}$/.test(candidate.display_title || '')
+      && candidate.display_title.endsWith(' ' + discussionId + ' lionlog-dispatch.v1:' + day);
+  }) : observed;
   if (runs.length > 1) throw new Error('Multiple same-day receiver opportunities.');
   const result = Object.assign({}, publicationProof, { date: day, mode: mode,
     dispatchEvidence: 'complete', stage: 'absent', startedAt: null, failed: false,
@@ -58,11 +69,12 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
     return result; // Existing signed producer admission/public proof remains authoritative.
   }
   result.admittedBeforeCutoff = null; // Only the existing producer proof can establish admission.
-  if (run.head_sha !== expectedSha || run.actor?.id !== botId
-    || !/^LionLog wake [1-9]\d*$/.test(run.display_title || '')) {
+  if (run.head_sha !== expectedSha || run.actor?.id !== botId || run.actor.login !== botLogin
+    || !/^LionLog wake [1-9]\d* DC_[A-Za-z0-9_-]+ D_[A-Za-z0-9_-]+ lionlog-dispatch\.v1:\d{4}-\d{2}-\d{2}$/.test(run.display_title || '')
+    || !run.display_title.endsWith(' ' + discussionId + ' lionlog-dispatch.v1:' + day)) {
     throw new Error('Discussion receiver identity differs from monitor pin.');
   }
-  const titleCommentId = Number(run.display_title.slice('LionLog wake '.length));
+  const titleCommentId = Number(run.display_title.split(' ')[2]);
   if (!Number.isSafeInteger(titleCommentId)) throw new Error('Receiver comment ID invalid.');
   // Histories offer live stage hints while the receiver is running. They are never admission proof.
   const producer = llMonitorRuns(api, 'workflow_dispatch', day, '.github/workflows/build-live-menu-artifact.yml');
@@ -106,8 +118,11 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
   result.candidateRunId = binding.candidateRunId || null;
   result.promotionRunId = binding.promotionRunId || null;
   result.checkpointRunId = binding.checkpointRunId || null;
-  result.admittedBeforeCutoff = publicationProof.candidateRunId === binding.candidateRunId
+  result.admittedBeforeCutoff = llMonitorPositive(publicationProof.candidateRunId)
+    && llMonitorPositive(binding.candidateRunId)
+    && publicationProof.candidateRunId === binding.candidateRunId
     ? publicationProof.admittedBeforeCutoff ?? null : null;
+  const childRuns = {};
   for (const pair of [[binding.candidateRunId, '.github/workflows/build-live-menu-artifact.yml'],
     [binding.promotionRunId, '.github/workflows/deploy-github-pages.yml'],
     [binding.checkpointRunId, '.github/workflows/advance-refresh-checkpoint.yml']]) {
@@ -119,6 +134,25 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
       || !['queued', 'in_progress', 'completed'].includes(child.status)) {
       throw new Error('Bound downstream run changed identity.');
     }
+    childRuns[pair[1]] = child;
+    if (child.status === 'completed' && child.conclusion !== 'success') result.failed = true;
+  }
+  const rank = ['admitted', 'candidate-dispatched', 'candidate-complete',
+    'promotion-dispatched', 'promotion-complete', 'checkpoint-dispatched', 'complete'].indexOf(binding.stage);
+  const successful = function (workflow) {
+    const child = childRuns[workflow];
+    return child && child.status === 'completed' && child.conclusion === 'success';
+  };
+  const conflict = (rank >= 2 && !successful('.github/workflows/build-live-menu-artifact.yml'))
+    || (rank >= 4 && !successful('.github/workflows/deploy-github-pages.yml'))
+    || (rank >= 6 && !successful('.github/workflows/advance-refresh-checkpoint.yml'))
+    || (rank === 6 && publicationProof.completeEvidence === true
+      && (!/^[a-f0-9]{64}$/.test(publicationProof.releaseId || '')
+        || publicationProof.releaseId !== binding.releaseId));
+  if (conflict) {
+    result.dispatchEvidence = 'conflict';
+    result.stage = 'evidence-conflict';
+    result.admittedBeforeCutoff = null;
   }
   return result;
 }
@@ -128,6 +162,7 @@ function evaluateLionLogDispatchPoll(e, now, previous) {
   const open = new Set(previous);
   const events = [];
   function transition(key, active) {
+    if (active === null) return; // Unknown evidence cannot resolve an existing incident.
     if (active === open.has(key)) return;
     events.push({ key: key, status: active ? 'alert' : 'recovery' });
     if (active) open.add(key); else open.delete(key);
@@ -135,24 +170,27 @@ function evaluateLionLogDispatchPoll(e, now, previous) {
   const minuteText = Utilities.formatDate(now, 'America/New_York', 'HH:mm');
   const minute = Number(minuteText.slice(0, 2)) * 60 + Number(minuteText.slice(3));
   const proofComplete = e.completeEvidence === true;
-  const unknown = proofComplete && e.dispatchEvidence === 'binding-pending';
+  const pending = e.dispatchEvidence === 'binding-pending';
   const complete = proofComplete && (e.dispatchEvidence === 'complete' || e.dispatchEvidence === 'bound');
   const success = proofComplete && e.knownGood && e.integrity === 'match' && e.publishedDate === e.date
     && Number.isFinite(e.freshUntil) && now.getTime() < e.freshUntil;
-  transition('evidence-unavailable', !unknown && !complete);
-  transition('workflow-failure', e.failed === true);
-  transition('morning-start', minute >= 600 && !Number.isFinite(e.startedAt) && !success);
-  transition('completion-freshness', Number.isFinite(e.startedAt) && !success &&
-    (e.failed === true || (complete && (e.terminal || now.getTime() >= e.startedAt + 3 * 3600000
-      || (Number.isFinite(e.freshUntil) && now.getTime() >= e.freshUntil)))));
-  if (complete) {
-    transition('final-admission', minute >= 740 && e.admittedBeforeCutoff === false && !success);
-    transition('publication-integrity', e.integrity === 'mismatch');
-  }
+  const started = Number.isFinite(e.startedAt);
+  const overdue = started && (now.getTime() >= e.startedAt + 3 * 3600000
+    || (Number.isFinite(e.freshUntil) && now.getTime() >= e.freshUntil));
+  transition('evidence-unavailable', complete ? false : (pending && proofComplete ? null : true));
+  transition('workflow-failure', e.failed === true ? true : (success ? false : null));
+  transition('morning-start', started || success ? false
+    : (complete && minute >= 600 ? true : null));
+  transition('completion-freshness', !success && (e.failed === true || overdue
+    || (complete && started && e.terminal)) ? true : (success ? false : null));
+  transition('final-admission', success || (complete && e.admittedBeforeCutoff === true) ? false
+    : (complete && minute >= 740 && e.admittedBeforeCutoff === false ? true : null));
+  transition('publication-integrity', proofComplete && e.integrity === 'mismatch' ? true
+    : (proofComplete && e.integrity === 'match' && e.knownGood ? false : null));
   return { open: Array.from(open), events: events };
 }
 
-function llMonitorRuns(api, event, day, path) {
+function llMonitorRuns(api, event, day, path, actor) {
   const start = new Date(Date.parse(day + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
   const end = new Date(Date.parse(day + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10);
   const out = [], seen = new Set();
@@ -160,7 +198,8 @@ function llMonitorRuns(api, event, day, path) {
   for (let page = 1; page <= 10; page++) {
     const workflow = path.slice(path.lastIndexOf('/') + 1);
     const response = api('repos/' + LL_MONITOR_REPO + '/actions/workflows/' + workflow
-      + '/runs?event=' + event + '&created=' + encodeURIComponent(start + '..' + end)
+      + '/runs?event=' + event + (actor ? '&actor=' + encodeURIComponent(actor) : '')
+      + '&created=' + encodeURIComponent(start + '..' + end)
       + '&per_page=100&page=' + page);
     if (!Number.isSafeInteger(response.total_count) || response.total_count < 0
       || response.total_count > 1000 || (total !== undefined && total !== response.total_count)

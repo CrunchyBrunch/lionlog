@@ -43,11 +43,30 @@ test("default-branch discussion receiver checks out its audited commit and separ
   assert.match(source, /github\.event_name == 'schedule' && vars\.LIONLOG_DISPATCH_MODE != 'external'/);
   assert.match(source, /github\.event_name == 'discussion_comment' && vars\.LIONLOG_DISPATCH_MODE == 'external'/);
   assert.match(source, /vars\.LIONLOG_EXTERNAL_DISPATCH_ACTIVATION == 'ENABLE_LIONLOG_EXTERNAL_DISPATCH'/);
+  assert.match(source, /vars\.LIONLOG_DISPATCH_PROBE_ACTIVATION != 'ENABLE_LIONLOG_DISPATCH_PROBE'/);
+  assert.match(source, /vars\.LIONLOG_EXTERNAL_DISPATCH_ACTIVATION != 'ENABLE_LIONLOG_EXTERNAL_DISPATCH'/);
+  assert.match(source, /github\.event\.sender\.id == vars\.LIONLOG_DISPATCHER_BOT_USER_ID/);
+  assert.match(source, /github\.event\.comment\.user\.id == vars\.LIONLOG_DISPATCHER_BOT_USER_ID/);
+  assert.match(source, /github\.event\.discussion\.node_id == vars\.LIONLOG_DISPATCH_DISCUSSION_NODE_ID/);
+  assert.match(source, /github\.event\.comment\.updated_at == github\.event\.comment\.created_at/);
+  assert.match(source, /jobs:\r?\n(?:.|\r?\n)*? {2}publish:\r?\n(?:.|\r?\n)*? {4}concurrency:\r?\n\s+group: lionlog-daily-dispatch/);
+  assert.match(source, /group: lionlog-daily-dispatch\r?\n\s+queue: max\r?\n\s+cancel-in-progress: false/);
+  assert.match(source, /node --experimental-strip-types receiver\/scripts\/shared-opportunity\.ts/g);
+  assert.equal((source.match(/node --experimental-strip-types receiver\/scripts\/shared-opportunity\.ts/g) ?? []).length, 2);
+  assert.match(source, /lionlog-day-reservation-\$\{\{ steps\.opportunity\.outputs\.service_date \}\}/);
+  assert.match(source, /if-no-files-found: error/);
+  assert.ok(source.indexOf('Persist the day reservation before any producer request')
+    < source.indexOf('Recheck the shared day before producer dispatch'));
+  assert.ok(source.indexOf('Recheck the shared day before producer dispatch')
+    < source.indexOf('Dispatch and verify the one pinned daily sequence'));
   assert.match(source, /vars\.LIONLOG_DISPATCH_RECEIVER_SHA == github\.sha/);
   assert.match(source, /ref: \$\{\{ github\.event_name == 'schedule' && vars\.LIONLOG_PRODUCTION_SHA \|\| github\.sha \}\}/);
   assert.match(source, /discussions: read/);
   assert.match(source, /git\/ref\/\$\{PRODUCTION_REF#refs\/\}/);
-  assert.match(source, /git rev-parse HEAD/);
+  assert.match(source, /git -C production rev-parse HEAD/);
+  assert.match(source, /path: receiver/);
+  assert.match(source, /path: production/);
+  assert.match(source, /working-directory: production/);
   assert.match(source, /npm ci --ignore-scripts --omit=dev/);
   assert.match(source, /node --experimental-strip-types scripts\/run-daily-publication\.ts/);
   assert.match(source, /lionlog-discussion-binding-\$\{\{ github\.run_id \}\}-1/);

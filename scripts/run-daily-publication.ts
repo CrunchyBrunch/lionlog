@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { parseArtifactZip } from "./artifact-zip.ts";
 import { assertNoScheduledCandidateConflict } from "./refresh-preflight.ts";
 import { verifyDiscussionAdmission, type DiscussionWake } from "./discussion-admission.ts";
+import { assertSharedOpportunity, verifyDayReservation } from "./shared-opportunity.ts";
 import { loadPublicationCheckpoint } from "./publication-checkpoint.ts";
 import { observePublicRelease } from "./public-release-state.ts";
 import { assertRefreshConfiguration, LATEST_DAILY_START_MINUTE, PROPOSED_PRIMARY_MINUTE,
@@ -158,7 +159,7 @@ export async function runDailyPublication(options: {
   wallNowMs?: () => number; elapsedNowMs?: () => number;
   loadCheckpoint?: typeof loadPublicationCheckpoint;
   observePublic?: typeof observePublicRelease;
-  discussionWake?: DiscussionWake; botUserId?: number; discussionNodeId?: string;
+  discussionWake?: DiscussionWake; botUserId?: number; botLogin?: string; discussionNodeId?: string;
   dispatchMode?: string;
   binding?: (value: Record<string, unknown>) => Promise<void>;
 }): Promise<{ candidateRunId: number; promotionRunId: number; checkpointRunId: number }> {
@@ -172,7 +173,7 @@ export async function runDailyPublication(options: {
     || options.standingPolicy !== STANDING_PUBLICATION_POLICY
     || !Number.isSafeInteger(options.writerId) || options.writerId < 1 || !options.token
     || (discussion && (!options.discussionWake || !Number.isSafeInteger(options.botUserId)
-      || !options.discussionNodeId || !api.graphql))) {
+      || !options.botLogin || !options.discussionNodeId || !api.graphql))) {
     throw new Error("Daily schedule or standing authority is inactive or changed.");
   }
   const wallNowMs = options.wallNowMs ?? Date.now;
@@ -250,6 +251,13 @@ export async function runDailyPublication(options: {
   if (!discussion) await assertOnlyScheduledOpportunity(boundedApi, serviceDate, options.schedulerRunId);
   await assertNoScheduledCandidateConflict({ api: { getJson: (route) => boundedApi.get(route), getBytes: (route) => boundedApi.bytes(route) },
     serviceDate });
+  if (discussion) await assertSharedOpportunity({ api: boundedApi as Required<Pick<DailyApi, "get" | "graphql">>,
+    event: "discussion_comment", wake: options.discussionWake, repository: options.repository,
+    workflowRef: options.workflowRef, runId: options.schedulerRunId, sha: options.schedulerSha,
+    attempt: options.attempt, mode: options.dispatchMode, botId: options.botUserId,
+    botLogin: options.botLogin, discussionNodeId: options.discussionNodeId, now: new Date(wallNowMs()) });
+  if (discussion) await verifyDayReservation({ api: boundedApi, serviceDate,
+    runId: options.schedulerRunId, sha: options.schedulerSha });
   remainingMs();
   const candidateRunId = await boundedApi.dispatch(PRODUCER, branch, {
     refresh_mode: mode, service_date: serviceDate, confirmation: "PREPARE_LIVE_PAGES_FIELD_RELEASE",
@@ -403,6 +411,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
       standingPolicy: process.env.LIONLOG_STANDING_PUBLICATION_POLICY ?? "",
       writerId: Number(process.env.LIONLOG_PUBLICATION_WRITER_ID), discussionWake: wake,
       botUserId: Number(process.env.LIONLOG_DISPATCHER_BOT_USER_ID),
+      botLogin: process.env.LIONLOG_DISPATCHER_BOT_LOGIN,
       dispatchMode: process.env.LIONLOG_DISPATCH_MODE,
       discussionNodeId: process.env.LIONLOG_DISPATCH_DISCUSSION_NODE_ID,
       binding: updateBinding });
