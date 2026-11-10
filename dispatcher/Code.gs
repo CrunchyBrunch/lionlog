@@ -3,7 +3,17 @@ const LIONLOG_ZONE = 'America/New_York';
 const LIONLOG_REPOSITORY_ID = 1346360244;
 const LIONLOG_GATE = 'ENABLE_LIONLOG_EXTERNAL_DISPATCH';
 
-/** A time trigger may fire late. A claimed day is never retried automatically. */
+/** Run once during owner cutover. A five-minute trigger and local gate absorb timer jitter. */
+function installLionLogDispatcherTrigger() {
+  const matches = ScriptApp.getProjectTriggers().filter(function (trigger) {
+    return trigger.getHandlerFunction() === 'dispatchLionLogWake';
+  });
+  if (matches.length > 1) throw new Error('Duplicate dispatcher triggers require owner inspection.');
+  if (matches.length === 1) return;
+  ScriptApp.newTrigger('dispatchLionLogWake').timeBased().everyMinutes(5).create();
+}
+
+/** Each five-minute tick checks the New York due window. A claimed day is never retried. */
 function dispatchLionLogWake() {
   const now = new Date();
   const day = Utilities.formatDate(now, LIONLOG_ZONE, 'yyyy-MM-dd');

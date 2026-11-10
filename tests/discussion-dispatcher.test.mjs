@@ -16,6 +16,7 @@ function fixture({ minute = '05:17', commentStatus = 200, lockAvailable = true }
   ]);
   const posts = [];
   let lockHeld = false;
+  let triggerCount = 0;
   const properties = { getProperty: (key) => values.has(key) ? values.get(key) : null,
     setProperty: (key, value) => { values.set(key, value); } };
   const context = {
@@ -29,6 +30,12 @@ function fixture({ minute = '05:17', commentStatus = 200, lockAvailable = true }
     LockService: { getScriptLock: () => ({ tryLock: () => { if (!lockAvailable) return false;
       lockHeld = true; return true; }, releaseLock: () => { lockHeld = false; } }) },
     PropertiesService: { getScriptProperties: () => properties },
+    ScriptApp: { getProjectTriggers: () => triggerCount ? [{ getHandlerFunction: () => 'dispatchLionLogWake' }] : [],
+      newTrigger: handler => { assert.equal(handler, 'dispatchLionLogWake'); return {
+        timeBased: () => ({ everyMinutes: count => { assert.equal(count, 5); return {
+          create: () => { triggerCount += 1; }
+        }; } })
+      }; } },
     UrlFetchApp: { fetch: (url, options) => {
       assert.equal(lockHeld, false);
       assert.ok(values.has(claim), 'date claim must precede every network request');
@@ -43,8 +50,15 @@ function fixture({ minute = '05:17', commentStatus = 200, lockAvailable = true }
     } }
   };
   vm.runInNewContext(source, context);
-  return { run: () => vm.runInNewContext('dispatchLionLogWake()', context), values, posts };
+  return { run: () => vm.runInNewContext('dispatchLionLogWake()', context),
+    install: () => vm.runInNewContext('installLionLogDispatcherTrigger()', context),
+    triggerCount: () => triggerCount, values, posts };
 }
+
+test('installer creates one five-minute trigger and remains idempotent', () => {
+  const f = fixture(); f.install(); f.install();
+  assert.equal(f.triggerCount(), 1);
+});
 
 test('one durable claim precedes exactly one comment POST', () => {
   const f = fixture();

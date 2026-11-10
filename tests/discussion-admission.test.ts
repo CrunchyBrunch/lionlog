@@ -25,12 +25,14 @@ const readback = { data: { node: { id: "DC_kwABC123", databaseId: commentId, bod
 const current = { id: 77, path: receiver.path, event: receiver.event, run_attempt: 1, created_at: receiver.created_at };
 
 function fixture(change: { event?: DiscussionWake; receiver?: Record<string, unknown>;
-  readback?: Record<string, unknown>; discussionHistory?: unknown; scheduleHistory?: unknown } = {}) {
+  readback?: Record<string, unknown>; discussionHistory?: unknown; scheduleHistory?: unknown;
+  skippedScheduleRun?: Record<string, unknown> } = {}) {
   let reads = 0;
   const api: DiscussionEvidenceApi = {
     get: async (route) => {
       reads += 1;
       if (route.endsWith("/runs/77")) return change.receiver ?? receiver;
+      if (route.endsWith("/runs/70")) return change.skippedScheduleRun;
       if (route.includes("event=discussion_comment")) return change.discussionHistory
         ?? { total_count: 1, workflow_runs: [current] };
       if (route.includes("event=schedule")) return change.scheduleHistory
@@ -77,6 +79,15 @@ test("edited readback, rerun, duplicate opportunity, legacy schedule and history
   }
 });
 
+test("only a terminal skipped cron run at the exact receiver SHA is harmless in external mode", async () => {
+  const listed = { ...current, id: 70, event: "schedule" };
+  const skipped = { ...receiver, id: 70, event: "schedule", status: "completed", conclusion: "skipped" };
+  const f = fixture({ scheduleHistory: { total_count: 1, workflow_runs: [listed] }, skippedScheduleRun: skipped });
+  assert.equal((await verifyDiscussionAdmission(f.options)).commentId, commentId);
+  await assert.rejects(verifyDiscussionAdmission(fixture({ scheduleHistory: { total_count: 1, workflow_runs: [listed] },
+    skippedScheduleRun: { ...skipped, head_sha: "b".repeat(40) } }).options), /legacy schedule/);
+});
+
 test("comment received on a later New York date cannot dispatch", async () => {
   const f = fixture();
   await assert.rejects(verifyDiscussionAdmission({ ...f.options,
@@ -109,6 +120,7 @@ test("orchestrator binds an admitted comment before checkpoint read and never di
       productionRef: "refs/heads/production", productionSha: receiverSha },
     standingPolicy: STANDING_PUBLICATION_POLICY, writerId: 42,
     now: new Date("2026-11-10T10:20:00Z"), discussionWake: wake,
+    dispatchMode: "external",
     botUserId: botId, discussionNodeId: discussionId,
     binding: async (value) => { binding.push(value); },
     loadCheckpoint: async () => { throw new Error("seed absent"); }
@@ -116,4 +128,20 @@ test("orchestrator binds an admitted comment before checkpoint read and never di
   assert.equal(binding.length, 1);
   assert.equal(binding[0].commentId, commentId);
   assert.equal(dispatches, 0);
+});
+
+test("discussion event cannot enter the orchestrator without the explicit external mode", async () => {
+  const api: DailyApi = { get: async () => { throw new Error("unexpected read"); },
+    graphql: async () => { throw new Error("unexpected read"); },
+    bytes: async () => Buffer.alloc(0), dispatch: async () => { throw new Error("unexpected dispatch"); } };
+  await assert.rejects(runDailyPublication({ api, token: "fixture", repository: "CrunchyBrunch/lionlog",
+    event: "discussion_comment", workflowRef: "CrunchyBrunch/lionlog/.github/workflows/daily-publication.yml@refs/heads/main",
+    attempt: 1, schedulerRunId: 77, schedulerSha: receiverSha,
+    configuration: { activation: "ENABLE_AUTOMATIC_LIONLOG_REFRESH",
+      sourceAuthorization: "I_APPROVE_AUTOMATIC_PSU_REQUESTS",
+      productionRef: "refs/heads/production", productionSha: receiverSha },
+    standingPolicy: STANDING_PUBLICATION_POLICY, writerId: 42,
+    now: new Date("2026-11-10T10:20:00Z"), discussionWake: wake,
+    botUserId: botId, discussionNodeId: discussionId
+  }), /inactive/);
 });

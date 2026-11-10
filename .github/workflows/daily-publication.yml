@@ -1,10 +1,13 @@
 name: Daily verified LionLog publication
 
 on:
+  schedule:
+    - cron: '17 5 * * *'
+      timezone: 'America/New_York'
   discussion_comment:
     types: [created]
 
-run-name: LionLog wake ${{ github.event.comment.id }}
+run-name: ${{ github.event_name == 'discussion_comment' && format('LionLog wake {0}', github.event.comment.id) || 'LionLog scheduled publication' }}
 
 permissions: {}
 
@@ -38,13 +41,16 @@ jobs:
   publish:
     if: >-
       github.repository == 'CrunchyBrunch/lionlog' &&
-      github.event_name == 'discussion_comment' &&
       github.ref == 'refs/heads/main' &&
       github.run_attempt == 1 &&
-      vars.LIONLOG_EXTERNAL_DISPATCH_ACTIVATION == 'ENABLE_LIONLOG_EXTERNAL_DISPATCH' &&
-      vars.LIONLOG_DISPATCH_RECEIVER_SHA == github.sha &&
-      vars.LIONLOG_DISPATCHER_BOT_USER_ID != '' &&
-      vars.LIONLOG_DISPATCH_DISCUSSION_NODE_ID != '' &&
+      (
+        (github.event_name == 'schedule' && vars.LIONLOG_DISPATCH_MODE != 'external') ||
+        (github.event_name == 'discussion_comment' && vars.LIONLOG_DISPATCH_MODE == 'external' &&
+          vars.LIONLOG_EXTERNAL_DISPATCH_ACTIVATION == 'ENABLE_LIONLOG_EXTERNAL_DISPATCH' &&
+          vars.LIONLOG_DISPATCH_RECEIVER_SHA == github.sha &&
+          vars.LIONLOG_DISPATCHER_BOT_USER_ID != '' &&
+          vars.LIONLOG_DISPATCH_DISCUSSION_NODE_ID != '')
+      ) &&
       vars.LIONLOG_REFRESH_ACTIVATION == 'ENABLE_AUTOMATIC_LIONLOG_REFRESH' &&
       vars.LIONLOG_REFRESH_SOURCE_AUTHORIZATION == 'I_APPROVE_AUTOMATIC_PSU_REQUESTS' &&
       vars.LIONLOG_STANDING_PUBLICATION_POLICY == 'COMPLETE_COVERAGE_V1' &&
@@ -76,15 +82,15 @@ jobs:
           test "$REF_IDENTITY" = "$PRODUCTION_REF commit $PRODUCTION_SHA"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'schedule' && vars.LIONLOG_PRODUCTION_SHA || github.sha }}
           persist-credentials: false
       - name: Verify checked-out orchestration and dependency revision
         shell: bash
         env:
-          RECEIVER_SHA: ${{ vars.LIONLOG_DISPATCH_RECEIVER_SHA }}
+          CHECKOUT_SHA: ${{ github.event_name == 'schedule' && vars.LIONLOG_PRODUCTION_SHA || vars.LIONLOG_DISPATCH_RECEIVER_SHA }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$RECEIVER_SHA"
+          test "$(git rev-parse HEAD)" = "$CHECKOUT_SHA"
           test -f scripts/run-daily-publication.ts
           test -f package-lock.json
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -101,6 +107,7 @@ jobs:
           LIONLOG_PRODUCTION_REF: ${{ vars.LIONLOG_PRODUCTION_REF }}
           LIONLOG_PRODUCTION_SHA: ${{ vars.LIONLOG_PRODUCTION_SHA }}
           LIONLOG_PUBLICATION_WRITER_ID: ${{ vars.LIONLOG_PUBLICATION_WRITER_ID }}
+          LIONLOG_DISPATCH_MODE: ${{ vars.LIONLOG_DISPATCH_MODE }}
           LIONLOG_DISPATCHER_BOT_USER_ID: ${{ vars.LIONLOG_DISPATCHER_BOT_USER_ID }}
           LIONLOG_DISPATCH_DISCUSSION_NODE_ID: ${{ vars.LIONLOG_DISPATCH_DISCUSSION_NODE_ID }}
           LIONLOG_DISCUSSION_BINDING_PATH: discussion-binding.json

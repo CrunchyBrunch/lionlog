@@ -39,10 +39,12 @@ test("preactivation bootstrap requires the same protected App environment and ex
 test("default-branch discussion receiver checks out its audited commit and separately pins production", async () => {
   const source = await workflow("daily-publication.yml");
   assert.match(source, /discussion_comment:\r?\n\s+types: \[created\]/);
-  assert.doesNotMatch(source, /\bcron:/);
+  assert.match(source, /schedule:\r?\n\s+- cron: '17 5 \* \* \*'/);
+  assert.match(source, /github\.event_name == 'schedule' && vars\.LIONLOG_DISPATCH_MODE != 'external'/);
+  assert.match(source, /github\.event_name == 'discussion_comment' && vars\.LIONLOG_DISPATCH_MODE == 'external'/);
   assert.match(source, /vars\.LIONLOG_EXTERNAL_DISPATCH_ACTIVATION == 'ENABLE_LIONLOG_EXTERNAL_DISPATCH'/);
   assert.match(source, /vars\.LIONLOG_DISPATCH_RECEIVER_SHA == github\.sha/);
-  assert.match(source, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(source, /ref: \$\{\{ github\.event_name == 'schedule' && vars\.LIONLOG_PRODUCTION_SHA \|\| github\.sha \}\}/);
   assert.match(source, /discussions: read/);
   assert.match(source, /git\/ref\/\$\{PRODUCTION_REF#refs\/\}/);
   assert.match(source, /git rev-parse HEAD/);

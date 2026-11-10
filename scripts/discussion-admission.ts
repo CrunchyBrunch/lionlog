@@ -67,7 +67,7 @@ export async function verifyDiscussionAdmission(options: {
     throw new Error("Discussion receiver run identity is invalid.");
   }
   await oneReceiverRun(api, serviceDate, options.receiverRunId);
-  await noSameDaySchedule(api, serviceDate);
+  await noSameDaySchedule(api, serviceDate, options.receiverSha);
   return { commentId: comment.id!, commentNodeId: comment.node_id!, serviceDate };
 }
 
@@ -106,9 +106,18 @@ async function oneReceiverRun(api: DiscussionEvidenceApi, day: string, id: numbe
     throw new Error("The service day's discussion opportunity was already consumed or is ambiguous.");
   }
 }
-async function noSameDaySchedule(api: DiscussionEvidenceApi, day: string): Promise<void> {
-  if ((await paginatedRuns(api, "schedule", day)).length !== 0) {
-    throw new Error("A legacy schedule already consumed the service day's opportunity.");
+async function noSameDaySchedule(api: DiscussionEvidenceApi, day: string, receiverSha: string): Promise<void> {
+  for (const listed of await paginatedRuns(api, "schedule", day)) {
+    // The retained cron trigger creates a skipped workflow run in external mode.
+    // Only a terminal skip on this exact audited receiver revision is harmless.
+    const run = await api.get(`repos/${REPOSITORY}/actions/runs/${listed.id}`) as {
+      id?: number; path?: string; event?: string; run_attempt?: number; head_sha?: string;
+      head_branch?: string; status?: string; conclusion?: string };
+    if (run?.id !== listed.id || run.path !== RECEIVER_PATH || run.event !== "schedule"
+      || run.run_attempt !== 1 || run.head_sha !== receiverSha || run.head_branch !== "main"
+      || run.status !== "completed" || run.conclusion !== "skipped") {
+      throw new Error("A legacy schedule already consumed or may consume the service day's opportunity.");
+    }
   }
 }
 function positive(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) > 0; }

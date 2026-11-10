@@ -159,12 +159,14 @@ export async function runDailyPublication(options: {
   loadCheckpoint?: typeof loadPublicationCheckpoint;
   observePublic?: typeof observePublicRelease;
   discussionWake?: DiscussionWake; botUserId?: number; discussionNodeId?: string;
+  dispatchMode?: string;
   binding?: (value: Record<string, unknown>) => Promise<void>;
 }): Promise<{ candidateRunId: number; promotionRunId: number; checkpointRunId: number }> {
   const { configuration: config, api } = options;
   assertRefreshConfiguration(config);
   const discussion = options.event === "discussion_comment";
   if (options.repository !== REPOSITORY || (!discussion && options.event !== "schedule") || options.attempt !== 1
+    || (discussion ? options.dispatchMode !== "external" : options.dispatchMode === "external")
     || options.workflowRef !== `${REPOSITORY}/.github/workflows/daily-publication.yml@refs/heads/main`
     || !Number.isSafeInteger(options.schedulerRunId) || options.schedulerRunId < 1 || !SHA.test(options.schedulerSha)
     || options.standingPolicy !== STANDING_PUBLICATION_POLICY
@@ -401,6 +403,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
       standingPolicy: process.env.LIONLOG_STANDING_PUBLICATION_POLICY ?? "",
       writerId: Number(process.env.LIONLOG_PUBLICATION_WRITER_ID), discussionWake: wake,
       botUserId: Number(process.env.LIONLOG_DISPATCHER_BOT_USER_ID),
+      dispatchMode: process.env.LIONLOG_DISPATCH_MODE,
       discussionNodeId: process.env.LIONLOG_DISPATCH_DISCUSSION_NODE_ID,
       binding: updateBinding });
   } catch (error) {
