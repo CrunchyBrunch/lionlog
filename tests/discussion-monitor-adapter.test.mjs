@@ -198,6 +198,24 @@ test('queued receiver raises the 10:00 warning even with a workflow timestamp', 
     x.key === 'morning-start' && x.status === 'alert'));
 });
 
+test('wrong receiver SHA cannot recover morning start or claim expected-run failure', () => {
+  const now = new Date('2026-11-10T15:20:00Z');
+  const f = fixture({ run: { ...receiver, head_sha: 'd'.repeat(40),
+    status: 'completed', conclusion: 'failure' },
+  proofValue: { ...proof, integrity: 'mismatch' } });
+  const evidence = f.collect(now);
+  assert.equal(evidence.dispatchEvidence, 'unavailable');
+  assert.equal(evidence.receiverRunId, null);
+  assert.equal(evidence.startedAt, null);
+  assert.equal(evidence.failed, false);
+  const events = f.evaluate(evidence, now, ['morning-start', 'final-admission']).events;
+  assert.ok(events.some(x => x.key === 'evidence-unavailable' && x.status === 'alert'));
+  assert.ok(events.some(x => x.key === 'publication-integrity' && x.status === 'alert'));
+  assert.ok(!events.some(x => x.key === 'morning-start' && x.status === 'recovery'));
+  assert.ok(!events.some(x => x.key === 'final-admission' && x.status === 'recovery'));
+  assert.ok(!events.some(x => x.key === 'workflow-failure' && x.status === 'alert'));
+});
+
 test('independent public mismatch alerts while binding is pending', () => {
   const f = fixture({ proofValue: { ...proof, integrity: 'mismatch' } });
   const now = new Date('2026-11-10T15:20:00Z');
@@ -288,4 +306,29 @@ test('failed writer and claimed complete stage become explicit conflict and fail
   assert.ok(f.evaluate(evidence, now).events.some(x => x.key === 'workflow-failure'));
   assert.ok(!f.evaluate(evidence, now, ['workflow-failure', 'evidence-unavailable']).events.some(x =>
     x.status === 'recovery'));
+});
+
+test('failed writer does not turn proven timely producer admission into missed admission', () => {
+  const now = new Date('2026-11-10T17:30:00Z');
+  const f = fixture({ artifact: true, run: { ...receiver, status: 'completed', conclusion: 'success' },
+    writerRun: { ...writer, conclusion: 'failure' },
+    proofValue: { ...proof, knownGood: true, integrity: 'match', publishedDate: day } });
+  const evidence = f.collect(now);
+  assert.equal(evidence.dispatchEvidence, 'conflict');
+  assert.equal(evidence.admittedBeforeCutoff, true);
+  const events = f.evaluate(evidence, now).events;
+  assert.ok(events.some(x => x.key === 'workflow-failure' && x.status === 'alert'));
+  assert.ok(events.some(x => x.key === 'evidence-unavailable' && x.status === 'alert'));
+  assert.ok(!events.some(x => x.key === 'final-admission' && x.status === 'alert'));
+});
+
+test('proven non-admission still raises final-admission after a later writer failure', () => {
+  const now = new Date('2026-11-10T17:30:00Z');
+  const f = fixture({ artifact: true, run: { ...receiver, status: 'completed', conclusion: 'success' },
+    writerRun: { ...writer, conclusion: 'failure' },
+    proofValue: { ...proof, admittedBeforeCutoff: false } });
+  const evidence = f.collect(now);
+  assert.equal(evidence.admittedBeforeCutoff, false);
+  assert.ok(f.evaluate(evidence, now).events.some(x =>
+    x.key === 'final-admission' && x.status === 'alert'));
 });

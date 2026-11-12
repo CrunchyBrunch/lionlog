@@ -27,7 +27,8 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
   const event = mode === 'schedule' ? 'schedule' : 'discussion_comment';
   const result = Object.assign({}, publicationProof, { date: day, mode: mode,
     dispatchEvidence: 'complete', stage: 'absent', startedAt: null, failed: false,
-    terminal: false, admittedBeforeCutoff: publicationProof.admittedBeforeCutoff ?? null, receiverRunId: null,
+    terminal: false, admittedBeforeCutoff: mode === 'external' ? null : (publicationProof.admittedBeforeCutoff ?? null),
+    receiverRunId: null,
     receiverStatus: null, candidateCorrelated: false,
     candidateRunId: null, promotionRunId: null, checkpointRunId: null });
   try {
@@ -61,6 +62,17 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
     || (run.status === 'completed' && !['success', 'failure', 'cancelled', 'timed_out'].includes(run.conclusion))) {
     throw new Error('Receiver run readback differs from history.');
   }
+  let titleCommentId, titleCommentNodeId;
+  if (mode === 'external') {
+    const title = /^LionLog wake ([1-9]\d*) (DC_[A-Za-z0-9_-]+) (D_[A-Za-z0-9_-]+) (lionlog-dispatch\.v1:\d{4}-\d{2}-\d{2})$/.exec(run.display_title || '');
+    if (run.head_sha !== expectedSha || run.actor?.id !== botId || run.actor.login !== botLogin
+      || !title || title[3] !== discussionId || title[4] !== 'lionlog-dispatch.v1:' + day) {
+      throw new Error('Discussion receiver identity differs from monitor pin.');
+    }
+    titleCommentId = Number(title[1]);
+    titleCommentNodeId = title[2];
+    if (!llMonitorPositive(titleCommentId)) throw new Error('Receiver comment ID invalid.');
+  }
   result.receiverRunId = run.id;
   result.receiverStatus = run.status;
   result.failed = run.status === 'completed' && run.conclusion !== 'success';
@@ -71,15 +83,7 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
     result.dispatchEvidence = 'complete';
     return result; // Existing signed producer admission/public proof remains authoritative.
   }
-  result.admittedBeforeCutoff = null; // Only the existing producer proof can establish admission.
-  const title = /^LionLog wake ([1-9]\d*) (DC_[A-Za-z0-9_-]+) (D_[A-Za-z0-9_-]+) (lionlog-dispatch\.v1:\d{4}-\d{2}-\d{2})$/.exec(run.display_title || '');
-  if (run.head_sha !== expectedSha || run.actor?.id !== botId || run.actor.login !== botLogin
-    || !title || title[3] !== discussionId || title[4] !== 'lionlog-dispatch.v1:' + day) {
-    throw new Error('Discussion receiver identity differs from monitor pin.');
-  }
-  const titleCommentId = Number(title[1]);
-  const titleCommentNodeId = title[2];
-  if (!Number.isSafeInteger(titleCommentId)) throw new Error('Receiver comment ID invalid.');
+  // Only the existing producer proof, bound to this receiver, can establish admission.
   // Histories offer live stage hints while the receiver is running. They are never admission proof.
   const producer = llMonitorRuns(api, 'workflow_dispatch', day, '.github/workflows/build-live-menu-artifact.yml');
   const promotion = llMonitorRuns(api, 'workflow_dispatch', day, '.github/workflows/deploy-github-pages.yml');
@@ -113,6 +117,10 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
     throw new Error('Receiver binding artifact identity invalid.');
   }
   const binding = llMonitorBinding(item, token, run.id, expectedSha, day, titleCommentId, titleCommentNodeId);
+  result.candidateCorrelated = llMonitorPositive(publicationProof.candidateRunId)
+    && llMonitorPositive(binding.candidateRunId)
+    && publicationProof.candidateRunId === binding.candidateRunId;
+  result.admittedBeforeCutoff = result.candidateCorrelated ? publicationProof.admittedBeforeCutoff ?? null : null;
   if (run.status === 'completed' && ((run.conclusion === 'success') !== (binding.stage === 'complete'))) {
     throw new Error('Receiver conclusion and retained stage disagree.');
   }
@@ -122,10 +130,6 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
   result.candidateRunId = binding.candidateRunId || null;
   result.promotionRunId = binding.promotionRunId || null;
   result.checkpointRunId = binding.checkpointRunId || null;
-  result.candidateCorrelated = llMonitorPositive(publicationProof.candidateRunId)
-    && llMonitorPositive(binding.candidateRunId)
-    && publicationProof.candidateRunId === binding.candidateRunId;
-  result.admittedBeforeCutoff = result.candidateCorrelated ? publicationProof.admittedBeforeCutoff ?? null : null;
   const childRuns = {};
   for (const pair of [[binding.candidateRunId, '.github/workflows/build-live-menu-artifact.yml'],
     [binding.promotionRunId, '.github/workflows/deploy-github-pages.yml'],
@@ -158,15 +162,12 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
   if (conflict) {
     result.dispatchEvidence = 'conflict';
     result.stage = 'evidence-conflict';
-    result.admittedBeforeCutoff = null;
   }
   return result;
   } catch (error) {
     // Dispatch reads may be partial. Keep the independent signed/public and observed receiver facts.
     result.dispatchEvidence = 'unavailable';
     result.stage = 'evidence-unavailable';
-    result.admittedBeforeCutoff = null;
-    result.candidateCorrelated = false;
     return result;
   }
 }
@@ -187,6 +188,9 @@ function evaluateLionLogDispatchPoll(e, now, previous) {
   const pending = e.dispatchEvidence === 'binding-pending';
   const complete = proofComplete && (e.dispatchEvidence === 'complete'
     || (e.dispatchEvidence === 'bound' && e.candidateCorrelated === true));
+  const admissionVerified = proofComplete && (e.mode === 'external'
+    ? (e.candidateCorrelated === true || (e.dispatchEvidence === 'complete' && e.stage === 'absent'))
+    : e.dispatchEvidence === 'complete');
   const success = complete && e.admittedBeforeCutoff === true && e.knownGood
     && e.integrity === 'match' && e.publishedDate === e.date
     && Number.isFinite(e.freshUntil) && now.getTime() < e.freshUntil;
@@ -199,9 +203,8 @@ function evaluateLionLogDispatchPoll(e, now, previous) {
     : (minute >= 600 && (complete || e.receiverStatus === 'queued') ? true : null));
   transition('completion-freshness', !success && (e.failed === true || overdue
     || (complete && started && e.terminal)) ? true : (success ? false : null));
-  transition('final-admission', success || (complete && e.admittedBeforeCutoff === true) ? false
-    : (minute >= 740 && (e.dispatchEvidence === 'conflict'
-      || (complete && e.admittedBeforeCutoff === false)) ? true : null));
+  transition('final-admission', admissionVerified && e.admittedBeforeCutoff === true ? false
+    : (admissionVerified && minute >= 740 && e.admittedBeforeCutoff === false ? true : null));
   transition('publication-integrity', proofComplete && e.integrity === 'mismatch' ? true
     : (proofComplete && e.integrity === 'match' && e.knownGood ? false : null));
   return { open: Array.from(open), events: events };
