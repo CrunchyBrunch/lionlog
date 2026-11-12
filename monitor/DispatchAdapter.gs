@@ -65,7 +65,7 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
   result.receiverStatus = run.status;
   result.failed = run.status === 'completed' && run.conclusion !== 'success';
   result.terminal = run.status === 'completed';
-  result.startedAt = llMonitorTime(run.run_started_at, day);
+  result.startedAt = run.status === 'queued' ? null : llMonitorTime(run.run_started_at, day);
   result.stage = run.status === 'queued' ? 'receiver-queued' : 'receiver-running';
   if (mode === 'schedule') {
     result.dispatchEvidence = 'complete';

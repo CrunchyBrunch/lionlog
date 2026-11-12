@@ -188,9 +188,9 @@ test('342-minute running receiver remains overdue with pending binding and no fa
   assert.ok(!prior.some(x => x.key === 'completion-freshness' && x.status === 'recovery'));
 });
 
-test('queued receiver with no actual start raises the 10:00 New York warning', () => {
+test('queued receiver raises the 10:00 warning even with a workflow timestamp', () => {
   const now = new Date('2026-11-10T15:20:00Z');
-  const f = fixture({ run: { ...receiver, status: 'queued', run_started_at: null } });
+  const f = fixture({ run: { ...receiver, status: 'queued' } });
   const evidence = f.collect(now);
   assert.equal(evidence.dispatchEvidence, 'binding-pending');
   assert.equal(evidence.startedAt, null);
