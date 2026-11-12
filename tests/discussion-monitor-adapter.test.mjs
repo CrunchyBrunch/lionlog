@@ -54,7 +54,9 @@ function fixture({ mode = 'external', run = receiver, legacyRun = null, artifact
     Utilities: { DigestAlgorithm: { SHA_256: 'SHA_256' },
       computeDigest: (_alg, raw) => Array.from(createHash('sha256').update(Buffer.from(raw)).digest()),
       formatDate: (_date, zone, format) => { assert.equal(zone, 'America/New_York');
-        return format === 'yyyy-MM-dd' ? day : '10:20'; },
+        return format === 'yyyy-MM-dd' ? day : new Intl.DateTimeFormat('en-US', {
+          timeZone: zone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+        }).format(_date); },
       unzip: () => [{ getName: () => 'discussion-binding.json', getDataAsString: () => JSON.stringify(bindingValue) }] },
     UrlFetchApp: { fetch: (url, options) => {
       gets.push({ url, options });
@@ -132,21 +134,31 @@ test('normal collector verifies digest, binding and exact downstream run identit
   assert.equal(result.stage, 'complete');
   assert.equal(result.checkpointRunId, 92);
   assert.ok(f.gets.every(x => x.options.method === 'get'));
-  assert.throws(() => fixture({ artifact: true, digestMismatch: true }).collect(new Date('2026-11-10T15:20:00Z')),
-    /digest/);
+  const invalid = fixture({ artifact: true, digestMismatch: true }).collect(new Date('2026-11-10T15:20:00Z'));
+  assert.equal(invalid.dispatchEvidence, 'unavailable');
+  assert.equal(invalid.admittedBeforeCutoff, null);
 });
 
-test('normal collector rejects incomplete history before interpreting absence', () => {
-  assert.throws(() => fixture({ historyGap: true }).collect(new Date('2026-11-10T15:20:00Z')),
-    /history incomplete/);
+test('incomplete dispatch history retains independent integrity and freshness alerts', () => {
+  const now = new Date('2026-11-10T15:20:00Z');
+  const f = fixture({ historyGap: true, proofValue: { ...proof, integrity: 'mismatch',
+    freshUntil: Date.parse('2026-11-10T15:00:00Z') } });
+  const evidence = f.collect(now);
+  assert.equal(evidence.dispatchEvidence, 'unavailable');
+  const events = f.evaluate(evidence, now).events;
+  assert.ok(events.some(x => x.key === 'evidence-unavailable' && x.status === 'alert'));
+  assert.ok(events.some(x => x.key === 'publication-integrity' && x.status === 'alert'));
+  assert.ok(events.some(x => x.key === 'completion-freshness' && x.status === 'alert'));
 });
 
 test('external monitor admits only an exact terminal skipped legacy run', () => {
   const skipped = { ...receiver, id: 70, event: 'schedule', status: 'completed', conclusion: 'skipped' };
   const f = fixture({ legacyRun: skipped });
   assert.deepEqual(Array.from(f.collect(new Date('2026-11-10T15:20:00Z')).skippedLegacyRunIds), [70]);
-  assert.throws(() => fixture({ legacyRun: { ...skipped, conclusion: 'success' } })
-    .collect(new Date('2026-11-10T15:20:00Z')), /Legacy schedule/);
+  const invalid = fixture({ legacyRun: { ...skipped, conclusion: 'success' } })
+    .collect(new Date('2026-11-10T15:20:00Z'));
+  assert.equal(invalid.dispatchEvidence, 'unavailable');
+  assert.equal(invalid.admittedBeforeCutoff, null);
 });
 
 test('external mode refuses an unset pin even when no receiver run exists', () => {
@@ -174,6 +186,16 @@ test('342-minute running receiver remains overdue with pending binding and no fa
   assert.ok(fresh.some(x => x.key === 'completion-freshness' && x.status === 'alert'));
   const prior = f.evaluate(evidence, now, ['completion-freshness']).events;
   assert.ok(!prior.some(x => x.key === 'completion-freshness' && x.status === 'recovery'));
+});
+
+test('queued receiver with no actual start raises the 10:00 New York warning', () => {
+  const now = new Date('2026-11-10T15:20:00Z');
+  const f = fixture({ run: { ...receiver, status: 'queued', run_started_at: null } });
+  const evidence = f.collect(now);
+  assert.equal(evidence.dispatchEvidence, 'binding-pending');
+  assert.equal(evidence.startedAt, null);
+  assert.ok(f.evaluate(evidence, now).events.some(x =>
+    x.key === 'morning-start' && x.status === 'alert'));
 });
 
 test('independent public mismatch alerts while binding is pending', () => {
@@ -204,13 +226,66 @@ test('admission needs two positive matching candidate IDs', () => {
   assert.equal(mismatch.collect(new Date('2026-11-10T15:20:00Z')).admittedBeforeCutoff, null);
 });
 
+test('candidate mismatch cannot recover evidence or admission on a fresh public release', () => {
+  const now = new Date('2026-11-10T17:30:00Z');
+  const f = fixture({ artifact: true,
+    run: { ...receiver, status: 'completed', conclusion: 'success' },
+    proofValue: { ...proof, candidateRunId: 999, knownGood: true,
+      integrity: 'match', publishedDate: day } });
+  const evidence = f.collect(now);
+  assert.equal(evidence.dispatchEvidence, 'conflict');
+  const events = f.evaluate(evidence, now, ['evidence-unavailable', 'final-admission']).events;
+  assert.ok(!events.some(x => x.status === 'recovery'));
+});
+
+test('wrong bound comment node cannot recover evidence or admission', () => {
+  const now = new Date('2026-11-10T17:30:00Z');
+  const f = fixture({ artifact: true,
+    run: { ...receiver, status: 'completed', conclusion: 'success' },
+    bindingValue: { ...binding, commentNodeId: 'DC_kwOTHER' },
+    proofValue: { ...proof, knownGood: true, integrity: 'match', publishedDate: day } });
+  const evidence = f.collect(now);
+  assert.notEqual(evidence.dispatchEvidence, 'bound');
+  assert.equal(evidence.admittedBeforeCutoff, null);
+  const events = f.evaluate(evidence, now, ['evidence-unavailable', 'final-admission']).events;
+  assert.ok(!events.some(x => x.status === 'recovery'));
+});
+
+test('matching bound candidate and comment recover evidence and admission', () => {
+  const now = new Date('2026-11-10T17:30:00Z');
+  const f = fixture({ artifact: true,
+    run: { ...receiver, status: 'completed', conclusion: 'success' },
+    proofValue: { ...proof, knownGood: true, integrity: 'match', publishedDate: day } });
+  const evidence = f.collect(now);
+  assert.equal(evidence.admittedBeforeCutoff, true);
+  assert.equal(evidence.dispatchEvidence, 'bound');
+  const events = f.evaluate(evidence, now, ['evidence-unavailable', 'final-admission']).events;
+  assert.deepEqual(Array.from(events, x => [x.key, x.status]),
+    [['evidence-unavailable', 'recovery'], ['final-admission', 'recovery']]);
+});
+
+test('receiver failure and contradictory complete binding still expose public mismatch', () => {
+  const now = new Date('2026-11-10T15:20:00Z');
+  const f = fixture({ artifact: true,
+    run: { ...receiver, status: 'completed', conclusion: 'failure' },
+    proofValue: { ...proof, integrity: 'mismatch' } });
+  const evidence = f.collect(now);
+  assert.equal(evidence.failed, true);
+  const events = f.evaluate(evidence, now).events;
+  assert.ok(events.some(x => x.key === 'workflow-failure' && x.status === 'alert'));
+  assert.ok(events.some(x => x.key === 'publication-integrity' && x.status === 'alert'));
+});
+
 test('failed writer and claimed complete stage become explicit conflict and failure', () => {
   const f = fixture({ artifact: true, run: { ...receiver, status: 'completed', conclusion: 'success' },
-    writerRun: { ...writer, conclusion: 'failure' } });
+    writerRun: { ...writer, conclusion: 'failure' },
+    proofValue: { ...proof, knownGood: true, integrity: 'match', publishedDate: day } });
   const now = new Date('2026-11-10T15:20:00Z');
   const evidence = f.collect(now);
   assert.equal(evidence.dispatchEvidence, 'conflict');
   assert.equal(evidence.stage, 'evidence-conflict');
   assert.equal(evidence.failed, true);
   assert.ok(f.evaluate(evidence, now).events.some(x => x.key === 'workflow-failure'));
+  assert.ok(!f.evaluate(evidence, now, ['workflow-failure', 'evidence-unavailable']).events.some(x =>
+    x.status === 'recovery'));
 });

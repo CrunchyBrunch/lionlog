@@ -25,6 +25,12 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
   const day = Utilities.formatDate(now, 'America/New_York', 'yyyy-MM-dd');
   const api = function (route) { return llMonitorGetJson('https://api.github.com/' + route, token); };
   const event = mode === 'schedule' ? 'schedule' : 'discussion_comment';
+  const result = Object.assign({}, publicationProof, { date: day, mode: mode,
+    dispatchEvidence: 'complete', stage: 'absent', startedAt: null, failed: false,
+    terminal: false, admittedBeforeCutoff: publicationProof.admittedBeforeCutoff ?? null, receiverRunId: null,
+    receiverStatus: null, candidateCorrelated: false,
+    candidateRunId: null, promotionRunId: null, checkpointRunId: null });
+  try {
   const observed = llMonitorRuns(api, event, day, LL_MONITOR_PATH, mode === 'external' ? botLogin : null);
   const runs = mode === 'external' ? observed.filter(function (candidate) {
     if (candidate.actor?.id !== botId || candidate.actor.login !== botLogin) {
@@ -34,10 +40,6 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
       && candidate.display_title.endsWith(' ' + discussionId + ' lionlog-dispatch.v1:' + day);
   }) : observed;
   if (runs.length > 1) throw new Error('Multiple same-day receiver opportunities.');
-  const result = Object.assign({}, publicationProof, { date: day, mode: mode,
-    dispatchEvidence: 'complete', stage: 'absent', startedAt: null, failed: false,
-    terminal: false, admittedBeforeCutoff: publicationProof.admittedBeforeCutoff ?? null, receiverRunId: null,
-    candidateRunId: null, promotionRunId: null, checkpointRunId: null });
   if (mode === 'external') {
     result.skippedLegacyRunIds = [];
     for (const old of llMonitorRuns(api, 'schedule', day, LL_MONITOR_PATH)) {
@@ -60,6 +62,7 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
     throw new Error('Receiver run readback differs from history.');
   }
   result.receiverRunId = run.id;
+  result.receiverStatus = run.status;
   result.failed = run.status === 'completed' && run.conclusion !== 'success';
   result.terminal = run.status === 'completed';
   result.startedAt = llMonitorTime(run.run_started_at, day);
@@ -69,12 +72,13 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
     return result; // Existing signed producer admission/public proof remains authoritative.
   }
   result.admittedBeforeCutoff = null; // Only the existing producer proof can establish admission.
+  const title = /^LionLog wake ([1-9]\d*) (DC_[A-Za-z0-9_-]+) (D_[A-Za-z0-9_-]+) (lionlog-dispatch\.v1:\d{4}-\d{2}-\d{2})$/.exec(run.display_title || '');
   if (run.head_sha !== expectedSha || run.actor?.id !== botId || run.actor.login !== botLogin
-    || !/^LionLog wake [1-9]\d* DC_[A-Za-z0-9_-]+ D_[A-Za-z0-9_-]+ lionlog-dispatch\.v1:\d{4}-\d{2}-\d{2}$/.test(run.display_title || '')
-    || !run.display_title.endsWith(' ' + discussionId + ' lionlog-dispatch.v1:' + day)) {
+    || !title || title[3] !== discussionId || title[4] !== 'lionlog-dispatch.v1:' + day) {
     throw new Error('Discussion receiver identity differs from monitor pin.');
   }
-  const titleCommentId = Number(run.display_title.split(' ')[2]);
+  const titleCommentId = Number(title[1]);
+  const titleCommentNodeId = title[2];
   if (!Number.isSafeInteger(titleCommentId)) throw new Error('Receiver comment ID invalid.');
   // Histories offer live stage hints while the receiver is running. They are never admission proof.
   const producer = llMonitorRuns(api, 'workflow_dispatch', day, '.github/workflows/build-live-menu-artifact.yml');
@@ -108,7 +112,7 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
     || item.workflow_run?.id !== run.id || item.workflow_run?.head_sha !== expectedSha) {
     throw new Error('Receiver binding artifact identity invalid.');
   }
-  const binding = llMonitorBinding(item, token, run.id, expectedSha, day, titleCommentId);
+  const binding = llMonitorBinding(item, token, run.id, expectedSha, day, titleCommentId, titleCommentNodeId);
   if (run.status === 'completed' && ((run.conclusion === 'success') !== (binding.stage === 'complete'))) {
     throw new Error('Receiver conclusion and retained stage disagree.');
   }
@@ -118,10 +122,10 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
   result.candidateRunId = binding.candidateRunId || null;
   result.promotionRunId = binding.promotionRunId || null;
   result.checkpointRunId = binding.checkpointRunId || null;
-  result.admittedBeforeCutoff = llMonitorPositive(publicationProof.candidateRunId)
+  result.candidateCorrelated = llMonitorPositive(publicationProof.candidateRunId)
     && llMonitorPositive(binding.candidateRunId)
-    && publicationProof.candidateRunId === binding.candidateRunId
-    ? publicationProof.admittedBeforeCutoff ?? null : null;
+    && publicationProof.candidateRunId === binding.candidateRunId;
+  result.admittedBeforeCutoff = result.candidateCorrelated ? publicationProof.admittedBeforeCutoff ?? null : null;
   const childRuns = {};
   for (const pair of [[binding.candidateRunId, '.github/workflows/build-live-menu-artifact.yml'],
     [binding.promotionRunId, '.github/workflows/deploy-github-pages.yml'],
@@ -146,6 +150,8 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
   const conflict = (rank >= 2 && !successful('.github/workflows/build-live-menu-artifact.yml'))
     || (rank >= 4 && !successful('.github/workflows/deploy-github-pages.yml'))
     || (rank >= 6 && !successful('.github/workflows/advance-refresh-checkpoint.yml'))
+    || (llMonitorPositive(publicationProof.candidateRunId) && llMonitorPositive(binding.candidateRunId)
+      && publicationProof.candidateRunId !== binding.candidateRunId)
     || (rank === 6 && publicationProof.completeEvidence === true
       && (!/^[a-f0-9]{64}$/.test(publicationProof.releaseId || '')
         || publicationProof.releaseId !== binding.releaseId));
@@ -155,6 +161,14 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
     result.admittedBeforeCutoff = null;
   }
   return result;
+  } catch (error) {
+    // Dispatch reads may be partial. Keep the independent signed/public and observed receiver facts.
+    result.dispatchEvidence = 'unavailable';
+    result.stage = 'evidence-unavailable';
+    result.admittedBeforeCutoff = null;
+    result.candidateCorrelated = false;
+    return result;
+  }
 }
 
 /** Keep the monitor's existing alert categories; pending binding is unknown admission, not absence. */
@@ -171,20 +185,23 @@ function evaluateLionLogDispatchPoll(e, now, previous) {
   const minute = Number(minuteText.slice(0, 2)) * 60 + Number(minuteText.slice(3));
   const proofComplete = e.completeEvidence === true;
   const pending = e.dispatchEvidence === 'binding-pending';
-  const complete = proofComplete && (e.dispatchEvidence === 'complete' || e.dispatchEvidence === 'bound');
-  const success = proofComplete && e.knownGood && e.integrity === 'match' && e.publishedDate === e.date
+  const complete = proofComplete && (e.dispatchEvidence === 'complete'
+    || (e.dispatchEvidence === 'bound' && e.candidateCorrelated === true));
+  const success = complete && e.admittedBeforeCutoff === true && e.knownGood
+    && e.integrity === 'match' && e.publishedDate === e.date
     && Number.isFinite(e.freshUntil) && now.getTime() < e.freshUntil;
   const started = Number.isFinite(e.startedAt);
-  const overdue = started && (now.getTime() >= e.startedAt + 3 * 3600000
-    || (Number.isFinite(e.freshUntil) && now.getTime() >= e.freshUntil));
+  const overdue = (started && now.getTime() >= e.startedAt + 3 * 3600000)
+    || (proofComplete && Number.isFinite(e.freshUntil) && now.getTime() >= e.freshUntil);
   transition('evidence-unavailable', complete ? false : (pending && proofComplete ? null : true));
   transition('workflow-failure', e.failed === true ? true : (success ? false : null));
   transition('morning-start', started || success ? false
-    : (complete && minute >= 600 ? true : null));
+    : (minute >= 600 && (complete || e.receiverStatus === 'queued') ? true : null));
   transition('completion-freshness', !success && (e.failed === true || overdue
     || (complete && started && e.terminal)) ? true : (success ? false : null));
   transition('final-admission', success || (complete && e.admittedBeforeCutoff === true) ? false
-    : (complete && minute >= 740 && e.admittedBeforeCutoff === false ? true : null));
+    : (minute >= 740 && (e.dispatchEvidence === 'conflict'
+      || (complete && e.admittedBeforeCutoff === false)) ? true : null));
   transition('publication-integrity', proofComplete && e.integrity === 'mismatch' ? true
     : (proofComplete && e.integrity === 'match' && e.knownGood ? false : null));
   return { open: Array.from(open), events: events };
@@ -220,7 +237,7 @@ function llMonitorRuns(api, event, day, path, actor) {
   return out.filter(x => Utilities.formatDate(new Date(x.created_at), 'America/New_York', 'yyyy-MM-dd') === day);
 }
 
-function llMonitorBinding(item, token, runId, sha, day, commentId) {
+function llMonitorBinding(item, token, runId, sha, day, commentId, commentNodeId) {
   const route = 'https://api.github.com/repos/' + LL_MONITOR_REPO + '/actions/artifacts/' + item.id + '/zip';
   const first = llMonitorFetch(route, token, false);
   if (![302, 307].includes(first.getResponseCode())) throw new Error('Artifact redirect missing.');
@@ -244,7 +261,7 @@ function llMonitorBinding(item, token, runId, sha, day, commentId) {
   const stage = stages.indexOf(value.stage);
   if (value.version !== 'lionlog.discussion-binding.v1' || stage < 0 || value.serviceDate !== day
     || value.receiverRunId !== runId || value.receiverSha !== sha || value.commentId !== commentId
-    || !/^DC_[A-Za-z0-9_-]+$/.test(value.commentNodeId || '')
+    || value.commentNodeId !== commentNodeId
     || (stage >= 1 && !llMonitorPositive(value.candidateRunId))
     || (stage < 1 && value.candidateRunId !== undefined)
     || (stage >= 3 && !llMonitorPositive(value.promotionRunId))
