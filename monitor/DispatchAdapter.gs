@@ -29,7 +29,7 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
     dispatchEvidence: 'complete', stage: 'absent', startedAt: null, failed: false,
     terminal: false, admittedBeforeCutoff: mode === 'external' ? null : (publicationProof.admittedBeforeCutoff ?? null),
     receiverRunId: null,
-    receiverStatus: null, candidateCorrelated: false,
+    receiverStatus: null, candidateCorrelated: false, sequenceComplete: false,
     candidateRunId: null, promotionRunId: null, checkpointRunId: null });
   try {
   const observed = llMonitorRuns(api, event, day, LL_MONITOR_PATH, mode === 'external' ? botLogin : null);
@@ -117,13 +117,9 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
     throw new Error('Receiver binding artifact identity invalid.');
   }
   const binding = llMonitorBinding(item, token, run.id, expectedSha, day, titleCommentId, titleCommentNodeId);
-  result.candidateCorrelated = llMonitorPositive(publicationProof.candidateRunId)
+  const candidateNumberMatches = llMonitorPositive(publicationProof.candidateRunId)
     && llMonitorPositive(binding.candidateRunId)
     && publicationProof.candidateRunId === binding.candidateRunId;
-  result.admittedBeforeCutoff = result.candidateCorrelated ? publicationProof.admittedBeforeCutoff ?? null : null;
-  if (run.status === 'completed' && ((run.conclusion === 'success') !== (binding.stage === 'complete'))) {
-    throw new Error('Receiver conclusion and retained stage disagree.');
-  }
   result.dispatchEvidence = 'bound';
   result.stage = binding.stage;
   result.commentId = binding.commentId;
@@ -143,7 +139,15 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
       throw new Error('Bound downstream run changed identity.');
     }
     childRuns[pair[1]] = child;
+    if (pair[1] === '.github/workflows/build-live-menu-artifact.yml') {
+      // A matching number is not admission proof until this candidate run has passed readback.
+      result.candidateCorrelated = candidateNumberMatches;
+      result.admittedBeforeCutoff = candidateNumberMatches ? publicationProof.admittedBeforeCutoff ?? null : null;
+    }
     if (child.status === 'completed' && child.conclusion !== 'success') result.failed = true;
+  }
+  if (run.status === 'completed' && ((run.conclusion === 'success') !== (binding.stage === 'complete'))) {
+    throw new Error('Receiver conclusion and retained stage disagree.');
   }
   const rank = ['admitted', 'candidate-dispatched', 'candidate-complete',
     'promotion-dispatched', 'promotion-complete', 'checkpoint-dispatched', 'complete'].indexOf(binding.stage);
@@ -163,6 +167,12 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
     result.dispatchEvidence = 'conflict';
     result.stage = 'evidence-conflict';
   }
+  result.sequenceComplete = rank === 6 && !conflict && run.status === 'completed'
+    && run.conclusion === 'success' && result.candidateCorrelated
+    && successful('.github/workflows/build-live-menu-artifact.yml')
+    && successful('.github/workflows/deploy-github-pages.yml')
+    && successful('.github/workflows/advance-refresh-checkpoint.yml')
+    && publicationProof.completeEvidence === true && publicationProof.releaseId === binding.releaseId;
   return result;
   } catch (error) {
     // Dispatch reads may be partial. Keep the independent signed/public and observed receiver facts.
@@ -191,7 +201,8 @@ function evaluateLionLogDispatchPoll(e, now, previous) {
   const admissionVerified = proofComplete && (e.mode === 'external'
     ? (e.candidateCorrelated === true || (e.dispatchEvidence === 'complete' && e.stage === 'absent'))
     : e.dispatchEvidence === 'complete');
-  const success = complete && e.admittedBeforeCutoff === true && e.knownGood
+  const success = complete && e.failed !== true && (e.mode !== 'external' || e.sequenceComplete === true)
+    && e.admittedBeforeCutoff === true && e.knownGood
     && e.integrity === 'match' && e.publishedDate === e.date
     && Number.isFinite(e.freshUntil) && now.getTime() < e.freshUntil;
   const started = Number.isFinite(e.startedAt);

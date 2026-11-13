@@ -332,3 +332,60 @@ test('proven non-admission still raises final-admission after a later writer fai
   assert.ok(f.evaluate(evidence, now).events.some(x =>
     x.key === 'final-admission' && x.status === 'alert'));
 });
+
+const candidateDispatched = { ...binding, stage: 'candidate-dispatched',
+  promotionRunId: undefined, checkpointRunId: undefined, releaseId: undefined };
+const checkpointDispatched = { ...binding, stage: 'checkpoint-dispatched', releaseId: undefined };
+const freshProof = { ...proof, knownGood: true, integrity: 'match', publishedDate: day };
+
+for (const row of [
+  { label: 'wrong candidate SHA', candidateRun: { ...candidate, head_sha: 'd'.repeat(40) },
+    bindingValue: candidateDispatched, run: receiver, writerRun: writer, recovery: false },
+  { label: 'wrong candidate workflow', candidateRun: { ...candidate, path: '.github/workflows/other.yml' },
+    bindingValue: candidateDispatched, run: receiver, writerRun: writer, recovery: false },
+  { label: 'candidate rerun', candidateRun: { ...candidate, run_attempt: 2 },
+    bindingValue: candidateDispatched, run: receiver, writerRun: writer, recovery: false },
+  { label: 'missing signed candidate identity', candidateRun: candidate,
+    bindingValue: candidateDispatched, run: receiver, writerRun: writer,
+    proofValue: { ...freshProof, candidateRunId: undefined }, recovery: false },
+  { label: 'verified candidate then failed writer', candidateRun: candidate,
+    bindingValue: checkpointDispatched, run: { ...receiver, status: 'completed', conclusion: 'failure' },
+    writerRun: { ...writer, conclusion: 'failure' }, recovery: true }
+]) {
+  test(`final-admission recovery: ${row.label}`, () => {
+    const now = new Date('2026-11-10T17:30:00Z');
+    const f = fixture({ artifact: true, candidateRun: row.candidateRun,
+      bindingValue: row.bindingValue, run: row.run, writerRun: row.writerRun,
+      proofValue: row.proofValue ?? freshProof });
+    const evidence = f.collect(now);
+    const events = f.evaluate(evidence, now, ['final-admission']).events;
+    assert.equal(events.some(x => x.key === 'final-admission' && x.status === 'recovery'),
+      row.recovery);
+  });
+}
+
+for (const row of [
+  { label: 'failed writer at checkpoint-dispatched',
+    run: { ...receiver, status: 'completed', conclusion: 'failure' },
+    bindingValue: checkpointDispatched, writerRun: { ...writer, conclusion: 'failure' },
+    now: '2026-11-10T17:30:00Z', recovery: false, failure: true },
+  { label: 'unknown writer at checkpoint-dispatched', run: receiver,
+    bindingValue: checkpointDispatched, writerRun: { ...writer, status: 'queued', conclusion: null },
+    now: '2026-11-10T11:30:00Z', recovery: false, failure: false },
+  { label: 'verified complete sequence',
+    run: { ...receiver, status: 'completed', conclusion: 'success' },
+    bindingValue: binding, writerRun: writer,
+    now: '2026-11-10T17:30:00Z', recovery: true, failure: false }
+]) {
+  test(`completion-freshness recovery: ${row.label}`, () => {
+    const now = new Date(row.now);
+    const f = fixture({ artifact: true, run: row.run, bindingValue: row.bindingValue,
+      writerRun: row.writerRun, proofValue: freshProof });
+    const evidence = f.collect(now);
+    const events = f.evaluate(evidence, now, ['completion-freshness']).events;
+    assert.equal(events.some(x => x.key === 'completion-freshness' && x.status === 'recovery'),
+      row.recovery);
+    assert.equal(events.some(x => x.key === 'workflow-failure' && x.status === 'alert'),
+      row.failure);
+  });
+}
