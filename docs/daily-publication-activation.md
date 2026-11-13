@@ -1,5 +1,7 @@
 # Daily publication: owner activation and failure handoff
 
+> Native-schedule handoff. The draft Discussions receiver retains this cron by default and uses an explicit mode switch at cutover. For the new route and staged activation, see [Discussions dispatcher cutover](discussions-dispatcher-cutover.md). The source, checkpoint, production publication and manual-operation prerequisites below still apply.
+
 Status: engineering preparation only. The scheduler and automatic jobs are inert until the owner applies the settings below. No live PSU request, deployment, state write, environment approval, or settings change was made for this PR.
 
 ## Exact route

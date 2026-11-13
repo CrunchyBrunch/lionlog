@@ -1,5 +1,7 @@
 # LionLog v0.2 production publication runbook
 
+> The native daily schedule section below remains the default until an explicit mode switch. The draft external Discussions receiver and its cutover gates are documented in [Discussions dispatcher cutover](../discussions-dispatcher-cutover.md). Candidate, promotion, checkpoint, source and manual controls in this runbook govern both routes.
+
 Date: 2026-10-15
 Status: daily automation engineering prepared; owner activation and production operations remain pending.
 
