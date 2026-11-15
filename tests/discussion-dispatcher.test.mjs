@@ -2,17 +2,19 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
+import { generateKeyPairSync, sign, verify } from 'node:crypto';
 
 const source = readFileSync(new URL('../dispatcher/Code.gs', import.meta.url), 'utf8');
 const day = '2026-11-10';
 const claim = `lionlog-dispatch-claim:${day}`;
 
-function fixture({ minute = '05:17', commentStatus = 200, lockAvailable = true } = {}) {
+function fixture({ minute = '05:17', commentStatus = 200, lockAvailable = true, privateKey,
+  computeRsaSha256Signature = () => [1, 2, 3] } = {}) {
   const values = new Map([
     ['LIONLOG_DISPATCH_ACTIVATION', 'ENABLE_LIONLOG_EXTERNAL_DISPATCH'],
     ['LIONLOG_DISCUSSION_NODE_ID', 'D_kwABC123'], ['LIONLOG_APP_ID', '123'],
     ['LIONLOG_INSTALLATION_ID', '456'],
-    ['LIONLOG_APP_PRIVATE_KEY_PEM', '-----BEGIN RSA PRIVATE KEY-----\nfixture']
+    ['LIONLOG_APP_PRIVATE_KEY_PEM', privateKey ?? '-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----']
   ]);
   const posts = [];
   let lockHeld = false;
@@ -25,7 +27,8 @@ function fixture({ minute = '05:17', commentStatus = 200, lockAvailable = true }
     Utilities: {
       formatDate: (_date, zone, format) => { assert.equal(zone, 'America/New_York');
         return format === 'yyyy-MM-dd' ? day : minute; },
-      base64EncodeWebSafe: () => 'abc', computeRsaSha256Signature: () => [1, 2, 3]
+      base64EncodeWebSafe: (input) => Buffer.from(input).toString('base64url'),
+      computeRsaSha256Signature
     },
     LockService: { getScriptLock: () => ({ tryLock: () => { if (!lockAvailable) return false;
       lockHeld = true; return true; }, releaseLock: () => { lockHeld = false; } }) },
@@ -72,6 +75,34 @@ test('one durable claim precedes exactly one comment POST', () => {
   assert.equal(JSON.parse(f.values.get(claim)).state, 'posted');
   f.run();
   assert.equal(f.posts.length, 2);
+});
+
+test('PKCS#8 disposable key signs a verifiable GitHub App JWT', () => {
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048,
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    publicKeyEncoding: { type: 'spki', format: 'pem' } });
+  const f = fixture({ privateKey, computeRsaSha256Signature: (input, key) => {
+    assert.match(key, /^-----BEGIN PRIVATE KEY-----/);
+    return [...sign('RSA-SHA256', Buffer.from(input), key)];
+  } });
+  f.run();
+  const jwt = f.posts[0].options.headers.Authorization.slice('Bearer '.length);
+  const [header, payload, signature] = jwt.split('.');
+  assert.deepEqual(JSON.parse(Buffer.from(header, 'base64url')), { alg: 'RS256', typ: 'JWT' });
+  assert.equal(JSON.parse(Buffer.from(payload, 'base64url')).iss, '123');
+  assert.equal(verify('RSA-SHA256', Buffer.from(`${header}.${payload}`), publicKey,
+    Buffer.from(signature, 'base64url')), true);
+  assert.equal(f.posts.length, 2);
+});
+
+test('original PKCS#1 App key is rejected before claiming a date', () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048,
+    privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+    publicKeyEncoding: { type: 'spki', format: 'pem' } });
+  const f = fixture({ privateKey });
+  assert.throws(f.run, /configuration is incomplete/);
+  assert.equal(f.values.has(claim), false);
+  assert.equal(f.posts.length, 0);
 });
 
 test('uncertain POST consumes the day without retry', () => {

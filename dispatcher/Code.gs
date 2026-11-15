@@ -32,7 +32,7 @@ function dispatchLionLogWake() {
     const installationId = properties.getProperty('LIONLOG_INSTALLATION_ID');
     const privateKey = properties.getProperty('LIONLOG_APP_PRIVATE_KEY_PEM');
     if (!/^D_[A-Za-z0-9_-]+$/.test(discussionId || '') || !/^[1-9]\d*$/.test(appId || '')
-      || !/^[1-9]\d*$/.test(installationId || '') || !/^-----BEGIN RSA PRIVATE KEY-----/.test(privateKey || '')) {
+      || !/^[1-9]\d*$/.test(installationId || '') || !/^-----BEGIN PRIVATE KEY-----[\s\S]+-----END PRIVATE KEY-----\s*$/.test(privateKey || '')) {
       throw new Error('Dispatcher configuration is incomplete.');
     }
     const claimKey = 'lionlog-dispatch-claim:' + day;

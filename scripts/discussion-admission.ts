@@ -45,13 +45,15 @@ export async function verifyDiscussionAdmission(options: {
     throw new Error("Discussion wake crossed the New York service day.");
   }
   const readback = await api.graphql(`query($id:ID!){node(id:$id){... on DiscussionComment{
-    id databaseId body createdAt updatedAt discussion{id} author{login}}}}`, { id: comment.node_id! }) as {
+    id databaseId body createdAt updatedAt discussion{id}
+    author{__typename login ... on Bot{databaseId}}}}}`, { id: comment.node_id! }) as {
     errors?: unknown;
     data?: { node?: { id?: string; databaseId?: number; body?: string; createdAt?: string;
-      updatedAt?: string; discussion?: { id?: string }; author?: { login?: string } } } };
+      updatedAt?: string; discussion?: { id?: string }; author?: GraphqlBotAuthor } } };
   const node = readback?.data?.node;
   if (readback?.errors !== undefined || node?.id !== comment.node_id || node.databaseId !== comment.id || node.body !== comment.body
-    || node.discussion?.id !== options.discussionNodeId || node.author?.login !== comment.user.login
+    || node.discussion?.id !== options.discussionNodeId
+    || !isExpectedGraphqlBot(node.author, options.botUserId, comment.user.login)
     || Date.parse(node.createdAt ?? "") !== Date.parse(comment.created_at!)
     || Date.parse(node.updatedAt ?? "") !== Date.parse(comment.created_at!)) {
     throw new Error("Discussion comment readback is missing or changed.");
@@ -68,6 +70,14 @@ export async function verifyDiscussionAdmission(options: {
     throw new Error("Discussion receiver run identity is invalid.");
   }
   return { commentId: comment.id!, commentNodeId: comment.node_id!, serviceDate };
+}
+export type GraphqlBotAuthor = { __typename?: string; databaseId?: number; login?: string };
+/** GitHub's GraphQL Bot login can omit the [bot] suffix used by webhooks and Actions. */
+export function isExpectedGraphqlBot(author: GraphqlBotAuthor | undefined, botId: number,
+  actionsLogin: string | undefined): boolean {
+  return author?.__typename === "Bot" && author.databaseId === botId
+    && typeof actionsLogin === "string" && /^[-A-Za-z0-9]+\[bot\]$/.test(actionsLogin)
+    && (author.login === actionsLogin.slice(0, -5) || author.login === actionsLogin);
 }
 function positive(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) > 0; }
 function canonical(value: unknown): value is string {
