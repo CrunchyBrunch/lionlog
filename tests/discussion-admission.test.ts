@@ -8,21 +8,21 @@ import { STANDING_PUBLICATION_POLICY } from "../scripts/supported-pages-release.
 const day = "2026-11-10";
 const created = "2026-11-10T10:17:00Z";
 const commentId = 12345;
-const botId = 654321;
+const botId = 356656801;
 const discussionId = "D_kwABC123";
 const receiverSha = "a".repeat(40);
 const body = `lionlog-dispatch.v1:${day}`;
 const wake: DiscussionWake = { action: "created", repository: { id: 1346360244, full_name: "CrunchyBrunch/lionlog" },
-  discussion: { id: 88, node_id: discussionId }, sender: { id: botId, login: "lionlog-dispatch[bot]" },
+  discussion: { id: 88, node_id: discussionId }, sender: { id: botId, login: "lionlog-daily-menu-dispatcher[bot]" },
   comment: { id: commentId, node_id: "DC_kwABC123", body, created_at: created, updated_at: created,
-    user: { id: botId, login: "lionlog-dispatch[bot]" } } };
+    user: { id: botId, login: "lionlog-daily-menu-dispatcher[bot]" } } };
 const receiver = { id: 77, path: ".github/workflows/daily-publication.yml", event: "discussion_comment",
   run_attempt: 1, head_sha: receiverSha, head_branch: "main", status: "in_progress",
   actor: { id: botId }, display_title: `LionLog wake ${commentId} DC_kwABC123 ${discussionId} ${body}`,
   created_at: "2026-11-10T10:18:00Z" };
 const readback = { data: { node: { id: "DC_kwABC123", databaseId: commentId, body,
   createdAt: created, updatedAt: created, discussion: { id: discussionId },
-  author: { login: "lionlog-dispatch[bot]" } } } };
+  author: { __typename: "Bot", databaseId: botId, login: "lionlog-daily-menu-dispatcher" } } } };
 const current = { id: 77, path: receiver.path, event: receiver.event, run_attempt: 1, created_at: receiver.created_at };
 
 function fixture(change: { event?: DiscussionWake; receiver?: Record<string, unknown>;
@@ -40,7 +40,9 @@ function fixture(change: { event?: DiscussionWake; receiver?: Record<string, unk
         ?? { total_count: 0, workflow_runs: [] };
       throw new Error(`Unexpected route ${route}`);
     },
-    graphql: async () => { reads += 1; return change.readback ?? readback; }
+    graphql: async (query) => { reads += 1;
+      assert.match(query, /author\{__typename login \.\.\. on Bot\{databaseId\}\}/);
+      return change.readback ?? readback; }
   };
   const options = { api, event: change.event ?? wake, botUserId: botId, discussionNodeId: discussionId,
     receiverRunId: 77, receiverSha, now: new Date("2026-11-10T10:20:00Z") };
@@ -50,6 +52,18 @@ function fixture(change: { event?: DiscussionWake; receiver?: Record<string, unk
 test("exact bot comment, readback and receiver run authenticate", async () => {
   assert.deepEqual(await verifyDiscussionAdmission(fixture().options),
     { commentId, commentNodeId: "DC_kwABC123", serviceDate: day });
+});
+
+test("GraphQL author must be the webhook's numeric Bot identity", async () => {
+  for (const author of [
+    { ...readback.data.node.author, databaseId: botId + 1 },
+    { ...readback.data.node.author, __typename: "User" },
+    { ...readback.data.node.author, login: "other-dispatcher" },
+    { login: "lionlog-daily-menu-dispatcher" },
+  ]) {
+    const changed = { data: { node: { ...readback.data.node, author } } };
+    await assert.rejects(verifyDiscussionAdmission(fixture({ readback: changed }).options), /readback/);
+  }
 });
 
 test("spoofed or edited event is rejected before network reads", async () => {
@@ -108,7 +122,7 @@ test("orchestrator binds an admitted comment before checkpoint read and never di
     standingPolicy: STANDING_PUBLICATION_POLICY, writerId: 42,
     now: new Date("2026-11-10T10:20:00Z"), discussionWake: wake,
     dispatchMode: "external",
-    botUserId: botId, botLogin: "lionlog-dispatch[bot]", discussionNodeId: discussionId,
+    botUserId: botId, botLogin: "lionlog-daily-menu-dispatcher[bot]", discussionNodeId: discussionId,
     binding: async (value) => { binding.push(value); },
     loadCheckpoint: async () => { throw new Error("seed absent"); }
   }), /seed absent/);

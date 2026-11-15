@@ -5,8 +5,8 @@ import type { DiscussionEvidenceApi, DiscussionWake } from "../scripts/discussio
 
 const day = "2026-11-10";
 const sha = "a".repeat(40);
-const botId = 42;
-const botLogin = "lionlog-dispatch[bot]";
+const botId = 356656801;
+const botLogin = "lionlog-daily-menu-dispatcher[bot]";
 const discussion = "D_kwABC123";
 const commentNode = "DC_kwABC123";
 const body = `lionlog-dispatch.v1:${day}`;
@@ -24,7 +24,7 @@ const wake: DiscussionWake = { action: "created",
   comment: { id: 12345, node_id: commentNode, body, created_at: created, updated_at: created,
     user: { id: botId, login: botLogin } } };
 const node = { id: commentNode, databaseId: 12345, body, createdAt: created, updatedAt: created,
-  author: { login: botLogin }, discussion: { id: discussion,
+  author: { __typename: "Bot", databaseId: botId, login: "lionlog-daily-menu-dispatcher" }, discussion: { id: discussion,
     repository: { databaseId: 1346360244, nameWithOwner: "CrunchyBrunch/lionlog" } } };
 
 type ScheduleRun = Omit<typeof schedule, "conclusion"> & { conclusion: string | null };
@@ -38,12 +38,15 @@ function fixture(scheduleRuns: ScheduleRun[], botRuns: ExternalRun[]) {
       if (route.endsWith("/runs/77")) return botRuns.find((run) => run.id === 77);
       if (route.includes("/runs?event=schedule")) return { total_count: scheduleRuns.length, workflow_runs: scheduleRuns };
       if (route.includes("/runs?event=discussion_comment")) {
-        assert.match(route, /actor=lionlog-dispatch%5Bbot%5D/);
+        assert.match(route, /actor=lionlog-daily-menu-dispatcher%5Bbot%5D/);
         return { total_count: botRuns.length, workflow_runs: botRuns };
       }
       throw new Error(`Unexpected ${route}`);
     },
-    graphql: async (_query, variables) => ({ data: { node: variables.id === commentNode ? node : null } })
+    graphql: async (query, variables) => {
+      assert.match(query, /author\{__typename login \.\.\. on Bot\{databaseId\}\}/);
+      return { data: { node: variables.id === commentNode ? node : null } };
+    }
   };
   const common = { api, repository: "CrunchyBrunch/lionlog",
     workflowRef: "CrunchyBrunch/lionlog/.github/workflows/daily-publication.yml@refs/heads/main",
@@ -67,7 +70,14 @@ test("first App receiver survives crash or ambiguous downstream response and blo
   assert.deepEqual(await assertSharedOpportunity(first.app), { serviceDate: day });
   const later = fixture([schedule], [failed]);
   await assert.rejects(assertSharedOpportunity(later.cron), /another trusted/);
-  assert.ok(later.routes.some((route) => route.includes("actor=lionlog-dispatch%5Bbot%5D")));
+  assert.ok(later.routes.some((route) => route.includes("actor=lionlog-daily-menu-dispatcher%5Bbot%5D")));
+});
+
+test("history GraphQL author must match the pinned numeric Bot identity", async () => {
+  const f = fixture([], [external]);
+  f.api.graphql = async () => ({ data: { node: { ...node,
+    author: { ...node.author, databaseId: botId + 1 } } } });
+  await assert.rejects(assertSharedOpportunity(f.app), /readback/);
 });
 
 test("simultaneously visible schedule and App opportunities both fail closed", async () => {

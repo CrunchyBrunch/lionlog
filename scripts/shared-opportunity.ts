@@ -2,8 +2,8 @@
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { RECEIVER_PATH, verifyDiscussionAdmission, type DiscussionEvidenceApi,
-  type DiscussionWake } from "./discussion-admission.ts";
+import { RECEIVER_PATH, isExpectedGraphqlBot, verifyDiscussionAdmission, type DiscussionEvidenceApi,
+  type DiscussionWake, type GraphqlBotAuthor } from "./discussion-admission.ts";
 
 const REPOSITORY = "CrunchyBrunch/lionlog";
 const SHA = /^[a-f0-9]{40}$/;
@@ -71,14 +71,14 @@ export async function assertSharedOpportunity(options: {
     const id = Number(match[1]);
     if (!positive(id)) throw new Error("Bot comment ID is invalid.");
     const readback = await api.graphql(`query($id:ID!){node(id:$id){... on DiscussionComment{
-      id databaseId body createdAt updatedAt author{login}
+      id databaseId body createdAt updatedAt author{__typename login ... on Bot{databaseId}}
       discussion{id repository{databaseId nameWithOwner}}}}}`, { id: match[2] }) as {
       errors?: unknown; data?: { node?: { id?: string; databaseId?: number; body?: string;
-        createdAt?: string; updatedAt?: string; author?: { login?: string };
+        createdAt?: string; updatedAt?: string; author?: GraphqlBotAuthor;
         discussion?: { id?: string; repository?: { databaseId?: number; nameWithOwner?: string } } } } };
     const node = readback?.data?.node;
     if (readback?.errors !== undefined || node?.id !== match[2] || node.databaseId !== id
-      || node.author?.login !== options.botLogin || !canonical(node.createdAt)
+      || !isExpectedGraphqlBot(node.author, options.botId!, options.botLogin) || !canonical(node.createdAt)
       || !canonical(node.updatedAt)) throw new Error("Bot comment history readback is incomplete.");
     if (node.discussion?.id !== options.discussionNodeId
       || node.discussion.repository?.databaseId !== 1346360244
