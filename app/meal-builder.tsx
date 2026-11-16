@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { liveMenuBrowser, sampleMenuBrowser } from "../application/browser-container.ts";
 import { activeServiceDate, createCoalescedRevalidation, menuForDisplay, millisecondsUntilMenuRevalidation, millisecondsUntilNextServiceDate } from "../application/service-date.ts";
-import type { DiningHall, DiningVenue, MealPeriod, Menu } from "../domain/dining.ts";
+import type { DiningHall, DiningVenue, MealPeriod, Menu, MenuSelection } from "../domain/dining.ts";
 
 export interface MealBuilderInitialData {
   readonly halls: readonly DiningHall[];
@@ -29,12 +29,21 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
   const contextRequestId = useRef(0);
   const revalidationQueue = useRef<ReturnType<typeof createCoalescedRevalidation> | null>(null);
   const [selectedVenueIds, setSelectedVenueIds] = useState<readonly string[]>([]);
-  const [venues, setVenues] = useState(initial.venues);
-  const [menu, setMenu] = useState(initial.menu);
+  const [selection, setSelection] = useState<MenuSelection>({ menu: initial.menu, venues: initial.venues });
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const menuBrowser = dataMode === "live" ? liveMenuBrowser : sampleMenuBrowser;
-  const displayMenu = menuForDisplay(menu);
+  const contextReady = selection.menu.query.hallId === hallId
+    && selection.menu.query.mealPeriodId === periodId
+    && selection.menu.query.serviceDate === serviceDate
+    && (dataMode === "sample") === (selection.menu.source.mode === "sample");
+  const displayMenu: Menu = contextReady ? menuForDisplay(selection.menu) : {
+    query: { hallId, mealPeriodId: periodId, serviceDate, venueIds: [] },
+    items: [], source: { mode: "unavailable", label: "Menu loading", retrievedAt: null },
+  };
+  const venues = contextReady ? selection.venues : [];
+  const displayedItems = displayMenu.items.filter((item) =>
+    selectedVenueIds.length === 0 || selectedVenueIds.includes(item.venueId));
   const displayMenuDelay = millisecondsUntilMenuRevalidation(displayMenu.source);
 
   const hallById = useMemo(
@@ -42,20 +51,24 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
     [halls],
   );
   const venueById = useMemo(
-    () => new Map(venues.map((venue) => [venue.id, venue])),
-    [venues],
+    () => new Map((contextReady ? selection.venues : []).map((venue) => [venue.id, venue])),
+    [contextReady, selection.venues],
   );
   const periodName = periods.find((period) => period.id === periodId)?.displayName ?? "Meal";
   const hallTimeZone = hallById.get(hallId)?.timeZone ?? "America/New_York";
-  const isSample = displayMenu.source.mode === "sample";
-  const sourceStateLabel = displayMenu.source.mode === "sample"
+  const isSample = dataMode === "sample";
+  const sourceStateLabel = !contextReady ? "Loading" : displayMenu.source.mode === "sample"
     ? "Sample"
     : displayMenu.source.mode.charAt(0).toUpperCase() + displayMenu.source.mode.slice(1);
 
   useEffect(() => {
-    setServiceDate((current) => activeServiceDate(current, dateExplicitRef.current, hallTimeZone));
+    const next = activeServiceDate(serviceDate, dateExplicitRef.current, hallTimeZone);
+    if (next !== serviceDate) {
+      setSelectedVenueIds([]);
+      setServiceDate(next);
+    }
     setActivated(true);
-  }, [hallTimeZone]);
+  }, [hallTimeZone, serviceDate]);
 
   useEffect(() => {
     if (!activated) return;
@@ -66,7 +79,11 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
         menuRequestId.current += 1;
         setIsLoading(true);
         setError(null);
-        setServiceDate((current) => activeServiceDate(current, dateExplicitRef.current, hallTimeZone));
+        const next = activeServiceDate(serviceDate, dateExplicitRef.current, hallTimeZone);
+        if (next !== serviceDate) {
+          setSelectedVenueIds([]);
+          setServiceDate(next);
+        }
         setReloadRevision((current) => current + 1);
       },
     );
@@ -105,12 +122,12 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
     if (!activated || contextLoading) return;
     let current = true;
     const requestId = ++menuRequestId.current;
-    menuBrowser.loadMenu({ hallId, mealPeriodId: periodId, serviceDate, venueIds: selectedVenueIds })
-      .then(async (nextMenu) => {
-        const nextVenues = await menuBrowser.loadVenues(hallId);
+    menuBrowser.loadSelection({ hallId, mealPeriodId: periodId, serviceDate, venueIds: [] })
+      .then((nextSelection) => {
         if (current && requestId === menuRequestId.current) {
-          setMenu(nextMenu);
-          setVenues(nextVenues);
+          setSelection(nextSelection);
+          setSelectedVenueIds((chosen) => chosen.filter((id) =>
+            nextSelection.venues.some((venue) => venue.id === id)));
         }
       })
       .catch(() => {
@@ -120,7 +137,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
         if (current && requestId === menuRequestId.current) setIsLoading(false);
       });
     return () => { current = false; };
-  }, [activated, contextLoading, hallId, menuBrowser, periodId, reloadRevision, selectedVenueIds, serviceDate]);
+  }, [activated, contextLoading, hallId, menuBrowser, periodId, reloadRevision, serviceDate]);
 
   async function chooseDataMode(nextMode: "live" | "sample") {
     if (nextMode === dataMode) return;
@@ -162,9 +179,6 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
   }
 
   function toggleVenue(venueId: string) {
-    menuRequestId.current += 1;
-    setIsLoading(true);
-    setError(null);
     setSelectedVenueIds((current) =>
       current.includes(venueId)
         ? current.filter((id) => id !== venueId)
@@ -226,6 +240,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
               setIsLoading(true);
               setError(null);
               setPeriodId(event.target.value);
+              setSelectedVenueIds([]);
             }}>
               {periods.map((period) => (
                 <option value={period.id} key={period.id}>{period.displayName}</option>
@@ -241,6 +256,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
               setIsLoading(true);
               setError(null);
               setServiceDate(event.target.value);
+              setSelectedVenueIds([]);
             }} />
           </label>
         </div>
@@ -253,9 +269,6 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
               disabled={contextLoading}
               checked={selectedVenueIds.length === 0}
               onChange={() => {
-                menuRequestId.current += 1;
-                setIsLoading(true);
-                setError(null);
                 setSelectedVenueIds([]);
               }}
             />
@@ -290,14 +303,14 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
             <p className="section-kicker">{isSample ? "Available in this sample" : `Source state: ${displayMenu.source.mode}`}</p>
             <h2 id="menu-heading">{periodName} menu</h2>
           </div>
-          <span className="item-count">{isLoading ? "Loading" : `${displayMenu.items.length} foods`}</span>
+          <span className="item-count">{isLoading || !contextReady ? "Loading" : `${displayedItems.length} foods`}</span>
         </div>
 
         {error ? (
           <div className="empty-state" role="alert">{error}</div>
-        ) : displayMenu.items.length === 0 && (!isLoading || displayMenu.source.mode === "unavailable") ? (
+        ) : displayedItems.length === 0 && (!isLoading || displayMenu.source.mode === "unavailable") ? (
           <div className="empty-state">
-            {displayMenu.source.mode === "unavailable"
+            {!contextReady ? "Loading the selected menu." : displayMenu.source.mode === "unavailable"
               ? "No validated live or saved menu is available for this context."
               : isSample
                 ? "No sample foods match this context."
@@ -305,7 +318,7 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
           </div>
         ) : (
           <div className={`menu-list ${isLoading ? "is-loading" : ""}`}>
-            {displayMenu.items.map((item) => {
+            {displayedItems.map((item) => {
               const serving = item.food.servings[0];
               return (
                 <article className="food-row" key={item.id}>
@@ -330,7 +343,9 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
 
         <div className="sample-note">
           <span aria-hidden="true">●</span>
-          {isSample ? (
+          {!contextReady ? (
+            <p>Loading the selected menu.</p>
+          ) : isSample ? (
             <p><strong>{displayMenu.source.label}.</strong> Names and nutrition are illustrative and do not represent today’s Penn State menu.</p>
           ) : (
             <p>

@@ -14,6 +14,9 @@ import {
 } from "../infrastructure/psu/publication-catalog.ts";
 import { PsuMenuProvider } from "../infrastructure/psu/psu-menu-provider.ts";
 import { PsuHttpRetriever } from "../infrastructure/psu/retriever.ts";
+import { parsePsuMenuHtml } from "../infrastructure/psu/menu-parser.ts";
+import { parsePsuNutritionHtml } from "../infrastructure/psu/nutrition-parser.ts";
+import { buildPsuSnapshot } from "../infrastructure/psu/snapshot-schema.ts";
 import { validatePsuSnapshotForBrowser } from "../infrastructure/psu/snapshot-contract.ts";
 import { MemoryPsuSnapshotStore } from "../infrastructure/psu/snapshot-store.ts";
 import { PSU_PARSER_VERSION, PSU_SNAPSHOT_VERSION } from "../infrastructure/psu/constants.ts";
@@ -87,6 +90,61 @@ test("validated remote data remains usable when browser persistence is unavailab
   const result = await store.readMenuSelection(query);
   assert.equal(result?.state, "live");
   assert.equal(result?.snapshot.snapshotId, snapshot.snapshotId);
+});
+
+test("selected food rows and stations share the exact meal/date snapshot despite failed persistence", async () => {
+  const lunch = await fixtureSnapshot();
+  const html = (await readFile(path.join(fixtureDirectory, "menu-east-lunch.sanitized.html"), "utf8"))
+    .replaceAll("8/31/26", "9/1/26").replaceAll("Lunch", "Dinner")
+    .replace("PURE", "GRILLERS").replace("Fixture Lemon Chicken", "Fixture Dinner Chicken");
+  const parsed = parsePsuMenuHtml(html, { sourceCampusId: "11", sourceDate: "9/1/26", sourceMeal: "Dinner" });
+  const nutrition = new Map();
+  for (const handle of ["900000001", "900000002"]) {
+    const detail = parsePsuNutritionHtml(await readFile(path.join(fixtureDirectory,
+      `nutrition-${handle}.sanitized.html`), "utf8"));
+    nutrition.set(handle, handle === "900000001" ? { ...detail, name: "Fixture Dinner Chicken" } : detail);
+  }
+  const dinner = buildPsuSnapshot({ ...query, serviceDate: "2026-09-01", mealPeriodId: "dinner" },
+    parsed, nutrition, { retrievedAt: new Date("2026-09-01T16:00:00.000Z"),
+      cachedAt: new Date("2026-09-01T16:00:00.000Z"), freshForMs: 18 * 60 * 60_000,
+      retainForMs: 48 * 60 * 60_000 });
+  const snapshots = [lunch, dinner];
+  const base = fixtureCatalog(lunch);
+  const catalog = validatePsuPublicationCatalog({ ...base,
+    generatedAt: "2026-09-01T16:01:00.000Z",
+    publication: { ...base.publication, expectedSnapshotCount: 2, publishedSnapshotCount: 2,
+      itemCount: snapshots.reduce((n, snapshot) => n + snapshot.coverage.publishedObservationCount, 0),
+      sourceObservationCount: snapshots.reduce((n, snapshot) => n + snapshot.coverage.sourceObservationCount, 0),
+      publishedObservationCount: snapshots.reduce((n, snapshot) => n + snapshot.coverage.publishedObservationCount, 0) },
+    serviceDates: ["2026-08-31", "2026-09-01"],
+    mealPeriods: [{ id: "lunch", displayName: "Lunch" }, { id: "dinner", displayName: "Dinner" }],
+    snapshots: [catalogEntryForSnapshot(lunch, "./snapshots/2026-08-31/11/lunch.json"),
+      catalogEntryForSnapshot(dinner, "./snapshots/2026-09-01/11/dinner.json")],
+  });
+  const applicationStore = new class extends MemoryBrowserMenuApplicationStore {
+    override async writeCatalog(): Promise<void> { throw new Error("IndexedDB write failed"); }
+    override async writeSnapshot(): Promise<void> { throw new Error("IndexedDB write failed"); }
+  }();
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/catalog.json")) return jsonResponse(catalog, url.href);
+    const snapshot = url.pathname.endsWith("/lunch.json") ? lunch
+      : url.pathname.endsWith("/dinner.json") ? dinner : null;
+    return snapshot ? jsonResponse(snapshot, url.href) : new Response("missing", { status: 404 });
+  };
+  const provider = new PsuMenuProvider(new BrowserStaticPsuSnapshotStore({
+    baseUrl: () => "https://example.test/lionlog/", fetchImpl, applicationStore,
+    now: () => new Date("2026-09-01T16:02:00.000Z"),
+  }), { now: () => new Date("2026-09-01T16:02:00.000Z") });
+  for (const snapshot of snapshots) {
+    const selected = await provider.getMenuSelection({ ...query,
+      serviceDate: snapshot.query.serviceDate, mealPeriodId: snapshot.query.mealPeriodId });
+    assert.equal(selected.menu.source.mode, snapshot.query.mealPeriodId === "lunch" ? "stale" : "live");
+    assert.deepEqual(selected.venues.map((venue) => venue.displayName),
+      snapshot.stations.map((station) => station.displayName));
+    assert.deepEqual(selected.menu.items.map((item) => item.food.name),
+      snapshot.stations.flatMap((station) => station.items.map((item) => item.name)));
+  }
 });
 
 test("tampered remote data is rejected without replacing last-known-good", async () => {

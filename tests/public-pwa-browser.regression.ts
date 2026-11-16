@@ -30,15 +30,15 @@ test("React-controlled historical date and target-wide offline reload use only v
   const snapshotGate = { release: () => {} };
   let announceSnapshotHeld = () => {};
   const snapshotHeld = new Promise<void>((resolve) => { announceSnapshotHeld = resolve; });
-  type HoldKind = "catalog" | "snapshot" | "venue";
-  let pendingHold: { kind: HoldKind; seenSnapshot: boolean; started: () => void; released: Promise<void> } | null = null;
+  type HoldKind = "catalog" | "snapshot";
+  let pendingHold: { kind: HoldKind; started: () => void; released: Promise<void> } | null = null;
   const releases: Array<() => void> = [];
   const holdNext = (kind: HoldKind) => {
     let started = () => {};
     let release = () => {};
     const reached = new Promise<void>((resolve) => { started = resolve; });
     const released = new Promise<void>((resolve) => { release = resolve; });
-    pendingHold = { kind, seenSnapshot: false, started, released };
+    pendingHold = { kind, started, released };
     releases.push(release);
     return { reached, release };
   };
@@ -46,7 +46,9 @@ test("React-controlled historical date and target-wide offline reload use only v
     await cp(path.join(projectRoot, "dist", "client"), site, { recursive: true });
     await replaceShellRevision(site);
     const snapshot = await historicalSnapshot();
+    const dinnerSnapshot = await historicalDinnerSnapshot();
     const snapshotUrl = "./snapshots/2026-08-31/11/lunch.json";
+    const dinnerSnapshotUrl = "./snapshots/2026-09-01/11/dinner.json";
     const catalog = validatePsuPublicationCatalog({
       catalogVersion: PSU_CATALOG_VERSION,
       snapshotSchemaVersion: PSU_SNAPSHOT_VERSION,
@@ -60,28 +62,33 @@ test("React-controlled historical date and target-wide offline reload use only v
         hallIds: ["psu:campus:11"],
         retrievalStartedAt: null,
         retrievalCompletedAt: null,
-        expectedSnapshotCount: 1,
-        publishedSnapshotCount: 1,
+        expectedSnapshotCount: 2,
+        publishedSnapshotCount: 2,
         recognizedEmptySnapshotCount: 0,
-        itemCount: snapshot.coverage.publishedObservationCount,
+        itemCount: snapshot.coverage.publishedObservationCount + dinnerSnapshot.coverage.publishedObservationCount,
         coverage: snapshot.coverage.status,
-        sourceObservationCount: snapshot.coverage.sourceObservationCount,
-        publishedObservationCount: snapshot.coverage.publishedObservationCount,
+        sourceObservationCount: snapshot.coverage.sourceObservationCount + dinnerSnapshot.coverage.sourceObservationCount,
+        publishedObservationCount: snapshot.coverage.publishedObservationCount + dinnerSnapshot.coverage.publishedObservationCount,
         omissions: snapshot.coverage.omissions,
         requestCount: null,
         nutritionRequests: null,
         nutritionCacheHits: null,
       },
-      serviceDates: ["2026-08-31"],
+      serviceDates: ["2026-08-31", "2026-09-01"],
       halls: [{ id: "psu:campus:11", displayName: getPsuHall("psu:campus:11").displayName }],
-      mealPeriods: [{ id: "lunch", displayName: getPsuMealPeriod("lunch").displayName }],
-      snapshots: [catalogEntryForSnapshot(snapshot, snapshotUrl)],
+      mealPeriods: [{ id: "lunch", displayName: getPsuMealPeriod("lunch").displayName },
+        { id: "dinner", displayName: getPsuMealPeriod("dinner").displayName }],
+      snapshots: [catalogEntryForSnapshot(snapshot, snapshotUrl),
+        catalogEntryForSnapshot(dinnerSnapshot, dinnerSnapshotUrl)],
     });
     const dataRoot = path.join(site, "menu-data", "v2");
     const snapshotPath = path.join(dataRoot, "snapshots", "2026-08-31", "11", "lunch.json");
+    const dinnerPath = path.join(dataRoot, "snapshots", "2026-09-01", "11", "dinner.json");
     await mkdir(path.dirname(snapshotPath), { recursive: true });
+    await mkdir(path.dirname(dinnerPath), { recursive: true });
     await writeFile(path.join(dataRoot, "catalog.json"), `${JSON.stringify(catalog)}\n`);
     await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`);
+    await writeFile(dinnerPath, `${JSON.stringify(dinnerSnapshot)}\n`);
     await writeFile(path.join(site, "release.json"), `${JSON.stringify({ releaseId })}\n`);
 
     const server = createServer(async (request, response) => {
@@ -99,11 +106,9 @@ test("React-controlled historical date and target-wide offline reload use only v
           await new Promise<void>((resolve) => { snapshotGate.release = resolve; });
         }
         const hold = pendingHold;
-        if (hold && relative.endsWith("/snapshots/2026-08-31/11/lunch.json")) hold.seenSnapshot = true;
         if (hold && (
           (hold.kind === "catalog" && relative.endsWith("/catalog.json"))
           || (hold.kind === "snapshot" && relative.endsWith("/snapshots/2026-08-31/11/lunch.json"))
-          || (hold.kind === "venue" && hold.seenSnapshot && relative.endsWith("/catalog.json"))
         )) {
           pendingHold = null;
           hold.started();
@@ -153,6 +158,19 @@ test("React-controlled historical date and target-wide offline reload use only v
               window.dispatchEvent(new Event("online"));
             })()`);
           };
+          await evaluatePage(`([...document.querySelectorAll("button")]
+            .find((button) => button.textContent === "Sample demo")).click()`);
+          await waitForState((state) => (state as { samplePressed?: boolean; itemNames?: unknown[] }).samplePressed === true
+            && (state as { itemNames?: unknown[] }).itemNames!.length > 0);
+          await evaluatePage(`document.querySelector(".venue-option input").click()`);
+          assert.equal(await evaluatePage(`document.querySelectorAll(".venue-option input:checked").length`), 1);
+          await advance("2026-09-17T05:01:00.000Z");
+          await waitForState((state) => state.selectedDate === "2026-09-17");
+          assert.equal(await evaluatePage(`document.querySelectorAll(".venue-option input:checked").length`), 0,
+            "automatic service-date rollover clears the old station filter");
+          await evaluatePage(`([...document.querySelectorAll("button")]
+            .find((button) => button.textContent === "PSU snapshots")).click()`);
+          await waitForState((state) => (state as { livePressed?: boolean }).livePressed === true);
           await advance("2026-09-17T05:01:00.000Z");
           assert.equal((await waitForState((state) => state.selectedDate === "2026-09-17")).selectedDate, "2026-09-17");
           const chooseDate = async (date: string) => evaluatePage(`(() => {
@@ -183,6 +201,30 @@ test("React-controlled historical date and target-wide offline reload use only v
           assert.equal((newerChoice as { itemNames?: unknown[] }).itemNames?.length, 0);
           await chooseDate("2026-08-31");
           assert.equal((await waitForState((state) => state.selectedDate === "2026-08-31")).selectedDate, "2026-08-31");
+          await waitForState((state) => (state as { itemNames?: unknown[] }).itemNames?.length === itemNames.length);
+          assert.deepEqual(await evaluatePage(`([...document.querySelectorAll(".venue-option span")].map((node) => node.textContent))`),
+            snapshot.stations.map((station) => station.displayName));
+          await evaluatePage(`document.querySelector(".venue-option input").click()`);
+          await waitForState((state) => (state as { itemNames?: unknown[] }).itemNames?.length === snapshot.stations[0].items.length);
+          await evaluatePage(`(() => { const select = document.querySelectorAll("select")[1];
+            const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set;
+            setter.call(select, "dinner"); select.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+          await chooseDate("2026-09-01");
+          await waitForState((state) => state.selectedDate === "2026-09-01"
+            && (state as { itemNames?: string[] }).itemNames?.includes("Fixture Dinner Chicken") === true);
+          assert.deepEqual(await evaluatePage(`([...document.querySelectorAll(".venue-option span")].map((node) => node.textContent))`),
+            dinnerSnapshot.stations.map((station) => station.displayName));
+          assert.equal(await evaluatePage(`document.querySelectorAll(".venue-option input:checked").length`), 0,
+            "meal/date change clears the old station filter");
+          assert.equal(await evaluatePage(`document.querySelector(".food-row .food-copy p").textContent.includes("GRILLERS")`), true);
+          await evaluatePage(`document.querySelector(".venue-option input").click()`);
+          await chooseDate("2026-08-31");
+          await evaluatePage(`(() => { const select = document.querySelectorAll("select")[1];
+            const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set;
+            setter.call(select, "lunch"); select.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+          await waitForState((state) => state.selectedDate === "2026-08-31"
+            && (state as { itemNames?: unknown[] }).itemNames?.length === itemNames.length);
+          assert.equal(await evaluatePage(`document.querySelectorAll(".venue-option input:checked").length`), 0);
           await advance("2026-09-18T05:01:00.000Z");
           await evaluatePage("new Promise((resolve) => setTimeout(resolve, 350))");
           assert.equal((await waitForState(() => true)).selectedDate, "2026-08-31");
@@ -208,15 +250,15 @@ test("React-controlled historical date and target-wide offline reload use only v
 
           await advance("2026-09-17T05:59:55.000Z", true);
           await waitForState((state) => (state as { sourceState?: string }).sourceState === "Source state: live");
-          const venueHold = holdNext("venue");
-          await Promise.race([venueHold.reached, new Promise<void>((_, reject) => setTimeout(() => reject(new Error("venue timer request did not start")), 8_000))]);
+          const snapshotHold = holdNext("snapshot");
+          await Promise.race([snapshotHold.reached, new Promise<void>((_, reject) => setTimeout(() => reject(new Error("snapshot timer request did not start")), 8_000))]);
           await evaluatePage("new Promise((resolve) => setTimeout(resolve, 250))");
           const stale = await waitForState(() => true) as { sourceState?: string; itemNames?: unknown[] };
-          assert.equal(stale.sourceState, "Source state: stale", "venue catalog held past freshness");
+          assert.equal(stale.sourceState, "Source state: stale", "snapshot held past freshness");
           assert.equal(stale.itemNames?.length, itemNames.length);
-          venueHold.release();
+          snapshotHold.release();
           await evaluatePage("new Promise((resolve) => setTimeout(resolve, 450))");
-          assert.equal((await waitForState(() => true) as { sourceState?: string }).sourceState, "Source state: stale", "venue catalog released after freshness");
+          assert.equal((await waitForState(() => true) as { sourceState?: string }).sourceState, "Source state: stale", "snapshot released after freshness");
           await advance("2026-09-18T05:01:00.000Z");
           await waitForState((state) => (state as { itemNames?: unknown[] }).itemNames?.length === itemNames.length);
         },
@@ -285,6 +327,22 @@ async function historicalSnapshot() {
     freshForMs: 18 * 60 * 60_000,
     retainForMs: 48 * 60 * 60_000,
   });
+}
+
+async function historicalDinnerSnapshot() {
+  const html = (await readFile(path.join(fixtureRoot, "menu-east-lunch.sanitized.html"), "utf8"))
+    .replaceAll("8/31/26", "9/1/26").replaceAll("Lunch", "Dinner")
+    .replace("PURE", "GRILLERS").replace("Fixture Lemon Chicken", "Fixture Dinner Chicken");
+  const menu = parsePsuMenuHtml(html, { sourceCampusId: "11", sourceDate: "9/1/26", sourceMeal: "Dinner" });
+  const nutrition = new Map();
+  for (const handle of ["900000001", "900000002"]) {
+    const detail = parsePsuNutritionHtml(await readFile(path.join(fixtureRoot, `nutrition-${handle}.sanitized.html`), "utf8"));
+    nutrition.set(handle, handle === "900000001" ? { ...detail, name: "Fixture Dinner Chicken" } : detail);
+  }
+  const retrievedAt = new Date("2026-09-16T12:00:00.000Z");
+  return buildPsuSnapshot({ serviceDate: "2026-09-01", hallId: "psu:campus:11", mealPeriodId: "dinner", venueIds: [] },
+    menu, nutrition, { retrievedAt, cachedAt: retrievedAt, freshForMs: 18 * 60 * 60_000,
+      retainForMs: 48 * 60 * 60_000 });
 }
 
 async function replaceShellRevision(directory: string): Promise<void> {
