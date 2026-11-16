@@ -12,6 +12,9 @@ export interface MealBuilderInitialData {
   readonly menu: Menu;
 }
 
+const NO_VENUES: readonly DiningVenue[] = [];
+const NO_SELECTED_VENUES: readonly string[] = [];
+
 export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialData }) {
   const [dataMode, setDataMode] = useState<"live" | "sample">("live");
   const [halls, setHalls] = useState(initial.halls);
@@ -41,9 +44,11 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
     query: { hallId, mealPeriodId: periodId, serviceDate, venueIds: [] },
     items: [], source: { mode: "unavailable", label: "Menu loading", retrievedAt: null },
   };
-  const venues = contextReady ? selection.venues : [];
+  const venues = contextReady && displayMenu.source.mode !== "unavailable"
+    ? selection.venues : NO_VENUES;
+  const effectiveVenueIds = venues.length > 0 ? selectedVenueIds : NO_SELECTED_VENUES;
   const displayedItems = displayMenu.items.filter((item) =>
-    selectedVenueIds.length === 0 || selectedVenueIds.includes(item.venueId));
+    effectiveVenueIds.length === 0 || effectiveVenueIds.includes(item.venueId));
   const displayMenuDelay = millisecondsUntilMenuRevalidation(displayMenu.source);
 
   const hallById = useMemo(
@@ -51,8 +56,8 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
     [halls],
   );
   const venueById = useMemo(
-    () => new Map((contextReady ? selection.venues : []).map((venue) => [venue.id, venue])),
-    [contextReady, selection.venues],
+    () => new Map(venues.map((venue) => [venue.id, venue])),
+    [venues],
   );
   const periodName = periods.find((period) => period.id === periodId)?.displayName ?? "Meal";
   const hallTimeZone = hallById.get(hallId)?.timeZone ?? "America/New_York";
@@ -90,6 +95,8 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
     revalidationQueue.current = queue;
     const request = () => {
       setDisplayRevision((current) => current + 1);
+      if (contextReady && selection.menu.source.mode !== "unavailable"
+        && menuForDisplay(selection.menu).source.mode === "unavailable") setSelectedVenueIds([]);
       queue.request();
     };
     const onVisible = () => { if (document.visibilityState === "visible") request(); };
@@ -106,17 +113,19 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
       if (revalidationQueue.current === queue) revalidationQueue.current = null;
       queue.dispose();
     };
-  }, [activated, dataMode, dateExplicit, hallTimeZone, serviceDate]);
+  }, [activated, contextReady, dataMode, dateExplicit, hallTimeZone, selection.menu, serviceDate]);
 
   useEffect(() => {
     if (!activated || dataMode !== "live") return;
     if (displayMenuDelay === null) return;
     const deadline = window.setTimeout(() => {
       setDisplayRevision((current) => current + 1);
+      if (contextReady && selection.menu.source.mode !== "unavailable"
+        && menuForDisplay(selection.menu).source.mode === "unavailable") setSelectedVenueIds([]);
       revalidationQueue.current?.request();
     }, displayMenuDelay);
     return () => window.clearTimeout(deadline);
-  }, [activated, dataMode, displayMenuDelay]);
+  }, [activated, contextReady, dataMode, displayMenuDelay, selection.menu]);
 
   useEffect(() => {
     if (!activated || contextLoading) return;
@@ -263,11 +272,11 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
 
         <fieldset className="venue-picker">
           <legend>Venues</legend>
-          <label className={`choice-card ${selectedVenueIds.length === 0 ? "selected" : ""}`}>
+          <label className={`choice-card ${effectiveVenueIds.length === 0 ? "selected" : ""}`}>
             <input
               type="checkbox"
               disabled={contextLoading}
-              checked={selectedVenueIds.length === 0}
+              checked={effectiveVenueIds.length === 0}
               onChange={() => {
                 setSelectedVenueIds([]);
               }}
@@ -276,11 +285,11 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
               <strong>Whole dining hall</strong>
               <small>Browse every station/category</small>
             </span>
-            {selectedVenueIds.length === 0 && <span className="check" aria-hidden="true">✓</span>}
+            {effectiveVenueIds.length === 0 && <span className="check" aria-hidden="true">✓</span>}
           </label>
           <div className="venue-options">
             {venues.map((venue) => {
-              const selected = selectedVenueIds.includes(venue.id);
+              const selected = effectiveVenueIds.includes(venue.id);
               return (
                 <label className={`venue-option ${selected ? "selected" : ""}`} key={venue.id}>
                   <input

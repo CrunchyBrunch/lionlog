@@ -232,6 +232,11 @@ test("React-controlled historical date and target-wide offline reload use only v
           assert.equal((retained as { sourceState?: string }).sourceState, "Source state: stale");
 
           for (const kind of ["catalog", "snapshot"] as const) {
+            await evaluatePage(`document.querySelector(".venue-option input").click()`);
+            assert.equal(await evaluatePage(`document.querySelectorAll(".venue-option input:checked").length`), 1,
+              `${kind} starts with PURE selected`);
+            assert.equal(await evaluatePage(`document.querySelectorAll(".venue-option input:enabled").length`),
+              snapshot.stations.length, `${kind} retains usable stale station choices`);
             const hold = holdNext(kind);
             await advance("2026-09-18T12:01:00.000Z");
             await Promise.race([hold.reached, new Promise<void>((_, reject) => setTimeout(() => reject(new Error(`${kind} request did not start`)), 5_000))]);
@@ -239,13 +244,24 @@ test("React-controlled historical date and target-wide offline reload use only v
             const expired = await waitForState(() => true) as { sourceState?: string; itemNames?: unknown[] };
             assert.equal(expired.sourceState, "Source state: unavailable", `${kind} held past retention`);
             assert.equal(expired.itemNames?.length, 0, `${kind} held past retention`);
+            assert.equal(await evaluatePage(`document.querySelectorAll(".venue-option").length`), 0,
+              `${kind} held past retention must hide expired stations`);
+            assert.equal(await evaluatePage(`document.querySelector(".choice-card input").checked`), true,
+              `${kind} held past retention must clear the actual filter`);
             hold.release();
             await evaluatePage("new Promise((resolve) => setTimeout(resolve, 450))");
             const afterRelease = await waitForState(() => true) as { sourceState?: string; itemNames?: unknown[] };
             assert.equal(afterRelease.sourceState, "Source state: unavailable", `${kind} released after retention`);
             assert.equal(afterRelease.itemNames?.length, 0, `${kind} released after retention`);
+            assert.equal(await evaluatePage(`document.querySelectorAll(".venue-option").length`), 0,
+              `${kind} late response must not restore expired stations`);
+            assert.equal(await evaluatePage(`document.querySelector(".choice-card input").checked`), true,
+              `${kind} late response must not restore the expired filter`);
             await advance("2026-09-18T05:01:00.000Z");
             await waitForState((state) => (state as { itemNames?: unknown[] }).itemNames?.length === itemNames.length);
+            assert.equal(await evaluatePage(`document.querySelectorAll(".venue-option input:checked").length`), 0,
+              `${kind} subsequent valid data must not inherit the expired filter`);
+            assert.equal(await evaluatePage(`document.querySelector(".choice-card input").checked`), true);
           }
 
           await advance("2026-09-17T05:59:55.000Z", true);
