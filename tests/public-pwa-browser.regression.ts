@@ -158,6 +158,16 @@ test("React-controlled historical date and target-wide offline reload use only v
               window.dispatchEvent(new Event("online"));
             })()`);
           };
+          await advance("2026-09-17T04:01:00.000Z");
+          await evaluatePage(`(() => { const select = document.querySelectorAll("select")[1];
+            const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set;
+            setter.call(select, "lunch"); select.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+          await evaluatePage("new Promise((resolve) => setTimeout(resolve, 650))");
+          assert.equal((await waitForState(() => true)).selectedDate, "2026-09-17",
+            "one resume followed by a meal change selects today's lunch");
+          assert.equal(await evaluatePage(`document.querySelectorAll("select")[1].value`), "lunch");
+          await advance("2026-09-16T12:00:00.000Z");
+          await waitForState((state) => state.selectedDate === "2026-09-16");
           await evaluatePage(`([...document.querySelectorAll("button")]
             .find((button) => button.textContent === "Sample demo")).click()`);
           await waitForState((state) => (state as { samplePressed?: boolean; itemNames?: unknown[] }).samplePressed === true

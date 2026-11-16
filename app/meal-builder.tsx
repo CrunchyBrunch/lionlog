@@ -97,6 +97,15 @@ export function MealBuilder({ initial }: { readonly initial: MealBuilderInitialD
       setDisplayRevision((current) => current + 1);
       if (contextReady && selection.menu.source.mode !== "unavailable"
         && menuForDisplay(selection.menu).source.mode === "unavailable") setSelectedVenueIds([]);
+      const nextDate = activeServiceDate(serviceDate, dateExplicitRef.current, hallTimeZone);
+      if (nextDate !== serviceDate) {
+        menuRequestId.current += 1;
+        setIsLoading(true);
+        setError(null);
+        setSelectedVenueIds([]);
+        setServiceDate(nextDate);
+        return;
+      }
       queue.request();
     };
     const onVisible = () => { if (document.visibilityState === "visible") request(); };
