@@ -3,6 +3,7 @@ import type {
   DiningVenue,
   MealPeriod,
   Menu,
+  MenuSelection,
   MenuProvider,
   MenuQuery,
 } from "../domain/dining.ts";
@@ -29,5 +30,13 @@ export class MenuBrowser {
 
   loadMenu(query: MenuQuery): Promise<Menu> {
     return this.provider.getMenu(query);
+  }
+
+  async loadSelection(query: MenuQuery): Promise<MenuSelection> {
+    if (this.provider.getMenuSelection) return this.provider.getMenuSelection(query);
+    const [menu, venues] = await Promise.all([
+      this.provider.getMenu(query), this.provider.getVenues(query.hallId),
+    ]);
+    return { menu, venues };
   }
 }

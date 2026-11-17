@@ -4,6 +4,7 @@ import type {
   MenuDataState,
   MenuProvider,
   MenuQuery,
+  MenuSelection,
 } from "../../domain/dining.ts";
 import { psuHalls, psuMealPeriods, PSU_MENU_URL } from "./constants.ts";
 import type { PsuMenuDeliveryStore } from "./menu-delivery-store.ts";
@@ -67,13 +68,20 @@ export class PsuMenuProvider implements MenuProvider {
   }
 
   async getMenu(query: MenuQuery): Promise<Menu> {
+    return (await this.getMenuSelection(query)).menu;
+  }
+
+  async getMenuSelection(query: MenuQuery): Promise<MenuSelection> {
     let selection: PsuSnapshotSelection | null;
     try {
       selection = await this.selectSnapshot(query);
     } catch {
-      return unavailableMenu(query, "The saved PSU snapshot failed validation. Sample data was not substituted.");
+      return { menu: unavailableMenu(query, "The saved PSU snapshot failed validation. Sample data was not substituted."), venues: [] };
     }
-    if (!selection) return unavailableMenu(query);
+    if (!selection) return { menu: unavailableMenu(query), venues: [] };
+    const venues = selection.snapshot.stations.map((station) => ({
+      id: station.id, hallId: query.hallId, displayName: station.displayName,
+    }));
     const selectedVenueIds = new Set(query.venueIds);
     const items = selection.snapshot.stations.flatMap((station) => station.items)
       .filter((item) => selectedVenueIds.size === 0 || selectedVenueIds.has(item.stationId))
@@ -102,7 +110,7 @@ export class PsuMenuProvider implements MenuProvider {
         },
       }));
     const mode = selection.state;
-    return {
+    return { venues, menu: {
       query: { ...query, venueIds: [...query.venueIds] },
       items,
       source: {
@@ -119,7 +127,7 @@ export class PsuMenuProvider implements MenuProvider {
           ? "Live retrieval failed or the cached snapshot expired; items may have changed."
           : undefined,
       },
-    };
+    } };
   }
 
   private async selectSnapshot(query: MenuQuery): Promise<PsuSnapshotSelection | null> {

@@ -55,9 +55,15 @@ export interface Menu {
   readonly source: MenuSource;
 }
 
+export interface MenuSelection {
+  readonly menu: Menu;
+  readonly venues: readonly DiningVenue[];
+}
+
 export interface MenuProvider {
   getHalls(): Promise<readonly DiningHall[]>;
   getMealPeriods(): Promise<readonly MealPeriod[]>;
   getVenues(hallId: string): Promise<readonly DiningVenue[]>;
   getMenu(query: MenuQuery): Promise<Menu>;
+  getMenuSelection?(query: MenuQuery): Promise<MenuSelection>;
 }
