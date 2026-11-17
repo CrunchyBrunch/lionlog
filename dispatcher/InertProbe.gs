@@ -5,7 +5,7 @@ function runLionLogInertProbe() {
   lock.waitLock(10000);
   try {
     if (properties.getProperty('LIONLOG_DISPATCH_ACTIVATION')
-      || properties.getProperty('INERT_PROBE_POST_ATTEMPT')) throw Error('Probe unavailable.');
+      || properties.getProperty('INERT_PROBE_POST_ATTEMPT') !== null) throw Error('Probe unavailable.');
     const appId = properties.getProperty('LIONLOG_APP_ID');
     const installationId = properties.getProperty('LIONLOG_INSTALLATION_ID');
     const discussionId = properties.getProperty('LIONLOG_DISCUSSION_NODE_ID');
@@ -42,7 +42,8 @@ function runLionLogInertProbe() {
     catch { throw Error('Comment outcome unconfirmed. Inspect GitHub.'); }
     const comment = payload?.data?.addDiscussionComment?.comment;
     const author = comment?.author;
-    if (payload?.errors !== undefined || !/^DC_[A-Za-z0-9_-]+$/.test(comment?.id || '')
+    if (payload?.errors !== undefined || typeof comment?.id !== 'string'
+      || !/^DC_[A-Za-z0-9_-]+$/.test(comment.id)
       || !Number.isSafeInteger(comment?.databaseId) || comment.databaseId < 1
       || comment.discussion?.id !== discussionId || comment.body !== body
       || author?.__typename !== 'Bot' || author.databaseId !== 356656801

@@ -12,7 +12,7 @@ const body = `lionlog-dispatch.v1:${day}`;
 
 function fixture({ login = 'lionlog-daily-menu-dispatcher', authorId = botId,
   authorType = 'Bot', commentResponse = 200, commentThrows = false,
-  graphqlErrors = false,
+  graphqlErrors = false, priorAttempt, commentNodeId = 'DC_kwABC123',
   activation = '', privateKey = '-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----' } = {}) {
   const values = new Map([
     ['LIONLOG_APP_ID', '5759481'], ['LIONLOG_INSTALLATION_ID', '181943702'],
@@ -20,7 +20,9 @@ function fixture({ login = 'lionlog-daily-menu-dispatcher', authorId = botId,
     ['LIONLOG_APP_PRIVATE_KEY_PEM', privateKey],
   ]);
   if (activation) values.set('LIONLOG_DISPATCH_ACTIVATION', activation);
+  if (priorAttempt !== undefined) values.set(claim, priorAttempt);
   const posts = [];
+  const logs = [];
   let locked = false;
   const context = {
     Date: class extends Date { constructor(...args) { super(...(args.length ? args : ['2026-11-17T10:17:00Z'])); } },
@@ -50,15 +52,15 @@ function fixture({ login = 'lionlog-daily-menu-dispatcher', authorId = botId,
       return { getResponseCode: () => commentResponse,
         getContentText: () => JSON.stringify({ ...(graphqlErrors ? { errors: [{ message: 'partial response' }] } : {}),
           data: { addDiscussionComment: { comment: {
-          id: 'DC_kwABC123', databaseId: 12345, body,
+          id: commentNodeId, databaseId: 12345, body,
           discussion: { id: 'D_kwDOUD_TtM4ArH9U' },
           author: { __typename: authorType, databaseId: authorId, login },
         } } } }) };
     } },
-    console: { log: () => {} },
+    console: { log: value => logs.push(value) },
   };
   vm.runInNewContext(`${dispatcher}\n${probe}`, context);
-  return { run: () => vm.runInNewContext('runLionLogInertProbe()', context), values, posts };
+  return { run: () => vm.runInNewContext('runLionLogInertProbe()', context), values, posts, logs };
 }
 
 test('the one-shot probe accepts both observed GraphQL Bot logins', () => {
@@ -108,4 +110,20 @@ test('activation and key-format guards stop before any network or claim', () => 
     assert.equal(f.posts.length, 0);
     assert.equal(f.values.has(claim), false);
   }
+});
+
+test('an existing blank attempt marker blocks before token exchange', () => {
+  const f = fixture({ priorAttempt: '' });
+  assert.throws(f.run, /Probe unavailable/);
+  assert.equal(f.posts.length, 0);
+  assert.equal(f.values.get(claim), '');
+});
+
+test('a non-string node ID cannot produce a success receipt or another POST', () => {
+  const f = fixture({ commentNodeId: ['DC_kwABC123'] });
+  assert.throws(f.run, /Comment outcome unconfirmed/);
+  assert.equal(f.logs.length, 0);
+  assert.ok(f.values.has(claim));
+  assert.throws(f.run, /Probe unavailable/);
+  assert.equal(f.posts.length, 2);
 });
