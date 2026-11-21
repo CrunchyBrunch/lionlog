@@ -3,11 +3,11 @@ const LL_MONITOR_REPO = 'CrunchyBrunch/lionlog';
 const LL_MONITOR_PATH = '.github/workflows/daily-publication.yml';
 
 /** Normal dispatch collector. The hosted collector supplies its existing signed checkpoint/public proof. */
-function collectLionLogMonitorEvidence(now, publicationProof) {
+function collectLionLogMonitorEvidence(now, publicationProof, options = {}) {
   const props = PropertiesService.getScriptProperties();
   const mode = props.getProperty('LIONLOG_MONITOR_DISPATCH_MODE') || 'schedule';
   if (mode !== 'schedule' && mode !== 'external') throw new Error('Unknown monitor dispatch mode.');
-  const token = props.getProperty('LIONLOG_MONITOR_GITHUB_TOKEN');
+  const token = options.token ?? props.getProperty('LIONLOG_MONITOR_GITHUB_TOKEN');
   if (!token) throw new Error('Read-only monitor token missing.');
   const expectedSha = props.getProperty('LIONLOG_MONITOR_RECEIVER_SHA');
   const botId = Number(props.getProperty('LIONLOG_MONITOR_BOT_USER_ID'));
@@ -140,9 +140,14 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
     }
     childRuns[pair[1]] = child;
     if (pair[1] === '.github/workflows/build-live-menu-artifact.yml') {
-      // A matching number is not admission proof until this candidate run has passed readback.
-      result.candidateCorrelated = candidateNumberMatches;
-      result.admittedBeforeCutoff = candidateNumberMatches ? publicationProof.admittedBeforeCutoff ?? null : null;
+      // Read attempt-specific admission only after the binding and pinned candidate readback agree.
+      const admission = options.readAdmission ? options.readAdmission(child)
+        : (candidateNumberMatches ? publicationProof.admittedBeforeCutoff ?? null : null);
+      result.candidateCorrelated = options.readAdmission
+        ? ((admission === true || admission === false)
+          && (!llMonitorPositive(publicationProof.candidateRunId) || candidateNumberMatches))
+        : candidateNumberMatches;
+      result.admittedBeforeCutoff = result.candidateCorrelated ? admission : null;
     }
     if (child.status === 'completed' && child.conclusion !== 'success') result.failed = true;
   }
@@ -162,7 +167,10 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
       && publicationProof.candidateRunId !== binding.candidateRunId)
     || (rank === 6 && publicationProof.completeEvidence === true
       && (!/^[a-f0-9]{64}$/.test(publicationProof.releaseId || '')
-        || publicationProof.releaseId !== binding.releaseId));
+        || publicationProof.releaseId !== binding.releaseId
+        || (options.readAdmission && (!candidateNumberMatches
+          || publicationProof.promotionRunId !== binding.promotionRunId
+          || publicationProof.publicationSourceSha !== productionSha))));
   if (conflict) {
     result.dispatchEvidence = 'conflict';
     result.stage = 'evidence-conflict';
