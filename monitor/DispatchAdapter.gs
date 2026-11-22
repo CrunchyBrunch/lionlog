@@ -29,7 +29,7 @@ function collectLionLogMonitorEvidence(now, publicationProof, options = {}) {
     dispatchEvidence: 'complete', stage: 'absent', startedAt: null, failed: false,
     terminal: false, admittedBeforeCutoff: mode === 'external' ? null : (publicationProof.admittedBeforeCutoff ?? null),
     receiverRunId: null,
-    receiverStatus: null, candidateCorrelated: false, sequenceComplete: false,
+    receiverStatus: null, productionStarted: false, candidateCorrelated: false, sequenceComplete: false,
     candidateRunId: null, promotionRunId: null, checkpointRunId: null });
   try {
   const observed = llMonitorRuns(api, event, day, LL_MONITOR_PATH, mode === 'external' ? botLogin : null);
@@ -117,6 +117,8 @@ function collectLionLogMonitorEvidence(now, publicationProof, options = {}) {
     throw new Error('Receiver binding artifact identity invalid.');
   }
   const binding = llMonitorBinding(item, token, run.id, expectedSha, day, titleCommentId, titleCommentNodeId);
+  // Even the first binding stage is written only after production admission.
+  result.productionStarted = Number.isFinite(result.startedAt);
   const candidateNumberMatches = llMonitorPositive(publicationProof.candidateRunId)
     && llMonitorPositive(binding.candidateRunId)
     && publicationProof.candidateRunId === binding.candidateRunId;
@@ -140,14 +142,16 @@ function collectLionLogMonitorEvidence(now, publicationProof, options = {}) {
     }
     childRuns[pair[1]] = child;
     if (pair[1] === '.github/workflows/build-live-menu-artifact.yml') {
-      // Read attempt-specific admission only after the binding and pinned candidate readback agree.
-      const admission = options.readAdmission ? options.readAdmission(child)
-        : (candidateNumberMatches ? publicationProof.admittedBeforeCutoff ?? null : null);
-      result.candidateCorrelated = options.readAdmission
-        ? ((admission === true || admission === false)
-          && (!llMonitorPositive(publicationProof.candidateRunId) || candidateNumberMatches))
-        : candidateNumberMatches;
-      result.admittedBeforeCutoff = result.candidateCorrelated ? admission : null;
+      // The hosted poll reads admission only for today's independently verified candidate.
+      const proofMatches = candidateNumberMatches && (!options.readAdmission
+        || (publicationProof.completeEvidence === true && publicationProof.publishedDate === day
+          && publicationProof.publicationSourceSha === child.head_sha));
+      if (proofMatches) {
+        const admission = options.readAdmission ? options.readAdmission(child)
+          : publicationProof.admittedBeforeCutoff ?? null;
+        result.candidateCorrelated = !options.readAdmission || admission === true || admission === false;
+        result.admittedBeforeCutoff = result.candidateCorrelated ? admission : null;
+      }
     }
     if (child.status === 'completed' && child.conclusion !== 'success') result.failed = true;
   }
@@ -214,11 +218,12 @@ function evaluateLionLogDispatchPoll(e, now, previous) {
     && e.integrity === 'match' && e.publishedDate === e.date
     && Number.isFinite(e.freshUntil) && now.getTime() < e.freshUntil;
   const started = Number.isFinite(e.startedAt);
+  const productionStarted = e.mode === 'external' ? e.productionStarted === true : started;
   const overdue = (started && now.getTime() >= e.startedAt + 3 * 3600000)
     || (proofComplete && Number.isFinite(e.freshUntil) && now.getTime() >= e.freshUntil);
   transition('evidence-unavailable', complete ? false : (pending && proofComplete ? null : true));
   transition('workflow-failure', e.failed === true ? true : (success ? false : null));
-  transition('morning-start', started || success ? false
+  transition('morning-start', productionStarted || success ? false
     : (minute >= 600 && (complete || e.receiverStatus === 'queued') ? true : null));
   transition('completion-freshness', !success && (e.failed === true || overdue
     || (complete && started && e.terminal)) ? true : (success ? false : null));

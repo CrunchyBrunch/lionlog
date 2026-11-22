@@ -64,7 +64,8 @@ const publicBody = JSON.stringify({ releaseId });
 
 function fixture({ mode = 'external', run = receiver, proofDate = day, proofPromotion = 91, proofCandidate = 90,
   signed = true, verified = true, tamperedManifest = false, step = admission, bound = binding,
-  brokenCollector = false, mailThrows = false, previous = {}, now = '2026-11-21T17:28:00Z' } = {}) {
+  brokenCollector = false, mailThrows = false, previous = {}, now = '2026-11-21T17:28:00Z',
+  writerRun = writer, observedMarker = publicBody, originalHost = false } = {}) {
   const props = new Map(Object.entries({
     MONITOR_TOKEN: 'synthetic-read-only-token',
     TOKEN_EXPIRES_UTC: '2026-11-22T00:00:00Z',
@@ -136,7 +137,7 @@ function fixture({ mode = 'external', run = receiver, proofDate = day, proofProm
       assert.ok(locked);
       urls.push(url);
       assert.equal(options.method ?? 'get', 'get');
-      if (url === 'https://crunchybrunch.github.io/lionlog/release.json') return response(200, publicBody);
+      if (url === 'https://crunchybrunch.github.io/lionlog/release.json') return response(200, observedMarker);
       if (url === 'https://signed.blob.core.windows.net/binding') {
         assert.equal(options.headers, undefined);
         return response(200, '{}');
@@ -161,20 +162,22 @@ function fixture({ mode = 'external', run = receiver, proofDate = day, proofProm
         run_id: route.includes('/90/') ? 90 : 77, steps: route.includes('/90/') ? (step ? [step] : []) : [admission],
       }] });
       if (route.endsWith('/runs/77')) return response(200, run);
-      for (const row of [candidate, promotion, writer]) {
+      for (const row of [candidate, promotion, writerRun]) {
         if (route.endsWith('/runs/' + row.id)) return response(200, row);
       }
       if (route.includes('/runs?')) {
         if (brokenCollector && route.includes('event=discussion_comment')) return response(500, {});
         const rows = route.includes('daily-publication.yml') ? (route.includes('event=discussion_comment')
           ? [run] : (mode === 'external' ? [] : [{ ...run, event: 'schedule' }]))
-          : [candidate, promotion, writer].filter(row => route.includes(row.path.split('/').at(-1)));
+          : [candidate, promotion, writerRun].filter(row => route.includes(row.path.split('/').at(-1)));
         return response(200, { total_count: rows.length, workflow_runs: rows });
       }
       throw Error('Unexpected GET ' + url);
     } },
   };
-  vm.runInNewContext(read('monitor/DispatchAdapter.gs') + '\n' + read('monitor/PollBridge.gs') + '\n' + patchedHost(), context);
+  const host = originalHost ? read('tests/fixtures/hosted-monitor-Code.gs').replace('monitor-recipient@example.invalid', recipient)
+    : patchedHost();
+  vm.runInNewContext(read('monitor/DispatchAdapter.gs') + '\n' + read('monitor/PollBridge.gs') + '\n' + host, context);
   return {
     props, mails, urls, logs,
     poll() {
@@ -187,8 +190,13 @@ function fixture({ mode = 'external', run = receiver, proofDate = day, proofProm
 
 test('actual poll retains the native schedule route and existing recipient', () => {
   for (const mode of ['schedule', null]) {
-    const f = fixture({ mode, previous: { 'workflow-failure': true } });
-    assert.equal(f.poll().alerts['workflow-failure'], false);
+    const options = { mode, previous: { 'workflow-failure': true } };
+    const f = fixture(options);
+    const baseline = fixture({ ...options, originalHost: true });
+    assert.deepEqual(f.poll(), baseline.poll());
+    assert.deepEqual(f.props, baseline.props);
+    assert.deepEqual(f.mails, baseline.mails);
+    assert.deepEqual(f.urls, baseline.urls);
     assert.ok(f.urls.some(url => url.includes('event=schedule')));
     assert.ok(!f.urls.some(url => url.includes('event=discussion_comment')));
     assert.equal(f.mails[0][0], recipient);
@@ -196,16 +204,22 @@ test('actual poll retains the native schedule route and existing recipient', () 
 });
 
 test('actual external poll recovers once after bound admission and signed current release', () => {
-  const f = fixture({ previous: { 'final-admission': true, 'completion-freshness': true, 'evidence-unavailable': true } });
+  const f = fixture({ previous: {
+    'morning-start': true, 'final-admission': true, 'completion-freshness': true, 'evidence-unavailable': true,
+  } });
   const result = f.poll();
   assert.equal(result.detail.admittedBeforeCutoff, true);
   assert.equal(result.detail.sequenceComplete, true);
   assert.equal(result.detail.checkpointRunId, 92);
   assert.ok(f.urls.some(url => url.includes('event=discussion_comment')));
   assert.ok(f.urls.some(url => url.includes('/90/attempts/1/jobs')));
+  assert.match(f.mails[0][1], /RECOVERY morning-start/);
   assert.match(f.mails[0][1], /RECOVERY final-admission/);
   assert.match(f.mails[0][1], /RECOVERY completion-freshness/);
   assert.equal(f.props.has('production-mail-pending'), false);
+  const incidents = JSON.parse(f.props.get('production-incidents-' + day));
+  assert.equal(incidents['morning-start'], false);
+  assert.equal(incidents['final-admission'], false);
   f.poll();
   assert.equal(f.mails.length, 1);
 });
@@ -249,15 +263,62 @@ test('unknown monitor mode records unavailable evidence without a route fallback
 });
 
 test('probe-only receiver cannot prove production admission or clear production incidents', () => {
-  const f = fixture({ bound: null, previous: {
-    'morning-start': true, 'final-admission': true, 'completion-freshness': true,
-  } });
-  const result = f.poll();
-  assert.equal(result.detail.admittedBeforeCutoff, null);
-  assert.equal(result.detail.sequenceComplete, false);
+  const run = { ...receiver, status: 'in_progress', conclusion: null };
+  const f = fixture({ run, bound: null, previous: {
+    'morning-start': true, 'final-admission': true,
+  }, now: '2026-11-21T15:20:00Z' });
+  const running = f.poll();
+  assert.equal(running.detail.dispatchEvidence, 'binding-pending');
+  assert.equal(running.detail.startedAt, Date.parse(when));
+  assert.equal(JSON.parse(f.props.get('production-incidents-' + day))['morning-start'], true);
+  assert.equal(f.mails.length, 0);
+  Object.assign(run, receiver);
+  const completed = f.poll();
+  assert.equal(completed.detail.dispatchEvidence, 'binding-missing');
+  assert.equal(completed.detail.admittedBeforeCutoff, null);
+  assert.equal(completed.detail.sequenceComplete, false);
+  const incidents = JSON.parse(f.props.get('production-incidents-' + day));
+  assert.equal(incidents['morning-start'], true);
+  assert.equal(incidents['final-admission'], true);
   assert.ok(!f.urls.some(url => url.includes('/90/attempts/1/jobs')));
   assert.ok(!f.mails.some(([, subject]) => subject.includes('RECOVERY final-admission')));
   assert.ok(!f.mails.some(([, subject]) => subject.includes('RECOVERY morning-start')));
+});
+
+test('previous-day signed candidate cannot recover current final admission on repeated polls', () => {
+  const f = fixture({ proofDate: '2026-11-20', proofCandidate: 140, previous: {
+    'final-admission': true, 'completion-freshness': true,
+  } });
+  for (let i = 0; i < 2; i++) {
+    const result = f.poll();
+    assert.equal(result.detail.dispatchEvidence, 'conflict');
+    assert.equal(result.detail.candidateCorrelated, false);
+    assert.equal(result.detail.admittedBeforeCutoff, null);
+    const incidents = JSON.parse(f.props.get('production-incidents-' + day));
+    assert.equal(incidents['final-admission'], true);
+    assert.equal(incidents['completion-freshness'], true);
+  }
+  assert.equal(f.mails.length, 1);
+  assert.match(f.mails[0][1], /ALERT evidence-unavailable/);
+  assert.doesNotMatch(f.mails[0][1], /RECOVERY final-admission/);
+});
+
+test('verified current admission survives a later writer failure and independent marker mismatch', () => {
+  const f = fixture({ run: { ...receiver, conclusion: 'failure' },
+    bound: { ...binding, stage: 'checkpoint-dispatched', releaseId: undefined },
+    writerRun: { ...writer, conclusion: 'failure' }, observedMarker: JSON.stringify({ releaseId: 'f'.repeat(64) }),
+    previous: { 'final-admission': true, 'completion-freshness': true } });
+  const result = f.poll();
+  assert.equal(result.detail.admittedBeforeCutoff, true);
+  assert.equal(result.detail.sequenceComplete, false);
+  assert.equal(result.alerts['final-admission'], false);
+  assert.equal(result.alerts['workflow-failure'], true);
+  assert.equal(result.alerts['publication-integrity'], true);
+  assert.equal(JSON.parse(f.props.get('production-incidents-' + day))['completion-freshness'], true);
+  assert.match(f.mails[0][1], /RECOVERY final-admission/);
+  assert.doesNotMatch(f.mails[0][1], /RECOVERY completion-freshness/);
+  f.poll();
+  assert.equal(f.mails.length, 1);
 });
 
 test('uncertain email retains the pending marker and does not advance incident state', () => {
