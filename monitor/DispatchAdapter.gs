@@ -3,11 +3,11 @@ const LL_MONITOR_REPO = 'CrunchyBrunch/lionlog';
 const LL_MONITOR_PATH = '.github/workflows/daily-publication.yml';
 
 /** Normal dispatch collector. The hosted collector supplies its existing signed checkpoint/public proof. */
-function collectLionLogMonitorEvidence(now, publicationProof) {
+function collectLionLogMonitorEvidence(now, publicationProof, options = {}) {
   const props = PropertiesService.getScriptProperties();
   const mode = props.getProperty('LIONLOG_MONITOR_DISPATCH_MODE') || 'schedule';
   if (mode !== 'schedule' && mode !== 'external') throw new Error('Unknown monitor dispatch mode.');
-  const token = props.getProperty('LIONLOG_MONITOR_GITHUB_TOKEN');
+  const token = options.token ?? props.getProperty('LIONLOG_MONITOR_GITHUB_TOKEN');
   if (!token) throw new Error('Read-only monitor token missing.');
   const expectedSha = props.getProperty('LIONLOG_MONITOR_RECEIVER_SHA');
   const botId = Number(props.getProperty('LIONLOG_MONITOR_BOT_USER_ID'));
@@ -29,7 +29,7 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
     dispatchEvidence: 'complete', stage: 'absent', startedAt: null, failed: false,
     terminal: false, admittedBeforeCutoff: mode === 'external' ? null : (publicationProof.admittedBeforeCutoff ?? null),
     receiverRunId: null,
-    receiverStatus: null, candidateCorrelated: false, sequenceComplete: false,
+    receiverStatus: null, productionStarted: false, candidateCorrelated: false, sequenceComplete: false,
     candidateRunId: null, promotionRunId: null, checkpointRunId: null });
   try {
   const observed = llMonitorRuns(api, event, day, LL_MONITOR_PATH, mode === 'external' ? botLogin : null);
@@ -117,6 +117,8 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
     throw new Error('Receiver binding artifact identity invalid.');
   }
   const binding = llMonitorBinding(item, token, run.id, expectedSha, day, titleCommentId, titleCommentNodeId);
+  // Even the first binding stage is written only after production admission.
+  result.productionStarted = Number.isFinite(result.startedAt);
   const candidateNumberMatches = llMonitorPositive(publicationProof.candidateRunId)
     && llMonitorPositive(binding.candidateRunId)
     && publicationProof.candidateRunId === binding.candidateRunId;
@@ -140,9 +142,16 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
     }
     childRuns[pair[1]] = child;
     if (pair[1] === '.github/workflows/build-live-menu-artifact.yml') {
-      // A matching number is not admission proof until this candidate run has passed readback.
-      result.candidateCorrelated = candidateNumberMatches;
-      result.admittedBeforeCutoff = candidateNumberMatches ? publicationProof.admittedBeforeCutoff ?? null : null;
+      // The hosted poll reads admission only for today's independently verified candidate.
+      const proofMatches = candidateNumberMatches && (!options.readAdmission
+        || (publicationProof.completeEvidence === true && publicationProof.publishedDate === day
+          && publicationProof.publicationSourceSha === child.head_sha));
+      if (proofMatches) {
+        const admission = options.readAdmission ? options.readAdmission(child)
+          : publicationProof.admittedBeforeCutoff ?? null;
+        result.candidateCorrelated = !options.readAdmission || admission === true || admission === false;
+        result.admittedBeforeCutoff = result.candidateCorrelated ? admission : null;
+      }
     }
     if (child.status === 'completed' && child.conclusion !== 'success') result.failed = true;
   }
@@ -162,7 +171,10 @@ function collectLionLogMonitorEvidence(now, publicationProof) {
       && publicationProof.candidateRunId !== binding.candidateRunId)
     || (rank === 6 && publicationProof.completeEvidence === true
       && (!/^[a-f0-9]{64}$/.test(publicationProof.releaseId || '')
-        || publicationProof.releaseId !== binding.releaseId));
+        || publicationProof.releaseId !== binding.releaseId
+        || (options.readAdmission && (!candidateNumberMatches
+          || publicationProof.promotionRunId !== binding.promotionRunId
+          || publicationProof.publicationSourceSha !== productionSha))));
   if (conflict) {
     result.dispatchEvidence = 'conflict';
     result.stage = 'evidence-conflict';
@@ -206,11 +218,12 @@ function evaluateLionLogDispatchPoll(e, now, previous) {
     && e.integrity === 'match' && e.publishedDate === e.date
     && Number.isFinite(e.freshUntil) && now.getTime() < e.freshUntil;
   const started = Number.isFinite(e.startedAt);
+  const productionStarted = e.mode === 'external' ? e.productionStarted === true : started;
   const overdue = (started && now.getTime() >= e.startedAt + 3 * 3600000)
     || (proofComplete && Number.isFinite(e.freshUntil) && now.getTime() >= e.freshUntil);
   transition('evidence-unavailable', complete ? false : (pending && proofComplete ? null : true));
   transition('workflow-failure', e.failed === true ? true : (success ? false : null));
-  transition('morning-start', started || success ? false
+  transition('morning-start', productionStarted || success ? false
     : (minute >= 600 && (complete || e.receiverStatus === 'queued') ? true : null));
   transition('completion-freshness', !success && (e.failed === true || overdue
     || (complete && started && e.terminal)) ? true : (success ? false : null));

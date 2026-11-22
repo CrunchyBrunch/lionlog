@@ -1,0 +1,35 @@
+diff --git a/Code.gs b/Code.gs
+--- a/Code.gs
++++ b/Code.gs
+@@ -26,3 +26,3 @@ function steps(run,token) {
+ function hashed(bytes) {return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,bytes).map(x=>('0'+(x&255).toString(16)).slice(-2)).join('');}
+-function releaseProof(token) {
++function releaseProof(token, external = false) {
+   const state=readGithub('git/ref/heads/lionlog-publication-state',token).object.sha;
+@@ -37,3 +37,9 @@ function releaseProof(token) {
+   const bound=signed && cp.publication.receiptSha256===receipt.digest && cp.publication.manifestSha256===manifest.digest && cp.publication.releaseId===m.releaseId && r.release.id===m.releaseId && r.workflow.runId===cp.boundary.runId && r.workflow.runAttempt===cp.boundary.runAttempt && r.candidate.sourceSha===m.source.commitSha && cp.publication.sourceSha===m.source.commitSha && r.knownGood===true && r.unresolved===false && r.public.inventoryVerified && r.public.browserVerified && r.public.markerVerified;
+-  return {state,marker:marker.releaseId,release:m.releaseId,date:m.menu.serviceDate,fresh:Date.parse(m.menu.earliestFreshUntil),bound,match:marker.releaseId===m.releaseId && hashed(response.getContent())===m.marker.sha256,coverage:m.menu.coverage,omitted:m.menu.omissions['invalid-name'],candidate:m.source.workflowRunId,promotion:r.workflow.runId};
++  const proof={state,marker:marker.releaseId,release:m.releaseId,date:m.menu.serviceDate,fresh:Date.parse(m.menu.earliestFreshUntil),bound,match:marker.releaseId===m.releaseId && hashed(response.getContent())===m.marker.sha256,coverage:m.menu.coverage,omitted:m.menu.omissions['invalid-name'],candidate:m.source.workflowRunId,promotion:r.workflow.runId};
++  if (external) {
++    proof.externalBound = bound && isLionLogMonitorReleaseBound(commit, cp, r, m);
++    proof.sourceSha = m.source.commitSha;
++    proof.externalPromotionMatchesSource = r.workflow.runAttempt === 1 && r.workflow.sha === m.source.commitSha;
++  }
++  return proof;
+ }
+@@ -70,3 +76,14 @@ function dryRunPoll(){
+     let result;
+-    try {requireEvidence(Date.parse(props.getProperty('TOKEN_EXPIRES_UTC'))>now,'Monitor credential expired');result=evidence(now,day,props.getProperty('MONITOR_TOKEN'));result.alerts['evidence-unavailable']=false;}
++    try {
++      requireEvidence(Date.parse(props.getProperty('TOKEN_EXPIRES_UTC'))>now,'Monitor credential expired');
++      const token=props.getProperty('MONITOR_TOKEN');
++      const mode=props.getProperty('LIONLOG_MONITOR_DISPATCH_MODE') || 'schedule';
++      if (mode === 'external') {
++        result=pollLionLogMonitorDispatch(now,day,token,prev);
++      } else {
++        requireEvidence(mode === 'schedule','Invalid monitor dispatch mode');
++        result=evidence(now,day,token);
++        result.alerts['evidence-unavailable']=false;
++      }
++    }
+     catch(err){result={alerts:{'evidence-unavailable':true},detail:{day,reason:/^(GitHub read [0-9]{3}|Public marker read [0-9]{3}|Incomplete run listing|Incomplete jobs|Unexpected run identity|Monitor credential expired|Ambiguous daily run|Ambiguous downstream runs)$/.test(err.message)?err.message:"Invalid or unavailable monitor evidence"}};}
