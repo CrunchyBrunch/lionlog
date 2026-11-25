@@ -51,7 +51,8 @@ const dietaryMarkerMap = new Map<string, DietaryTrait>([
 
 export class PsuMenuStructureError extends PsuStructuralError {
   readonly counts: Readonly<{ stationSections: number; itemElements: number;
-    validatedItems: number; recognizedEmptyMarkers: number }>;
+    validatedItems: number; recognizedEmptyMarkers: number;
+    nutritionLinkCandidates: number; emptyMarkerCandidates: number }>;
 
   constructor(counts: PsuMenuStructureError["counts"], savedSnapshotFailed = false) {
     super(`PSU menu response contained neither validated items nor a recognized empty state.${savedSnapshotFailed
@@ -60,6 +61,8 @@ export class PsuMenuStructureError extends PsuStructuralError {
     this.counts = counts;
   }
 }
+
+const nutritionLinkPattern = /^(?:\.\/)?nutrition-label\.cfm\?mid=(\d+)$/;
 
 export function parsePsuMenuHtml(html: string, expected: PsuMenuParseContext): ParsedPsuMenu {
   const document = parseHtml(html);
@@ -70,9 +73,11 @@ export function parsePsuMenuHtml(html: string, expected: PsuMenuParseContext): P
   const categoryElements = descendants(document, (element) => hasClass(element, "menu-category-section"));
   const stations = categoryElements.map(parseStation);
   const itemCount = stations.reduce((total, station) => total + station.items.length, 0);
-  const recognizedEmpty = descendants(document, (element) =>
+  const emptyMarkerElements = descendants(document, (element) =>
     hasClass(element, "daily-menu-empty") || getAttribute(element, "data-menu-empty") !== undefined
-  ).some((element) => /no (?:menu items|items|menu) (?:are )?available/i.test(normalizedText(element)));
+  );
+  const recognizedEmpty = emptyMarkerElements.some((element) =>
+    /no (?:menu items|items|menu) (?:are )?available/i.test(normalizedText(element)));
 
   if (recognizedEmpty && descendants(document, (element) =>
     hasClass(element, "daily-menu-item") || hasClass(element, "daily-menu-item__link")
@@ -82,9 +87,13 @@ export function parsePsuMenuHtml(html: string, expected: PsuMenuParseContext): P
 
   if (itemCount === 0 && !recognizedEmpty) {
     const bound = (count: number) => Math.min(count, 1000);
+    const nutritionLinkCandidates = descendants(document, (element) =>
+      element.tagName === "a" && nutritionLinkPattern.test(getAttribute(element, "href") ?? ""));
     throw new PsuMenuStructureError({ stationSections: bound(categoryElements.length),
       itemElements: bound(descendants(document, (element) => hasClass(element, "daily-menu-item")).length),
-      validatedItems: bound(itemCount), recognizedEmptyMarkers: 0 });
+      validatedItems: bound(itemCount), recognizedEmptyMarkers: 0,
+      nutritionLinkCandidates: bound(nutritionLinkCandidates.length),
+      emptyMarkerCandidates: bound(emptyMarkerElements.length) });
   }
 
   return { context: expected, stations, empty: itemCount === 0 };
@@ -147,7 +156,7 @@ function parseMenuItem(element: HtmlElement): ParsedPsuMenuItem {
   );
   if (!link) throw new PsuStructuralError("PSU menu item is missing its nutrition link.");
   const href = getAttribute(link, "href") ?? "";
-  const handleMatch = /^(?:\.\/)?nutrition-label\.cfm\?mid=(\d+)$/.exec(href);
+  const handleMatch = nutritionLinkPattern.exec(href);
   if (!handleMatch) throw new PsuStructuralError("PSU menu item has an unexpected nutrition URL.");
   const validatedName = validateSourceName(normalizedText(link));
 

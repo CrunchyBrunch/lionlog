@@ -33,7 +33,9 @@ const authorizedEnvironment = {
 } as const;
 
 test("producer entry point logs bounded query diagnostics and still rejects sanitized structural failures", () => {
-  for (const [shape, stationSections, itemElements] of [["category", 0, 1], ["item", 1, 0]] as const) {
+  for (const [shape, stationSections, itemElements, emptyMarkerCandidates] of [
+    ["category", 0, 1, 0], ["item", 1, 0, 0], ["empty-marker", 0, 0, 1],
+  ] as const) {
     const result = spawnSync(process.execPath, ["--experimental-strip-types",
       "--import=./tests/fixtures/psu/producer-fetch-fixture.mjs", "scripts/prepare-live-field-release.ts",
       "--date=2026-11-08", "--cache-dir=work/offline-diagnostic-cache", "--report=work/offline-diagnostic-report.json"],
@@ -47,7 +49,8 @@ test("producer entry point logs bounded query diagnostics and still rejects sani
     assert.ok(line);
     assert.deepEqual(JSON.parse(line), { event: "lionlog.psu-menu-structure.v1",
       serviceDate: "2026-11-08", campus: "11", meal: "Lunch", queryOrdinal: 1,
-      stationSections, itemElements, validatedItems: 0, recognizedEmptyMarkers: 0 });
+      stationSections, itemElements, validatedItems: 0, recognizedEmptyMarkers: 0,
+      nutritionLinkCandidates: 0, emptyMarkerCandidates });
   }
 });
 
@@ -88,7 +91,8 @@ test("producer retains the structure diagnostic when a matching saved snapshot i
         line.startsWith('{"event":"lionlog.psu-menu-structure.v1"')).map((line) => JSON.parse(line));
       assert.deepEqual(events, [{ event: "lionlog.psu-menu-structure.v1", serviceDate: "2026-11-08",
         campus: "13", meal: "Dinner", queryOrdinal: 2, stationSections: 1, itemElements: 1,
-        validatedItems: 0, recognizedEmptyMarkers: 0 }]);
+        validatedItems: 0, recognizedEmptyMarkers: 0, nutritionLinkCandidates: 0,
+        emptyMarkerCandidates: 0 }]);
       const progress = result.stdout.split(/\r?\n/).filter((line) => line.startsWith("{"))
         .map((line) => JSON.parse(line)).at(-1);
       assert.equal(progress.phase, "failed");

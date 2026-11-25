@@ -18,6 +18,8 @@ globalThis.fetch = async (_url, init) => {
         <div class="daily-menu-item">PRIVATE_SENTINEL_NEVER_LOG</div>`
     : process.env.LIONLOG_TEST_SHAPE === "item"
     ? `<div class="menu-category-section"><h2>PRIVATE_SENTINEL_NEVER_LOG</h2><div class="daily-menu-changed">Item</div></div>`
+    : process.env.LIONLOG_TEST_SHAPE === "empty-marker"
+    ? `<p data-menu-empty>PRIVATE_SENTINEL_NEVER_LOG</p>`
     : `<div class="menu-category-changed"><h2>PRIVATE_SENTINEL_NEVER_LOG</h2><div class="daily-menu-item">Item</div></div>`;
   return new Response(`<html><body>${controls}${meal ? shape : ""}</body></html>`,
     { status: 200, headers: { "content-type": "text/html" } });
