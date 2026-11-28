@@ -114,7 +114,29 @@ test("zero-item structural failures carry bounded counts for distinct sanitized 
     assert.throws(() => parsePsuMenuHtml(changed, expected), (error: unknown) => {
       assert.ok(error instanceof PsuMenuStructureError);
       assert.deepEqual(error.counts, { stationSections: stations, itemElements: items,
-        validatedItems: 0, recognizedEmptyMarkers: 0 });
+        validatedItems: 0, recognizedEmptyMarkers: 0, nutritionLinkCandidates: 2, emptyMarkerCandidates: 0 });
+      return true;
+    });
+  }
+});
+
+test("zero-count menu failures distinguish layout clues and unmatched empty markers from a shell", async () => {
+  const html = await fixture("menu-east-lunch.sanitized.html");
+  const expected = { sourceCampusId: "11", sourceDate: "8/31/26", sourceMeal: "Lunch" };
+  const controls = html.slice(0, html.indexOf("<details"));
+  const revisedLayout = html.replaceAll("menu-category-section", "new-station")
+    .replaceAll("daily-menu-item", "new-item");
+  for (const [body, nutritionLinkCandidates, emptyMarkerCandidates] of [
+    [controls + "<main></main>", 0, 0],
+    [revisedLayout, 2, 0],
+    [controls + '<p class="daily-menu-empty">PRIVATE_SENTINEL_NEVER_LOG</p>', 0, 1],
+    [controls + '<div data-menu-empty>PRIVATE_SENTINEL_NEVER_LOG</div>'.repeat(1001), 0, 1000],
+  ] as const) {
+    assert.throws(() => parsePsuMenuHtml(body, expected), (error: unknown) => {
+      assert.ok(error instanceof PsuMenuStructureError);
+      assert.doesNotMatch(error.message, /PRIVATE_SENTINEL_NEVER_LOG/);
+      assert.deepEqual(error.counts, { stationSections: 0, itemElements: 0, validatedItems: 0,
+        recognizedEmptyMarkers: 0, nutritionLinkCandidates, emptyMarkerCandidates });
       return true;
     });
   }
